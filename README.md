@@ -29,6 +29,7 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 
 - Emacs 28 以上（`transient` 内蔵）
 - [zellij](https://zellij.dev/) がインストール済みで `$PATH` に通っていること
+- Emacs server が起動していること（`(server-start)` または `emacs --daemon`）
 
 ## インストール
 
@@ -72,7 +73,9 @@ M-x zellij-send
 
 ### 3. AI の回答を確認
 
-`C-c C-a` でメニューを開き、`a` を押すと zellij のスクリーン内容をバッファに取得します。
+Claude Code が回答を終えると、`*ai-セッション名*` バッファが**自動的に更新**されます。
+
+手動で取得する場合は `C-c C-a` でメニューを開き、`a` を押します。
 
 ## キーバインド
 
@@ -99,10 +102,49 @@ M-x zellij-send
 (setq zellij-send-executable "/usr/local/bin/zellij")
 ```
 
+## 自動受信のセットアップ（Claude Code Stop フック）
+
+Claude Code の回答完了を Emacs に自動通知する設定です。
+
+### 1. フックスクリプトを作成
+
+```sh
+mkdir -p ~/.claude/hooks
+cat > ~/.claude/hooks/stop-zellij-send.sh << 'EOF'
+#!/bin/sh
+emacsclient -e "(zellij-send--on-claude-stop)" 2>/dev/null || true
+EOF
+chmod +x ~/.claude/hooks/stop-zellij-send.sh
+```
+
+### 2. Claude Code の設定ファイルを作成
+
+`~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/stop-zellij-send.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+これで Claude Code が回答を終えるたびに `*ai-セッション名*` バッファが自動更新されます。
+
 ## 仕組み
 
 - テキスト送信: `zellij action write-chars` でテキストを送り、`zellij action write 13`（CR）で Enter を送信
 - 回答取得: `zellij action dump-screen` でペインの内容を一時ファイルに書き出し、ANSI エスケープを除去してバッファに表示
+- 自動受信: Claude Code の Stop フック → `emacsclient` → `zellij-send--on-claude-stop` → バッファ更新
 
 ## ライセンス
 

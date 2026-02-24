@@ -162,6 +162,21 @@
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?")))))
 
+;;; Stop フックハンドラ
+
+(defun zellij-send--on-claude-stop ()
+  "Claude Code 停止時に全 zellij-send バッファを dump-screen で更新する。
+~/.claude/hooks/stop-zellij-send.sh から emacsclient 経由で呼ばれる。"
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and (eq major-mode 'zellij-send-mode)
+                   zellij-send--session)
+          (let ((content (zellij-send--dump-screen zellij-send--session)))
+            (erase-buffer)
+            (insert content)
+            (goto-char (point-min))))))))
+
 ;;; エントリポイント
 
 ;;;###autoload

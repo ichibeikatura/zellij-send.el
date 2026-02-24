@@ -56,3 +56,14 @@ lexical-binding: t
 - transient の "Claude Code の回答を表示" 実行時に取得・表示する
 - "ai-セッション名"に表示する。
 - "ai-セッション名"は二人で使う黒板のようなイメージ。消したり書いたいする。本格的に読みたい時にはターミナルに戻る
+
+## 新しい方針
+- C-c C-c の後で"ai-セッション名"の入力内容はクリアされる。(これまでと同じ)
+- zellij pipe でAIの回答を"ai-セッション名"に表示させる。
+- ユーザーはそれを読み、"表示内容をクリア" あるいは編集し、AI に回答する
+
+## 参考実装
+- 送信: `tmux send-keys` → `zellij action write-chars`
+- 受信: `tmux capture-pane` のポーリング → `zellij pipe` によるプッシュ型受信
+- セッション管理: `tmux list-sessions` → `zellij list-sessions`
+
