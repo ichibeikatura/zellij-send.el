@@ -7,20 +7,20 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 `*ai-セッション名*` バッファを黒板として使い、テキストを書いて送信・AI の回答を取得・クリアを繰り返すシンプルなワークフローを提供します。
 
 ```
-┌─────────────────────────────────────┐
-│  Emacs: *ai-mysession*              │
-│  ─────────────────────────────────  │
-│  このコードの意図を説明して          │
-│                                     │
-│  C-c C-c → 送信 → バッファクリア   │
-│  C-c C-a → メニュー                │
-└─────────────────────────────────────┘
+┌──────────────────
+│  Emacs: *ai-mysession*        
+│  ─────────────────
+│  このコードの意図を説明して        
+│                               
+│  C-c C-c → 送信 → バッファクリア
+│  C-c C-a → メニュー            
+└──────────────────
          │ zellij action write-chars
          ▼
-┌─────────────────────────────────────┐
-│  zellij: mysession                  │
-│  Claude Code が回答中...            │
-└─────────────────────────────────────┘
+┌──────────────────
+│  zellij: mysession            
+│  Claude Code が回答中...     
+└──────────────────
 ```
 
 ## 必要環境
@@ -39,7 +39,15 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 (require 'zellij-send)
 ```
 
-### use-package
+### use-package + elpaca（推奨）
+
+```elisp
+(use-package zellij-send
+  :ensure (zellij-send
+           :url "https://github.com/ichibeikatura/zellij-send.el"))
+```
+
+### 手動 use-package
 
 ```elisp
 (use-package zellij-send
