@@ -20,8 +20,22 @@
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-poll-interval 2.0
+  "ポーリング間隔（秒）。0 でポーリング無効。"
+  :type 'number
+  :group 'zellij-send)
+
 (defvar-local zellij-send--session nil
   "このバッファに対応する zellij セッション名。")
+
+(defvar-local zellij-send--timer nil
+  "ポーリングタイマー。")
+
+(defvar-local zellij-send--prompt-active nil
+  "選択肢プロンプトが表示中なら non-nil。")
+
+(defvar-local zellij-send--reply-main-buffer nil
+  "返信バッファを開いた元の zellij-send バッファ。")
 
 ;;; セッション一覧の取得
 
@@ -79,6 +93,7 @@
       (user-error "送信するテキストが空です"))
     (zellij-send--send session text)
     (erase-buffer)
+    (set-buffer-modified-p nil)
     (message "送信しました → [%s]" session)))
 
 ;;; スクリーンダンプ
@@ -86,9 +101,7 @@
 (defun zellij-send--strip-ansi (str)
   "STR から ANSI エスケープシーケンスを除去して返す。"
   (let ((result str))
-    ;; CSI シーケンス: ESC [ ... 終端文字
     (setq result (replace-regexp-in-string "\033\\[[0-9;?]*[A-Za-z]" "" result))
-    ;; その他の ESC + 1文字シーケンス
     (setq result (replace-regexp-in-string "\033." "" result))
     result))
 
@@ -109,6 +122,86 @@
       (when (file-exists-p tmpfile)
         (delete-file tmpfile)))))
 
+;;; プロンプト検出・ハイライト
+
+(defun zellij-send--detect-prompt ()
+  "バッファに Claude Code の選択肢プロンプトがあれば non-nil を返す。"
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "❯[[:space:]]*[1-9]\\." nil t)))
+
+(defun zellij-send--highlight-prompt ()
+  "選択肢行をハイライトする。"
+  (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "^.*[1-9]\\..*$" nil t)
+      (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
+        (overlay-put ov 'zellij-send-prompt t)
+        (overlay-put ov 'face '(:foreground "yellow" :weight bold))))))
+
+;;; バッファ更新（共通処理）
+
+(defun zellij-send--update-buffer (content)
+  "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。"
+  (with-silent-modifications
+    (erase-buffer)
+    (insert content)
+    (goto-char (point-min)))
+  (set-buffer-modified-p nil)
+  (if (zellij-send--detect-prompt)
+      (progn
+        (setq zellij-send--prompt-active t)
+        (zellij-send--highlight-prompt)
+        (message "選択: 1 / 2 / 3 キーで選択できます"))
+    (setq zellij-send--prompt-active nil)
+    (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)))
+
+;;; ポーリング
+
+(defun zellij-send--poll ()
+  "タイマーコールバック。バッファが未編集なら dump-screen で更新する。"
+  (when (and (buffer-live-p (current-buffer))
+             zellij-send--session
+             (not (buffer-modified-p)))
+    (let ((content (zellij-send--dump-screen zellij-send--session)))
+      (unless (string= content (buffer-string))
+        (zellij-send--update-buffer content)))))
+
+(defun zellij-send--start-polling ()
+  "ポーリングタイマーを開始する。"
+  (when (and (> zellij-send-poll-interval 0)
+             (null zellij-send--timer))
+    (let ((buf (current-buffer)))
+      (setq zellij-send--timer
+            (run-at-time zellij-send-poll-interval zellij-send-poll-interval
+                         (lambda ()
+                           (when (buffer-live-p buf)
+                             (with-current-buffer buf
+                               (zellij-send--poll)))))))))
+
+(defun zellij-send--stop-polling ()
+  "ポーリングタイマーを停止する。"
+  (when zellij-send--timer
+    (cancel-timer zellij-send--timer)
+    (setq zellij-send--timer nil)))
+
+;;; 選択肢の即送信
+
+(defun zellij-send--select-or-insert (n)
+  "プロンプト中なら N 番を送信、そうでなければ数字を挿入する。"
+  (if zellij-send--prompt-active
+      (progn
+        (zellij-send--send zellij-send--session (number-to-string n))
+        (setq zellij-send--prompt-active nil)
+        (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
+        (message "選択 %d を送信しました" n))
+    (insert (number-to-string n))))
+
+(defun zellij-send-select-1 () (interactive) (zellij-send--select-or-insert 1))
+(defun zellij-send-select-2 () (interactive) (zellij-send--select-or-insert 2))
+(defun zellij-send-select-3 () (interactive) (zellij-send--select-or-insert 3))
+
 ;;; インタラクティブコマンド
 
 (defun zellij-send-show-response ()
@@ -116,17 +209,15 @@
   (interactive)
   (unless zellij-send--session
     (user-error "zellij-send バッファ外では使えません"))
-  (let* ((session zellij-send--session)
-         (content (zellij-send--dump-screen session)))
-    (erase-buffer)
-    (insert content)
-    (goto-char (point-min))
+  (let ((content (zellij-send--dump-screen zellij-send--session)))
+    (zellij-send--update-buffer content)
     (message "スクリーン内容を取得しました")))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
   (interactive)
   (erase-buffer)
+  (set-buffer-modified-p nil)
   (message "クリアしました"))
 
 (defun zellij-send-quit ()
@@ -138,6 +229,45 @@
     (zellij-send--send session "/exit")
     (kill-buffer (current-buffer))))
 
+;;; 返信バッファ
+
+(defun zellij-send--reply-send ()
+  "返信バッファの内容を送信してバッファを閉じ、元のバッファに戻る。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "セッション情報がありません"))
+  (let ((session zellij-send--session)
+        (text (string-trim (buffer-string)))
+        (main-buf zellij-send--reply-main-buffer))
+    (when (string-empty-p text)
+      (user-error "送信するテキストが空です"))
+    (zellij-send--send session text)
+    (kill-buffer (current-buffer))
+    (when (and main-buf (buffer-live-p main-buf))
+      (pop-to-buffer main-buf))
+    (message "送信しました → [%s]" session)))
+
+(defun zellij-send-reply ()
+  "返信用の空バッファを開く。C-c C-c で送信してバッファを閉じる。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (let* ((session zellij-send--session)
+         (main-buf (current-buffer))
+         (reply-buf (get-buffer-create (format "*zellij-reply-%s*" session))))
+    (with-current-buffer reply-buf
+      (erase-buffer)
+      (text-mode)
+      (setq-local zellij-send--session session)
+      (setq-local zellij-send--reply-main-buffer main-buf)
+      (let ((map (make-sparse-keymap)))
+        (set-keymap-parent map text-mode-map)
+        (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
+        (use-local-map map))
+      (setq-local header-line-format
+                  (format " Reply → [%s]  |  C-c C-c: 送信して閉じる" session)))
+    (pop-to-buffer reply-buf)))
+
 ;;; Transient メニュー
 
 (transient-define-prefix zellij-send-menu ()
@@ -145,7 +275,9 @@
   [["表示"
     ("a" "Claude Code の回答を表示" zellij-send-show-response)
     ("c" "表示内容をクリア"         zellij-send-clear-buffer)
-    ("q" "終了"                     zellij-send-quit)]])
+    ("q" "終了"                     zellij-send-quit)]
+   ["送信"
+    ("e" "答える（返信バッファを開く）" zellij-send-reply)]])
 
 ;;; メジャーモード
 
@@ -153,6 +285,9 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'zellij-send-send)
     (define-key map (kbd "C-c C-a") #'zellij-send-menu)
+    (define-key map (kbd "1") #'zellij-send-select-1)
+    (define-key map (kbd "2") #'zellij-send-select-2)
+    (define-key map (kbd "3") #'zellij-send-select-3)
     map)
   "zellij-send-mode のキーマップ。")
 
@@ -161,7 +296,9 @@
 \\{zellij-send-mode-map}"
   (setq-local header-line-format
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
-                              (or zellij-send--session "?")))))
+                              (or zellij-send--session "?"))))
+  (zellij-send--start-polling)
+  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t))
 
 ;;; Stop フックハンドラ
 
@@ -174,9 +311,7 @@
         (when (and (eq major-mode 'zellij-send-mode)
                    zellij-send--session)
           (let ((content (zellij-send--dump-screen zellij-send--session)))
-            (erase-buffer)
-            (insert content)
-            (goto-char (point-min))))))))
+            (zellij-send--update-buffer content)))))))
 
 ;;; エントリポイント
 
