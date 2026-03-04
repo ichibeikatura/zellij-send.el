@@ -29,7 +29,6 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 
 - Emacs 28 以上（`transient` 内蔵）
 - [zellij](https://zellij.dev/) がインストール済みで `$PATH` に通っていること
-- Emacs server が起動していること（`(server-start)` または `emacs --daemon`）
 
 ## インストール
 
@@ -106,6 +105,8 @@ Claude Code が回答を終えると、`*ai-セッション名*` バッファが
 
 Claude Code の回答完了を Emacs に自動通知する設定です。
 
+この機能を使うには Emacs server が起動している必要があります（`(server-start)` または `emacs --daemon`）。
+
 ### 1. フックスクリプトを作成
 
 ```sh
@@ -139,6 +140,21 @@ chmod +x ~/.claude/hooks/stop-zellij-send.sh
 ```
 
 これで Claude Code が回答を終えるたびに `*ai-セッション名*` バッファが自動更新されます。
+
+## トラブルシューティング
+
+**「zellij セッションが見つかりません」と表示される**
+- zellij が起動していることを確認してください。
+- `zellij list-sessions` をターミナルで実行して出力があるか確認してください。
+- `zellij-send-executable` に正しいパスが設定されているか確認してください（`M-x describe-variable RET zellij-send-executable`）。
+
+**自動受信が動かない（バッファが更新されない）**
+- Emacs server が起動しているか確認してください（`M-x server-start` または `emacs --daemon`）。
+- `emacsclient -e t` をターミナルで実行して接続できるか確認してください。
+- `~/.claude/hooks/stop-zellij-send.sh` に実行権限があるか確認してください（`chmod +x`）。
+
+**日本語が文字化けする / 送信できない**
+- `zellij action write-chars` は UTF-8 を前提としています。ターミナルのエンコーディングが UTF-8 になっているか確認してください。
 
 ## 仕組み
 

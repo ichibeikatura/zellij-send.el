@@ -103,8 +103,9 @@
           (let ((raw (with-temp-buffer
                        (insert-file-contents tmpfile)
                        (buffer-string))))
-            (zellij-send--strip-ansi
-             (replace-regexp-in-string "\r" "" raw))))
+            (replace-regexp-in-string "─" ""
+             (zellij-send--strip-ansi
+              (replace-regexp-in-string "\r" "" raw)))))
       (when (file-exists-p tmpfile)
         (delete-file tmpfile)))))
 
