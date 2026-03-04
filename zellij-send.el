@@ -37,6 +37,9 @@
 (defvar-local zellij-send--reply-main-buffer nil
   "返信バッファを開いた元の zellij-send バッファ。")
 
+(defvar-local zellij-send--reply-window-config nil
+  "返信バッファを開く前のウィンドウ構成。")
+
 ;;; セッション一覧の取得
 
 (defun zellij-send--list-sessions ()
@@ -238,13 +241,16 @@
     (user-error "セッション情報がありません"))
   (let ((session zellij-send--session)
         (text (string-trim (buffer-string)))
-        (main-buf zellij-send--reply-main-buffer))
+        (main-buf zellij-send--reply-main-buffer)
+        (wconf zellij-send--reply-window-config))
     (when (string-empty-p text)
       (user-error "送信するテキストが空です"))
     (zellij-send--send session text)
     (kill-buffer (current-buffer))
-    (when (and main-buf (buffer-live-p main-buf))
-      (pop-to-buffer main-buf))
+    (if (window-configuration-p wconf)
+        (set-window-configuration wconf)
+      (when (and main-buf (buffer-live-p main-buf))
+        (pop-to-buffer main-buf)))
     (message "送信しました → [%s]" session)))
 
 (defun zellij-send-reply ()
@@ -254,12 +260,14 @@
     (user-error "zellij-send バッファ外では使えません"))
   (let* ((session zellij-send--session)
          (main-buf (current-buffer))
+         (wconf (current-window-configuration))
          (reply-buf (get-buffer-create (format "*zellij-reply-%s*" session))))
     (with-current-buffer reply-buf
       (erase-buffer)
       (text-mode)
       (setq-local zellij-send--session session)
       (setq-local zellij-send--reply-main-buffer main-buf)
+      (setq-local zellij-send--reply-window-config wconf)
       (let ((map (make-sparse-keymap)))
         (set-keymap-parent map text-mode-map)
         (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
