@@ -325,7 +325,8 @@
       (with-current-buffer buf
         (when (and (eq major-mode 'zellij-send-mode)
                    zellij-send--session
-                   (not zellij-send--user-cleared))
+                   (not zellij-send--user-cleared)
+                   (not (buffer-modified-p)))
           (let ((content (zellij-send--dump-screen zellij-send--session)))
             (zellij-send--update-buffer content)))))))
 
