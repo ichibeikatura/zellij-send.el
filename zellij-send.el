@@ -34,6 +34,9 @@
 (defvar-local zellij-send--prompt-active nil
   "選択肢プロンプトが表示中なら non-nil。")
 
+(defvar-local zellij-send--user-cleared nil
+  "ユーザーが意図してクリアした場合 non-nil。ポーリング・Stop フックの上書きを防ぐ。")
+
 (defvar-local zellij-send--reply-main-buffer nil
   "返信バッファを開いた元の zellij-send バッファ。")
 
@@ -97,6 +100,7 @@
     (zellij-send--send session text)
     (erase-buffer)
     (set-buffer-modified-p nil)
+    (setq zellij-send--user-cleared nil)
     (message "送信しました → [%s]" session)))
 
 ;;; スクリーンダンプ
@@ -163,10 +167,11 @@
 ;;; ポーリング
 
 (defun zellij-send--poll ()
-  "タイマーコールバック。バッファが未編集なら dump-screen で更新する。"
+  "タイマーコールバック。バッファが未編集かつユーザーがクリアしていなければ dump-screen で更新する。"
   (when (and (buffer-live-p (current-buffer))
              zellij-send--session
-             (not (buffer-modified-p)))
+             (not (buffer-modified-p))
+             (not zellij-send--user-cleared))
     (let ((content (zellij-send--dump-screen zellij-send--session)))
       (unless (string= content (buffer-string))
         (zellij-send--update-buffer content)))))
@@ -221,6 +226,7 @@
   (interactive)
   (erase-buffer)
   (set-buffer-modified-p nil)
+  (setq zellij-send--user-cleared t)
   (message "クリアしました"))
 
 (defun zellij-send-quit ()
@@ -312,12 +318,14 @@
 
 (defun zellij-send--on-claude-stop ()
   "Claude Code 停止時に全 zellij-send バッファを dump-screen で更新する。
-~/.claude/hooks/stop-zellij-send.sh から emacsclient 経由で呼ばれる。"
+~/.claude/hooks/stop-zellij-send.sh から emacsclient 経由で呼ばれる。
+ユーザーが意図してクリアしたバッファは更新しない。"
   (dolist (buf (buffer-list))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (and (eq major-mode 'zellij-send-mode)
-                   zellij-send--session)
+                   zellij-send--session
+                   (not zellij-send--user-cleared))
           (let ((content (zellij-send--dump-screen zellij-send--session)))
             (zellij-send--update-buffer content)))))))
 
