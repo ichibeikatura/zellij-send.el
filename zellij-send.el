@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'transient)
+(require 'markdown-mode)
 
 (defgroup zellij-send nil
   "Send text to zellij sessions."
@@ -305,7 +306,7 @@
     map)
   "zellij-send-mode のキーマップ。")
 
-(define-derived-mode zellij-send-mode text-mode "ZellijSend"
+(define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
   "zellij セッションにテキストを送るためのモード。
 \\{zellij-send-mode-map}"
   (setq-local header-line-format
