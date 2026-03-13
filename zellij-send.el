@@ -1,7 +1,11 @@
 ;;; zellij-send.el --- Send text to zellij sessions from Emacs -*- lexical-binding: t -*-
 
-;; Copyright (C) 2026
+;; Copyright (C) 2026 桂市兵衛
 ;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Author: 桂市兵衛
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "28.1") (transient "0.4"))
+;; URL: https://github.com/ichibeikatura/zellij-send.el
 
 ;;; Commentary:
 ;; Emacs から zellij セッションに日本語文字列を送る拡張。
@@ -10,7 +14,6 @@
 ;;; Code:
 
 (require 'transient)
-(require 'markdown-mode)
 
 (defgroup zellij-send nil
   "Send text to zellij sessions."
@@ -114,19 +117,20 @@
     result))
 
 (defun zellij-send--dump-screen (session)
-  "SESSION のスクリーン内容を文字列として返す。"
+  "SESSION のスクリーン内容を文字列として返す。失敗時は nil を返す。"
   (let ((tmpfile (make-temp-file "zellij-dump-")))
     (unwind-protect
-        (progn
-          (call-process zellij-send-executable nil nil nil
-                        "--session" session
-                        "action" "dump-screen" tmpfile)
-          (let ((raw (with-temp-buffer
-                       (insert-file-contents tmpfile)
-                       (buffer-string))))
-            (replace-regexp-in-string "─" ""
-             (zellij-send--strip-ansi
-              (replace-regexp-in-string "\r" "" raw)))))
+        (let ((exit-code (call-process zellij-send-executable nil nil nil
+                                       "--session" session
+                                       "action" "dump-screen" tmpfile)))
+          (if (zerop exit-code)
+              (let ((raw (with-temp-buffer
+                           (insert-file-contents tmpfile)
+                           (buffer-string))))
+                (replace-regexp-in-string "^─+" ""
+                 (zellij-send--strip-ansi
+                  (replace-regexp-in-string "\r" "" raw))))
+            nil))
       (when (file-exists-p tmpfile)
         (delete-file tmpfile)))))
 
@@ -143,7 +147,7 @@
   (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
   (save-excursion
     (goto-char (point-min))
-    (while (re-search-forward "^.*[1-9]\\..*$" nil t)
+    (while (re-search-forward "^.*❯[[:space:]]*[1-9]\\..*$" nil t)
       (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
         (overlay-put ov 'zellij-send-prompt t)
         (overlay-put ov 'face 'highlight)))))
@@ -174,7 +178,7 @@
              (not (buffer-modified-p))
              (not zellij-send--user-cleared))
     (let ((content (zellij-send--dump-screen zellij-send--session)))
-      (unless (string= content (buffer-string))
+      (when (and content (not (string= content (buffer-string))))
         (zellij-send--update-buffer content)))))
 
 (defun zellij-send--start-polling ()
@@ -201,6 +205,8 @@
   "プロンプト中なら N 番を送信、そうでなければ数字を挿入する。"
   (if zellij-send--prompt-active
       (progn
+        (unless zellij-send--session
+          (user-error "zellij-send バッファ外では使えません"))
         (zellij-send--send zellij-send--session (number-to-string n))
         (setq zellij-send--prompt-active nil)
         (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
@@ -219,8 +225,11 @@
   (unless zellij-send--session
     (user-error "zellij-send バッファ外では使えません"))
   (let ((content (zellij-send--dump-screen zellij-send--session)))
-    (zellij-send--update-buffer content)
-    (message "スクリーン内容を取得しました")))
+    (if content
+        (progn
+          (zellij-send--update-buffer content)
+          (message "スクリーン内容を取得しました"))
+      (message "スクリーン内容の取得に失敗しました"))))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
@@ -269,6 +278,13 @@
     (zellij-send--send zellij-send--session (number-to-string n))
     (message "送信しました: %d → [%s]" n zellij-send--session)))
 
+(defvar zellij-send-reply-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map text-mode-map)
+    (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
+    map)
+  "zellij-send 返信バッファのキーマップ。")
+
 (defun zellij-send-reply ()
   "返信用の空バッファを開く。C-c C-c で送信してバッファを閉じる。"
   (interactive)
@@ -284,10 +300,7 @@
       (setq-local zellij-send--session session)
       (setq-local zellij-send--reply-main-buffer main-buf)
       (setq-local zellij-send--reply-window-config wconf)
-      (let ((map (make-sparse-keymap)))
-        (set-keymap-parent map text-mode-map)
-        (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
-        (use-local-map map))
+      (use-local-map zellij-send-reply-mode-map)
       (setq-local header-line-format
                   (format " Reply → [%s]  |  C-c C-c: 送信して閉じる" session)))
     (pop-to-buffer reply-buf)))
@@ -316,17 +329,27 @@
     map)
   "zellij-send-mode のキーマップ。")
 
-(define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
-  "zellij セッションにテキストを送るためのモード。
-\\{zellij-send-mode-map}"
+(defun zellij-send--mode-setup ()
+  "zellij-send-mode の共通セットアップ処理。"
   (setq-local header-line-format
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
   (zellij-send--start-polling)
   (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t))
 
+(if (require 'markdown-mode nil t)
+    (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
+      "zellij セッションにテキストを送るためのモード。
+\\{zellij-send-mode-map}"
+      (zellij-send--mode-setup))
+  (define-derived-mode zellij-send-mode text-mode "ZellijSend"
+    "zellij セッションにテキストを送るためのモード。
+\\{zellij-send-mode-map}"
+    (zellij-send--mode-setup)))
+
 ;;; Stop フックハンドラ
 
+;;;###autoload
 (defun zellij-send--on-claude-stop ()
   "Claude Code 停止時に全 zellij-send バッファを dump-screen で更新する。
 ~/.claude/hooks/stop-zellij-send.sh から emacsclient 経由で呼ばれる。
@@ -339,7 +362,8 @@
                    (not zellij-send--user-cleared)
                    (not (buffer-modified-p)))
           (let ((content (zellij-send--dump-screen zellij-send--session)))
-            (zellij-send--update-buffer content)))))))
+            (when content
+              (zellij-send--update-buffer content))))))))
 
 ;;; エントリポイント
 

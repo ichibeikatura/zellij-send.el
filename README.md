@@ -29,6 +29,7 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 
 - Emacs 28 以上（`transient` 内蔵）
 - [zellij](https://zellij.dev/) がインストール済みで `$PATH` に通っていること
+- [`markdown-mode`](https://github.com/jrblevin/markdown-mode)（オプション）：インストール済みの場合、マークダウン装飾が有効になります
 
 ## インストール
 
@@ -143,7 +144,7 @@ chmod +x ~/.claude/hooks/stop-zellij-send.sh
 
 ### 2. Claude Code の設定ファイルを作成
 
-`~/.claude/settings.json`:
+`~/.claude/settings.json`（Claude Code のバージョンによってパスや形式が異なる場合があります）:
 
 ```json
 {
