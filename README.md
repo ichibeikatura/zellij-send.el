@@ -1,48 +1,50 @@
 # zellij-send.el
 
-Emacs から [zellij](https://zellij.dev/) セッションの AI エージェント（Claude Code など）にテキストを送る Emacs 拡張です。
+English | [日本語](README.ja.md)
 
-## 概要
+An Emacs package for sending text to [zellij](https://zellij.dev/) session panes — designed for use with AI coding agents like Claude Code.
 
-`*ai-セッション名*` バッファを黒板として使い、テキストを書いて送信・AI の回答を取得・クリアを繰り返すシンプルなワークフローを提供します。
+## Overview
+
+Use the `*ai-session-name*` buffer as a shared blackboard: write your message, send it, read the AI's response, and repeat.
 
 ![Screen](Screen.png)
 
 ```
 ┌──────────────────────────────────────┐
-│  Emacs: *ai-mysession*                │
+│  Emacs: *ai-mysession*               │
 │  ──────────────────────────────────  │
-│  このコードの意図を説明して          │
+│  Explain the intent of this code     │
 │                                      │
-│  C-c C-c → 送信 → バッファクリア     │
-│  C-c C-a → メニュー                  │
+│  C-c C-c → send → buffer cleared    │
+│  C-c C-a → menu                     │
 └──────────────────────────────────────┘
          │ zellij action write-chars
          ▼
 ┌──────────────────────────────────────┐
 │  zellij: mysession                   │
-│  Claude Code が回答中...             │
+│  Claude Code is replying...          │
 └──────────────────────────────────────┘
 ```
 
-## 必要環境
+## Requirements
 
-- Emacs 28 以上（`transient` 内蔵）
-- [zellij](https://zellij.dev/) がインストール済みで `$PATH` に通っていること
-- [`markdown-mode`](https://github.com/jrblevin/markdown-mode)（オプション）：インストール済みの場合、マークダウン装飾が有効になります
+- Emacs 28 or later (`transient` is built in)
+- [zellij](https://zellij.dev/) installed and available on `$PATH`
+- [`markdown-mode`](https://github.com/jrblevin/markdown-mode) (optional): enables Markdown font decoration when installed
 
-## インストール
+## Installation
 
-### 手動
+### Manual
 
-`zellij-send.el` をロードパスに置き、`init.el` に追加します：
+Put `zellij-send.el` on your load path and add to `init.el`:
 
 ```elisp
 (add-to-list 'load-path "/path/to/zellij-send")
 (require 'zellij-send)
 ```
 
-### use-package + elpaca（推奨）
+### use-package + elpaca (recommended)
 
 ```elisp
 (use-package zellij-send
@@ -50,88 +52,88 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
            :url "https://github.com/ichibeikatura/zellij-send.el"))
 ```
 
-### 手動 use-package
+### use-package (manual load path)
 
 ```elisp
 (use-package zellij-send
   :load-path "/path/to/zellij-send")
 ```
 
-## 使い方
+## Usage
 
-### 1. セッションを開く
+### 1. Open a session
 
 ```
 M-x zellij-send
 ```
 
-起動中の zellij セッション一覧が表示されます。選択すると `*ai-セッション名*` バッファが開きます。
+A list of running zellij sessions is shown. Selecting one opens the `*ai-session-name*` buffer.
 
-### 2. テキストを送信
+### 2. Send text
 
-バッファにテキストを書いて `C-c C-c` で送信します。送信後バッファは自動的にクリアされます。
+Type your message in the buffer and press `C-c C-c` to send. The buffer is cleared automatically after sending.
 
-### 3. AI の回答を確認
+### 3. Read the AI's response
 
-Claude Code が回答を終えると、`*ai-セッション名*` バッファが**自動的に更新**されます。
+When Claude Code finishes its reply, the `*ai-session-name*` buffer **updates automatically**.
 
-手動で取得する場合は `C-c C-a` でメニューを開き、`a` を押します。
+To fetch manually, open the menu with `C-c C-a` and press `a`.
 
-## キーバインド
+## Key Bindings
 
-`*ai-セッション名*` バッファ内で使えるキーバインドです。
+Inside the `*ai-session-name*` buffer:
 
-| キー      | 動作                                   |
-|-----------|----------------------------------------|
-| `C-c C-c` | テキストを送信（バッファはクリア）     |
-| `C-c C-a` | メニューを開く                         |
-
-### メニュー（`C-c C-a`）
-
-| キー | 動作                                               |
-|------|----------------------------------------------------|
-| `a`  | AI の回答を表示（zellij スクリーンをダンプ）       |
-| `c`  | バッファの内容をクリア                             |
-| `q`  | `/exit` を送信してセッションを終了・バッファを閉じる |
-| `e`  | 返信バッファを開く（AI の回答を読みながら返信）    |
-
-### 返信バッファ（`C-c C-a` → `e`）
-
-`*zellij-reply-セッション名*` バッファが開きます。AI の回答を `*ai-セッション名*` バッファで読みながら、返信を別バッファで書けます。
-
-| キー      | 動作                                    |
+| Key       | Action                                  |
 |-----------|-----------------------------------------|
-| `C-c C-c` | テキストを送信してバッファを閉じる      |
+| `C-c C-c` | Send text (buffer is cleared)           |
+| `C-c C-a` | Open menu                               |
 
-送信後は元のウィンドウ構成に自動的に戻ります。
+### Menu (`C-c C-a`)
 
-### 選択肢プロンプトへの即応答
+| Key | Action                                                    |
+|-----|-----------------------------------------------------------|
+| `a` | Show AI response (dumps the zellij screen)                |
+| `c` | Clear the buffer                                          |
+| `q` | Send `/exit` to end the session and close the buffer      |
+| `e` | Open reply buffer (write a reply while reading the response) |
 
-Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*ai-セッション名*` バッファが自動更新されて選択肢が黄色でハイライトされます。
+### Reply buffer (`C-c C-a` → `e`)
 
-| キー | 動作                  |
-|------|-----------------------|
-| `1`  | 選択肢 1 を即送信     |
-| `2`  | 選択肢 2 を即送信     |
-| `3`  | 選択肢 3 を即送信     |
+Opens `*zellij-reply-session-name*`. You can read the AI's response in `*ai-session-name*` while composing your reply in the separate buffer.
 
-プロンプトが表示されていない場合は通常の数字入力として機能します。
+| Key       | Action                              |
+|-----------|-------------------------------------|
+| `C-c C-c` | Send text and close the buffer      |
 
-## カスタマイズ
+After sending, the original window layout is restored automatically.
 
-`zellij` の実行ファイルのパスを変更する場合：
+### Quick response to numbered prompts
+
+When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted.
+
+| Key | Action                      |
+|-----|-----------------------------|
+| `1` | Send choice 1 immediately   |
+| `2` | Send choice 2 immediately   |
+| `3` | Send choice 3 immediately   |
+
+When no prompt is active, these keys insert the digit as normal.
+
+## Customization
+
+To set a custom path to the `zellij` executable:
 
 ```elisp
 (setq zellij-send-executable "/usr/local/bin/zellij")
 ```
 
-## 自動受信のセットアップ（Claude Code Stop フック）
+## Auto-receive Setup (Claude Code Stop Hook)
 
-Claude Code の回答完了を Emacs に自動通知する設定です。
+Automatically update the Emacs buffer whenever Claude Code finishes a response.
 
-この機能を使うには Emacs server が起動している必要があります（`(server-start)` または `emacs --daemon`）。
+This requires an Emacs server to be running (`(server-start)` or `emacs --daemon`).
 
-### 1. フックスクリプトを作成
+### 1. Create the hook script
 
 ```sh
 mkdir -p ~/.claude/hooks
@@ -142,9 +144,9 @@ EOF
 chmod +x ~/.claude/hooks/stop-zellij-send.sh
 ```
 
-### 2. Claude Code の設定ファイルを作成
+### 2. Register the hook in Claude Code settings
 
-`~/.claude/settings.json`（Claude Code のバージョンによってパスや形式が異なる場合があります）:
+`~/.claude/settings.json` (the path and format may vary depending on your Claude Code version):
 
 ```json
 {
@@ -163,31 +165,31 @@ chmod +x ~/.claude/hooks/stop-zellij-send.sh
 }
 ```
 
-これで Claude Code が回答を終えるたびに `*ai-セッション名*` バッファが自動更新されます。
+With this in place, the `*ai-session-name*` buffer updates every time Claude Code finishes a response.
 
-## トラブルシューティング
+## Troubleshooting
 
-**「zellij セッションが見つかりません」と表示される**
-- zellij が起動していることを確認してください。
-- `zellij list-sessions` をターミナルで実行して出力があるか確認してください。
-- `zellij-send-executable` に正しいパスが設定されているか確認してください（`M-x describe-variable RET zellij-send-executable`）。
+**"No zellij sessions found"**
+- Make sure zellij is running.
+- Run `zellij list-sessions` in a terminal to verify there is output.
+- Check that `zellij-send-executable` points to the correct path (`M-x describe-variable RET zellij-send-executable`).
 
-**自動受信が動かない（バッファが更新されない）**
-- Emacs server が起動しているか確認してください（`M-x server-start` または `emacs --daemon`）。
-- `emacsclient -e t` をターミナルで実行して接続できるか確認してください。
-- `~/.claude/hooks/stop-zellij-send.sh` に実行権限があるか確認してください（`chmod +x`）。
+**Auto-receive not working (buffer not updating)**
+- Make sure the Emacs server is running (`M-x server-start` or `emacs --daemon`).
+- Run `emacsclient -e t` in a terminal to verify the connection.
+- Check that `~/.claude/hooks/stop-zellij-send.sh` is executable (`chmod +x`).
 
-**日本語が文字化けする / 送信できない**
-- `zellij action write-chars` は UTF-8 を前提としています。ターミナルのエンコーディングが UTF-8 になっているか確認してください。
+**Garbled characters / text not sending**
+- `zellij action write-chars` assumes UTF-8. Make sure your terminal encoding is set to UTF-8.
 
-## 仕組み
+## How It Works
 
-- テキスト送信: `zellij action write-chars` でテキストを送り、`zellij action write 13`（CR）で Enter を送信
-- 回答取得: `zellij action dump-screen` でペインの内容を一時ファイルに書き出し、ANSI エスケープを除去してバッファに表示
-- 自動受信（Stop フック）: Claude Code の Stop フック → `emacsclient` → `zellij-send--on-claude-stop` → 全 zellij-send バッファを更新
-- ポーリング: `zellij-send-poll-interval`（デフォルト 2 秒）間隔でスクリーン内容を取得・差分更新。ユーザーが入力中（`buffer-modified-p`）は更新しない
-- 返信バッファ: `pop-to-buffer` で別ウィンドウに開き、送信後は `set-window-configuration` でウィンドウ構成を復元
+- **Sending text**: `zellij action write-chars` sends the text; `zellij action write 13` (CR) sends Enter
+- **Reading response**: `zellij action dump-screen` dumps the pane content to a temp file; ANSI escapes are stripped before displaying in the buffer
+- **Auto-receive (Stop hook)**: Claude Code Stop hook → `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
+- **Polling**: Fetches screen content every `zellij-send-poll-interval` seconds (default: 2); skips update while the user is editing (`buffer-modified-p`)
+- **Reply buffer**: Opens via `pop-to-buffer`; after sending, `set-window-configuration` restores the previous window layout
 
-## ライセンス
+## License
 
-GPL v3 以降。詳細は [LICENSE](LICENSE) を参照してください。
+GPL v3 or later. See [LICENSE](LICENSE) for details.
