@@ -146,7 +146,7 @@
     (while (re-search-forward "^.*[1-9]\\..*$" nil t)
       (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
         (overlay-put ov 'zellij-send-prompt t)
-        (overlay-put ov 'face '(:foreground "yellow" :weight bold))))))
+        (overlay-put ov 'face 'highlight)))))
 
 ;;; バッファ更新（共通処理）
 
@@ -260,6 +260,15 @@
         (pop-to-buffer main-buf)))
     (message "送信しました → [%s]" session)))
 
+(defun zellij-send-reply-number ()
+  "数字を入力して zellij セッションに送信する。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (let ((n (read-number "送る数字: ")))
+    (zellij-send--send zellij-send--session (number-to-string n))
+    (message "送信しました: %d → [%s]" n zellij-send--session)))
+
 (defun zellij-send-reply ()
   "返信用の空バッファを開く。C-c C-c で送信してバッファを閉じる。"
   (interactive)
@@ -292,7 +301,8 @@
     ("c" "表示内容をクリア"         zellij-send-clear-buffer)
     ("q" "終了"                     zellij-send-quit)]
    ["送信"
-    ("e" "答える（返信バッファを開く）" zellij-send-reply)]])
+    ("e" "答える（返信バッファを開く）" zellij-send-reply)
+    ("n" "答える（数字を送る）"         zellij-send-reply-number)]])
 
 ;;; メジャーモード
 
