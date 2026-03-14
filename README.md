@@ -96,6 +96,7 @@ Inside the `*ai-session-name*` buffer:
 | `c` | Clear the buffer                                          |
 | `q` | Send `/exit` to end the session and close the buffer      |
 | `e` | Open reply buffer (write a reply while reading the response) |
+| `n` | Send a number (prompts for input)                         |
 
 ### Reply buffer (`C-c C-a` → `e`)
 
