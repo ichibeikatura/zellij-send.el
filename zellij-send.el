@@ -217,6 +217,33 @@
 (defun zellij-send-select-2 () (interactive) (zellij-send--select-or-insert 2))
 (defun zellij-send-select-3 () (interactive) (zellij-send--select-or-insert 3))
 
+;;; Claude Code コマンド
+
+(defun zellij-send-compact ()
+  "セッションに /compact を送信してコンテキストを圧縮する。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--send zellij-send--session "/compact")
+  (message "圧縮しました"))
+
+(defun zellij-send-cc-clear ()
+  "セッションに /clear を送信してコンテキストをリセットする。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--send zellij-send--session "/clear")
+  (message "クリアしました（コンテキスト）"))
+
+(defun zellij-send-save-progress ()
+  "現在の作業内容を CLAUDE.md に記録するよう依頼する。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--send zellij-send--session
+                     "ここまでの作業内容と決定事項を CLAUDE.md に追記して")
+  (message "記録を依頼しました"))
+
 ;;; インタラクティブコマンド
 
 (defun zellij-send-show-response ()
@@ -311,11 +338,15 @@
   "ZellijSend メニュー"
   [["表示"
     ("a" "Claude Code の回答を表示" zellij-send-show-response)
-    ("c" "表示内容をクリア"         zellij-send-clear-buffer)
+    ("x" "表示内容をクリア"         zellij-send-clear-buffer)
     ("q" "終了"                     zellij-send-quit)]
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
-    ("n" "答える（数字を送る）"         zellij-send-reply-number)]])
+    ("n" "答える（数字を送る）"         zellij-send-reply-number)]
+   ["命令"
+    ("c" "圧縮 (/compact)"         zellij-send-compact)
+    ("C" "リセット (/clear)"       zellij-send-cc-clear)
+    ("s" "作業を記録"              zellij-send-save-progress)]])
 
 ;;; メジャーモード
 
