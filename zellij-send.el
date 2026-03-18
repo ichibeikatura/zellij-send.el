@@ -24,6 +24,11 @@
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-default-command "claude"
+  "新規セッションで起動するコマンド。"
+  :type 'string
+  :group 'zellij-send)
+
 (defcustom zellij-send-poll-interval 2.0
   "ポーリング間隔（秒）。0 でポーリング無効。"
   :type 'number
@@ -398,17 +403,55 @@
 
 ;;; エントリポイント
 
+(defun zellij-send--guess-directory (session)
+  "SESSION 名に対応するディレクトリを推定して返す。見つからなければ nil。"
+  (let ((home-dir (expand-file-name session "~/")))
+    (cond
+     ((string= (file-name-nondirectory
+                (directory-file-name default-directory))
+               session)
+      default-directory)
+     ((file-directory-p home-dir)
+      (file-name-as-directory home-dir))
+     (t nil))))
+
+(defun zellij-send--create-new-session ()
+  "新規 zellij セッションを作成して `zellij-send-default-command' を起動する。"
+  (let* ((dir (directory-file-name
+               (expand-file-name
+                (read-directory-name "作業ディレクトリ: " default-directory))))
+         (session (file-name-nondirectory dir))
+         (sessions (zellij-send--list-sessions)))
+    (when (member session sessions)
+      (user-error "セッション「%s」はすでに存在します" session))
+    (start-process "zellij-new-session" nil
+                   zellij-send-executable
+                   "--session" session
+                   "options" "--default-cwd" dir)
+    (sleep-for 0.5)
+    (zellij-send--send session zellij-send-default-command)
+    (let ((buf (zellij-send--get-or-create-buffer session)))
+      (with-current-buffer buf
+        (setq-local default-directory (file-name-as-directory dir)))
+      (switch-to-buffer buf)
+      (goto-char (point-max)))))
+
 ;;;###autoload
 (defun zellij-send ()
   "zellij セッションを選択して入力バッファを開く。"
   (interactive)
-  (let ((sessions (zellij-send--list-sessions)))
-    (unless sessions
-      (user-error "zellij セッションが見つかりません"))
-    (let* ((session (completing-read "Session: " sessions nil t))
-           (buf (zellij-send--get-or-create-buffer session)))
-      (switch-to-buffer buf)
-      (goto-char (point-max)))))
+  (let* ((sessions (zellij-send--list-sessions))
+         (choices (cons "[New]" sessions))
+         (choice (completing-read "Session: " choices nil t)))
+    (if (string= choice "[New]")
+        (zellij-send--create-new-session)
+      (let ((buf (zellij-send--get-or-create-buffer choice)))
+        (let ((dir (zellij-send--guess-directory choice)))
+          (when dir
+            (with-current-buffer buf
+              (setq-local default-directory dir))))
+        (switch-to-buffer buf)
+        (goto-char (point-max))))))
 
 (provide 'zellij-send)
 ;;; zellij-send.el ends here
