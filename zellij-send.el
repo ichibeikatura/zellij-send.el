@@ -13,6 +13,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'transient)
 
 (defgroup zellij-send nil
@@ -34,6 +35,12 @@
   :type 'number
   :group 'zellij-send)
 
+(defcustom zellij-send-ready-regexp "^❯\\s-*$"
+  "AIツールが入力待ちに戻ったことを示すプロンプトの正規表現。
+Claude Code のデフォルトは ❯。Gemini CLI 等では変更する。"
+  :type 'regexp
+  :group 'zellij-send)
+
 (defvar-local zellij-send--session nil
   "このバッファに対応する zellij セッション名。")
 
@@ -51,6 +58,13 @@
 
 (defvar-local zellij-send--reply-window-config nil
   "返信バッファを開く前のウィンドウ構成。")
+
+(defvar-local zellij-send--notifying nil
+  "AI応答完了の通知中なら non-nil。modeline 表示に使う。")
+
+(defvar-local zellij-send--was-busy nil
+  "直前のポーリングで AI が処理中だった場合 non-nil。
+busy → ready への遷移を検出するために使う。")
 
 ;;; セッション一覧の取得
 
@@ -174,6 +188,39 @@
     (setq zellij-send--prompt-active nil)
     (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)))
 
+;;; 通知
+
+(defun zellij-send--is-ready (content)
+  "CONTENT の末尾5行に `zellij-send-ready-regexp' がマッチすれば non-nil を返す。"
+  (let* ((lines (split-string content "\n"))
+         (tail (last lines 5))
+         (tail-str (mapconcat #'identity tail "\n")))
+    (string-match-p zellij-send-ready-regexp tail-str)))
+
+(defun zellij-send--mode-line-indicator ()
+  "通知中の zellij-send バッファがあれば modeline 用文字列を返す。"
+  (let ((notifying-bufs
+         (cl-remove-if-not
+          (lambda (buf)
+            (and (buffer-live-p buf)
+                 (buffer-local-value 'zellij-send--notifying buf)))
+          (buffer-list))))
+    (if notifying-bufs
+        (propertize (format " [AI Done:%s]"
+                            (mapconcat
+                             (lambda (buf)
+                               (buffer-local-value 'zellij-send--session buf))
+                             notifying-bufs ","))
+                    'face 'warning)
+      "")))
+
+(defun zellij-send--clear-notification-on-switch (&rest _)
+  "カレントバッファが通知中の zellij-send バッファなら通知をクリアする。"
+  (when (and (eq major-mode 'zellij-send-mode)
+             zellij-send--notifying)
+    (setq zellij-send--notifying nil)
+    (force-mode-line-update t)))
+
 ;;; ポーリング
 
 (defun zellij-send--poll ()
@@ -184,7 +231,15 @@
              (not zellij-send--user-cleared))
     (let ((content (zellij-send--dump-screen zellij-send--session)))
       (when (and content (not (string= content (buffer-string))))
-        (zellij-send--update-buffer content)))))
+        (zellij-send--update-buffer content)
+        (let ((ready (zellij-send--is-ready content)))
+          (cond
+           ((and ready zellij-send--was-busy)
+            (setq zellij-send--was-busy nil)
+            (setq zellij-send--notifying t)
+            (force-mode-line-update t))
+           ((not ready)
+            (setq zellij-send--was-busy t))))))))
 
 (defun zellij-send--start-polling ()
   "ポーリングタイマーを開始する。"
@@ -371,7 +426,9 @@
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
   (zellij-send--start-polling)
-  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t))
+  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t)
+  (add-hook 'window-buffer-change-functions
+            #'zellij-send--clear-notification-on-switch))
 
 (if (require 'markdown-mode nil t)
     (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
@@ -399,7 +456,10 @@
                    (not (buffer-modified-p)))
           (let ((content (zellij-send--dump-screen zellij-send--session)))
             (when content
-              (zellij-send--update-buffer content))))))))
+              (zellij-send--update-buffer content)
+              (when (zellij-send--is-ready content)
+                (setq zellij-send--notifying t)
+                (force-mode-line-update t)))))))))
 
 ;;; エントリポイント
 
@@ -441,7 +501,7 @@
   "zellij セッションを選択して入力バッファを開く。"
   (interactive)
   (let* ((sessions (zellij-send--list-sessions))
-         (choices (cons "[New]" sessions))
+         (choices (append sessions (list "[New]")))
          (choice (completing-read "Session: " choices nil t)))
     (if (string= choice "[New]")
         (zellij-send--create-new-session)
@@ -452,6 +512,9 @@
               (setq-local default-directory dir))))
         (switch-to-buffer buf)
         (goto-char (point-max))))))
+
+(add-to-list 'global-mode-string
+             '(:eval (zellij-send--mode-line-indicator)) t)
 
 (provide 'zellij-send)
 ;;; zellij-send.el ends here
