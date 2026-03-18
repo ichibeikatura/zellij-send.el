@@ -66,6 +66,11 @@ Claude Code のデフォルトは ❯。Gemini CLI 等では変更する。"
   "直前のポーリングで AI が処理中だった場合 non-nil。
 busy → ready への遷移を検出するために使う。")
 
+(defmacro zellij-send--assert-session ()
+  "カレントバッファが zellij-send セッションに紐付いていなければエラーを発する。"
+  '(unless zellij-send--session
+     (user-error "zellij-send バッファ外では使えません")))
+
 ;;; セッション一覧の取得
 
 (defun zellij-send--list-sessions ()
@@ -183,21 +188,27 @@ busy → ready への遷移を検出するために使う。")
     (string-match-p zellij-send-ready-regexp tail-str)))
 
 (defun zellij-send--mode-line-indicator ()
-  "通知中の zellij-send バッファがあれば modeline 用文字列を返す。"
-  (let ((notifying-bufs
-         (cl-remove-if-not
-          (lambda (buf)
-            (and (buffer-live-p buf)
-                 (buffer-local-value 'zellij-send--notifying buf)))
-          (buffer-list))))
-    (if notifying-bufs
-        (propertize (format " [AI Done:%s]"
-                            (mapconcat
-                             (lambda (buf)
-                               (buffer-local-value 'zellij-send--session buf))
-                             notifying-bufs ","))
-                    'face 'warning)
-      "")))
+  "作業中・完了の zellij-send バッファがあれば modeline 用文字列を返す。"
+  (let* ((live-bufs (cl-remove-if-not #'buffer-live-p (buffer-list)))
+         (working-bufs (cl-remove-if-not
+                        (lambda (buf)
+                          (buffer-local-value 'zellij-send--was-busy buf))
+                        live-bufs))
+         (notifying-bufs (cl-remove-if-not
+                          (lambda (buf)
+                            (buffer-local-value 'zellij-send--notifying buf))
+                          live-bufs))
+         (session-names (lambda (bufs)
+                          (mapconcat
+                           (lambda (buf)
+                             (buffer-local-value 'zellij-send--session buf))
+                           bufs ", ")))
+         (parts (list (when notifying-bufs
+                        (format "☝ done! (%s)" (funcall session-names notifying-bufs)))
+                      (when working-bufs
+                        (format "✍ working (%s)" (funcall session-names working-bufs))))))
+    (let ((str (mapconcat #'identity (delq nil parts) "  ")))
+      (if (string-empty-p str) "" (concat " " str)))))
 
 (defun zellij-send--clear-notification-on-switch (&rest _)
   "カレントバッファが通知中の zellij-send バッファなら通知をクリアする。"
@@ -205,6 +216,18 @@ busy → ready への遷移を検出するために使う。")
              zellij-send--notifying)
     (setq zellij-send--notifying nil)
     (force-mode-line-update t)))
+
+(defun zellij-send--update-busy-state (ready)
+  "READY に基づいて busy/notifying 状態を遷移させる。
+READY が non-nil かつ直前が busy なら通知を発火し、was-busy をクリアする。
+READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
+  (cond
+   ((and ready zellij-send--was-busy)
+    (setq zellij-send--was-busy nil)
+    (setq zellij-send--notifying t)
+    (force-mode-line-update t))
+   ((not ready)
+    (setq zellij-send--was-busy t))))
 
 ;;; ポーリング
 
@@ -217,14 +240,7 @@ busy → ready への遷移を検出するために使う。")
     (let ((content (zellij-send--dump-screen zellij-send--session)))
       (when (and content (not (string= content (buffer-string))))
         (zellij-send--update-buffer content)
-        (let ((ready (zellij-send--is-ready content)))
-          (cond
-           ((and ready zellij-send--was-busy)
-            (setq zellij-send--was-busy nil)
-            (setq zellij-send--notifying t)
-            (force-mode-line-update t))
-           ((not ready)
-            (setq zellij-send--was-busy t))))))))
+        (zellij-send--update-busy-state (zellij-send--is-ready content))))))
 
 (defun zellij-send--start-polling ()
   "ポーリングタイマーを開始する。"
@@ -250,8 +266,7 @@ busy → ready への遷移を検出するために使う。")
   "プロンプト中なら N 番を送信、そうでなければ数字を挿入する。"
   (if zellij-send--prompt-active
       (progn
-        (unless zellij-send--session
-          (user-error "zellij-send バッファ外では使えません"))
+        (zellij-send--assert-session)
         (zellij-send--send zellij-send--session (number-to-string n))
         (setq zellij-send--prompt-active nil)
         (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
@@ -267,24 +282,21 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-compact ()
   "セッションに /compact を送信してコンテキストを圧縮する。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (zellij-send--send zellij-send--session "/compact")
   (message "圧縮しました"))
 
 (defun zellij-send-cc-clear ()
   "セッションに /clear を送信してコンテキストをリセットする。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (zellij-send--send zellij-send--session "/clear")
   (message "クリアしました（コンテキスト）"))
 
 (defun zellij-send-save-progress ()
   "現在の作業内容を CLAUDE.md に記録するよう依頼する。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (zellij-send--send zellij-send--session
                      "ここまでの作業内容と決定事項を CLAUDE.md に追記して")
   (message "記録を依頼しました"))
@@ -294,8 +306,7 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-send ()
   "バッファのテキストを zellij セッションに送信し、バッファをクリアする。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (let* ((session zellij-send--session)
          (text (string-trim (buffer-string))))
     (when (string-empty-p text)
@@ -309,8 +320,7 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-show-response ()
   "zellij スクリーンの内容をバッファに取得・表示する。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (let ((content (zellij-send--dump-screen zellij-send--session)))
     (if content
         (progn
@@ -329,8 +339,7 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-quit ()
   "セッションに /exit を送り、バッファを閉じる。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (let ((session zellij-send--session))
     (zellij-send--send session "/exit")
     (kill-buffer (current-buffer))))
@@ -359,8 +368,7 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-reply-number ()
   "数字を入力して zellij セッションに送信する。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (let ((n (read-number "送る数字: ")))
     (zellij-send--send zellij-send--session (number-to-string n))
     (message "送信しました: %d → [%s]" n zellij-send--session)))
@@ -375,8 +383,7 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send-reply ()
   "返信用の空バッファを開く。C-c C-c で送信してバッファを閉じる。"
   (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
+  (zellij-send--assert-session)
   (let* ((session zellij-send--session)
          (main-buf (current-buffer))
          (wconf (current-window-configuration))
@@ -475,26 +482,41 @@ busy → ready への遷移を検出するために使う。")
       (file-name-as-directory home-dir))
      (t nil))))
 
+(defun zellij-send--prompt-session-dir ()
+  "作業ディレクトリをユーザーに選択させ、末尾スラッシュなしの絶対パスを返す。"
+  (directory-file-name
+   (expand-file-name
+    (read-directory-name "作業ディレクトリ: " default-directory))))
+
+(defun zellij-send--assert-session-unique (session)
+  "SESSION が既存セッション一覧に含まれる場合 user-error を発する。"
+  (when (member session (zellij-send--list-sessions))
+    (user-error "セッション「%s」はすでに存在します" session)))
+
+(defun zellij-send--launch-session-process (session dir)
+  "SESSION 名・作業ディレクトリ DIR で zellij セッションを非同期起動する。"
+  (start-process "zellij-new-session" nil
+                 zellij-send-executable
+                 "--session" session
+                 "options" "--default-cwd" dir))
+
+(defun zellij-send--setup-session-buffer (session dir)
+  "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
+  (let ((buf (zellij-send--get-or-create-buffer session)))
+    (with-current-buffer buf
+      (setq-local default-directory (file-name-as-directory dir)))
+    (switch-to-buffer buf)
+    (goto-char (point-max))))
+
 (defun zellij-send--create-new-session ()
   "新規 zellij セッションを作成して `zellij-send-default-command' を起動する。"
-  (let* ((dir (directory-file-name
-               (expand-file-name
-                (read-directory-name "作業ディレクトリ: " default-directory))))
-         (session (file-name-nondirectory dir))
-         (sessions (zellij-send--list-sessions)))
-    (when (member session sessions)
-      (user-error "セッション「%s」はすでに存在します" session))
-    (start-process "zellij-new-session" nil
-                   zellij-send-executable
-                   "--session" session
-                   "options" "--default-cwd" dir)
+  (let* ((dir (zellij-send--prompt-session-dir))
+         (session (file-name-nondirectory dir)))
+    (zellij-send--assert-session-unique session)
+    (zellij-send--launch-session-process session dir)
     (sleep-for 0.5)
     (zellij-send--send session zellij-send-default-command)
-    (let ((buf (zellij-send--get-or-create-buffer session)))
-      (with-current-buffer buf
-        (setq-local default-directory (file-name-as-directory dir)))
-      (switch-to-buffer buf)
-      (goto-char (point-max)))))
+    (zellij-send--setup-session-buffer session dir)))
 
 ;;;###autoload
 (defun zellij-send ()

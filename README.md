@@ -69,6 +69,8 @@ M-x zellij-send
 
 A list of running zellij sessions is shown. Selecting one opens the `*ai-session-name*` buffer.
 
+Select `[New]` to create a new zellij session. You will be prompted for a working directory; the directory name becomes the session name. The command configured in `zellij-send-default-command` (default: `claude`) is launched automatically in the new session.
+
 ### 2. Send text
 
 Type your message in the buffer and press `C-c C-c` to send. The buffer is cleared automatically after sending.
@@ -90,13 +92,28 @@ Inside the `*ai-session-name*` buffer:
 
 ### Menu (`C-c C-a`)
 
+**Display**
+
 | Key | Action                                                    |
 |-----|-----------------------------------------------------------|
 | `a` | Show AI response (dumps the zellij screen)                |
-| `c` | Clear the buffer                                          |
+| `x` | Clear the buffer                                          |
 | `q` | Send `/exit` to end the session and close the buffer      |
+
+**Send**
+
+| Key | Action                                                       |
+|-----|--------------------------------------------------------------|
 | `e` | Open reply buffer (write a reply while reading the response) |
-| `n` | Send a number (prompts for input)                         |
+| `n` | Send a number (prompts for input)                            |
+
+**Claude Code commands**
+
+| Key | Action                                                    |
+|-----|-----------------------------------------------------------|
+| `c` | Compress context (`/compact`)                             |
+| `C` | Reset context (`/clear`)                                  |
+| `s` | Ask Claude to record progress to `CLAUDE.md`              |
 
 ### Reply buffer (`C-c C-a` → `e`)
 
@@ -119,6 +136,27 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `3` | Send choice 3 immediately   |
 
 When no prompt is active, these keys insert the digit as normal.
+
+## Mode Line Indicator
+
+While an AI session is running, a status indicator appears in the mode line:
+
+| State      | Display                          |
+|------------|----------------------------------|
+| Working    | `✍ working (session-name)`       |
+| Done       | `☝ done! (session-name)`         |
+
+When multiple sessions are active, names are shown comma-separated, e.g. `☝ done! (proj1, proj2)`.
+
+The indicator uses `global-mode-string`. If you use [doom-modeline](https://github.com/seagle0128/doom-modeline), add the `misc-info` segment to your modeline definition:
+
+```elisp
+(doom-modeline-def-modeline 'main
+  '(...)
+  '(... misc-info ...))
+```
+
+The `☝ done!` indicator clears automatically when you switch to the session buffer.
 
 ## Customization
 
