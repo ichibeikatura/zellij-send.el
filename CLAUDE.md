@@ -1,69 +1,145 @@
 # CLAUDE.md
 
-このファイルは、このリポジトリでコードを扱う際のClaude Code (claude.ai/code)へのガイダンスを提供します。
+このファイルは、このリポジトリでコードを扱う際の Claude Code へのガイダンスです。
 
 ## プロジェクト概要
 
-これは、zellij で動作する AI コーディングエージェントに Emacs から日本語文字列を送る Emacs 拡張です。
-
-## 開発セットアップ
-
-これはEmacs拡張プロジェクトのため、開発には以下が含まれます：
-- Emacs Lispコード（`.el`ファイル）の作成
-- Emacs内でのテスト
-- zellij統合のためのシェルスクリプトやPythonの実装（可能性あり）
+Emacs から zellij セッション上の AI エージェント（主に Claude Code）に日本語テキストを送る Emacs パッケージ。
+`M-x zellij-send` でセッションを選択し、専用バッファ（`*ai-セッション名*`）で入力・確認・返信を行う。
 
 ## 開発環境
-emacs-version :31
-lexical-binding: t 
 
-## アーキテクチャ考慮事項
-
-このブリッジを実装する際は、以下を考慮してください：
-1. **Emacs側の実装**: Emacsユーザー向けのコマンド、モード、UI要素
-2. **zellij通信**: zellijセッションへのコマンド送信(主に日本語、 zellij action write-chars)
-3. **非同期処理**: AIエージェントとの通信中もEmacs操作を応答性を保つ
-
-## こういうものを作る
-- "emacs-send" でセッションの一覧を表示/選択(zellij list-sessions の出力をパース)
-- "ai-セッション名"バッファを作成
-- 文字入力、C-c C-c で文字列を送信
-
+- Emacs 31、`lexical-binding: t`
+- 依存: `transient` 0.4以上（必須）、`markdown-mode`（オプション）
+- パッケージ管理: elpaca 想定
 
 ## ファイル構造
 
-- zellij-send.el` - 全ての核心機能を含むメインパッケージファイル
-- `CLAUDE.md` - このドキュメントファイル
-- `README.md` - ユーザー向けドキュメント
-- `LICENSE` - GPL v3ライセンス
+| ファイル | 役割 |
+|---|---|
+| `zellij-send.el` | パッケージ本体（全機能） |
+| `CLAUDE.md` | 本ドキュメント |
+| `README.md` | ユーザー向けドキュメント |
+| `LICENSE` | GPL v3 |
 
-## 追加機能
-- C-c C-c の後は "ai-セッション名"の入力内容をクリアする。
-- AI の回答を表示するモードも欲しい
-- 終了したい。Claude Code に /exit を送りバッファを消す。
-- C-c C-a で transient
+## アーキテクチャ
 
-(transient-define-prefix my/zellij-send ()
-    "Custom Menu"
-    [["表示"
-      ("a" "Claude Code の回答を表示"    適当に命名して)
-      ("c" "表示内容をクリア"     適当に命名して)
-      ("q" "終了"      適当に命名して)]
-     ]))
+```
+Emacs バッファ (*ai-SESSION*)
+  ├─ 入力: C-c C-c → zellij-send--send → zellij action write-chars + write 13
+  ├─ 表示: zellij action dump-screen → tmpfile 経由 → バッファ更新
+  ├─ 自動受信: Stop フック (emacsclient) または ポーリング (run-at-time)
+  └─ UI: transient メニュー (C-c C-a)
+```
 
-## 回答表示の実装方針
-- `zellij action dump-screen` でターゲットペインの内容を取得する
-- transient の "Claude Code の回答を表示" 実行時に取得・表示する
-- "ai-セッション名"に表示する。
-- "ai-セッション名"は二人で使う黒板のようなイメージ。消したり書いたいする。本格的に読みたい時にはターミナルに戻る
+### zellij コマンドの呼び出し方針
 
-## 新しい方針
-- C-c C-c の後で"ai-セッション名"の入力内容はクリアされる。(これまでと同じ)
-- zellij pipe でAIの回答を"ai-セッション名"に表示させる。
-- ユーザーはそれを読み、"表示内容をクリア" あるいは編集し、AI に回答する
+- `call-process` または `start-process` を使い、**シェル文字列結合は行わない**
+- 引数は個別の文字列として渡す（コマンドインジェクション防止）
+- `dump-screen` は tempfile 経由:
+  ```elisp
+  (call-process zellij-send-executable nil nil nil
+                "--session" session "action" "dump-screen" tmpfile)
+  ```
 
-## 参考実装
-- 送信: `tmux send-keys` → `zellij action write-chars`
-- 受信: `tmux capture-pane` のポーリング → `zellij pipe` によるプッシュ型受信
-- セッション管理: `tmux list-sessions` → `zellij list-sessions`
+### Enter キー送信の注意点
 
+`write-chars` に `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
+```
+zellij action write-chars "テキスト"
+zellij action write 13    ; 0x0D = CR = Enter
+```
+
+### ANSI エスケープの除去
+
+`list-sessions` / `dump-screen` の出力にはカラーコードが含まれる。`zellij-send--strip-ansi` で 2 段階除去:
+```elisp
+(replace-regexp-in-string "\033\\[[0-9;?]*[A-Za-z]" "" result)  ; CSI
+(replace-regexp-in-string "\033." "" result)                      ; その他 ESC
+```
+
+## コーディング規約
+
+### 命名規則
+
+| パターン | 用途 |
+|---|---|
+| `zellij-send-FOO` | ユーザー向け `M-x` コマンド、`defcustom`、`defvar` |
+| `zellij-send--FOO` | 内部関数・変数（公開しない） |
+| `zellij-send--FOO` (defvar-local) | バッファローカル状態 |
+
+### defcustom の流儀
+
+```elisp
+(defcustom zellij-send-FOO default-value
+  "日本語の説明。"
+  :type 'string   ; または 'number 'boolean など
+  :group 'zellij-send)
+```
+
+### バッファローカル変数
+
+`defvar-local` で宣言し、`setq-local` で設定する:
+```elisp
+(defvar-local zellij-send--session nil "...")
+;; 設定時:
+(setq-local zellij-send--session session)
+```
+
+### インタラクティブ関数のガード
+
+バッファ外から呼ばれた場合は `user-error` で即終了:
+```elisp
+(defun zellij-send-FOO ()
+  "説明。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  ...)
+```
+
+### エラーメッセージ・メッセージ
+
+日本語で書く。`user-error` はユーザー操作ミス、`error` はプログラムエラー。
+
+### セクション構成（zellij-send.el の順序）
+
+```
+;;; defgroup / defcustom
+;;; defvar-local
+;;; セッション一覧の取得
+;;; バッファ管理
+;;; 送信
+;;; スクリーンダンプ
+;;; プロンプト検出・ハイライト
+;;; バッファ更新（共通処理）
+;;; ポーリング
+;;; 選択肢の即送信
+;;; Claude Code コマンド
+;;; インタラクティブコマンド
+;;; 返信バッファ
+;;; Transient メニュー
+;;; メジャーモード
+;;; Stop フックハンドラ
+;;; エントリポイント
+```
+
+## バッファの設計思想
+
+`*ai-SESSION*` バッファは「黒板」として使う:
+- 固定ヘッダなし（バッファ全体がコンテンツ）
+- セッション情報は `header-line-format` に表示
+- ユーザーが編集中（`buffer-modified-p` = t）はポーリングで上書きしない
+- `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・ポーリングの上書きを防ぐ
+
+## 自動受信（Stop フック）
+
+Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` → `emacsclient` → `zellij-send--on-claude-stop` を経由してバッファを更新する。`;;;###autoload` が必須。
+
+## 新規セッション作成
+
+`zellij-send--create-new-session` の起動コマンド:
+```
+zellij --session NAME options --default-cwd DIR
+```
+`start-process` で非同期・detached 起動（Emacs をブロックしない）。起動後 `sleep-for 0.5` してからコマンドを送信。
