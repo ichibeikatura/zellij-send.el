@@ -111,21 +111,6 @@ busy → ready への遷移を検出するために使う。")
     (unless (zerop exit2)
       (user-error "zellij Enter 送信失敗 (exit: %d)" exit2))))
 
-(defun zellij-send-send ()
-  "バッファのテキストを zellij セッションに送信し、バッファをクリアする。"
-  (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
-  (let* ((session zellij-send--session)
-         (text (string-trim (buffer-string))))
-    (when (string-empty-p text)
-      (user-error "送信するテキストが空です"))
-    (zellij-send--send session text)
-    (erase-buffer)
-    (set-buffer-modified-p nil)
-    (setq zellij-send--user-cleared nil)
-    (message "送信しました → [%s]" session)))
-
 ;;; スクリーンダンプ
 
 (defun zellij-send--strip-ansi (str)
@@ -305,6 +290,21 @@ busy → ready への遷移を検出するために使う。")
   (message "記録を依頼しました"))
 
 ;;; インタラクティブコマンド
+
+(defun zellij-send-send ()
+  "バッファのテキストを zellij セッションに送信し、バッファをクリアする。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (let* ((session zellij-send--session)
+         (text (string-trim (buffer-string))))
+    (when (string-empty-p text)
+      (user-error "送信するテキストが空です"))
+    (zellij-send--send session text)
+    (erase-buffer)
+    (set-buffer-modified-p nil)
+    (setq zellij-send--user-cleared nil)
+    (message "送信しました → [%s]" session)))
 
 (defun zellij-send-show-response ()
   "zellij スクリーンの内容をバッファに取得・表示する。"
