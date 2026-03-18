@@ -495,10 +495,11 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 
 (defun zellij-send--launch-session-process (session dir)
   "SESSION 名・作業ディレクトリ DIR で zellij セッションを非同期起動する。"
-  (start-process "zellij-new-session" nil
-                 zellij-send-executable
-                 "--session" session
-                 "options" "--default-cwd" dir))
+  (let ((process-environment (cons "TERM=xterm-256color" process-environment)))
+    (start-process "zellij-new-session" nil
+                   zellij-send-executable
+                   "--session" session
+                   "options" "--default-cwd" dir)))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
