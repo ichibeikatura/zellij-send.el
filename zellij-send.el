@@ -470,18 +470,6 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 
 ;;; エントリポイント
 
-(defun zellij-send--guess-directory (session)
-  "SESSION 名に対応するディレクトリを推定して返す。見つからなければ nil。"
-  (let ((home-dir (expand-file-name session "~/")))
-    (cond
-     ((string= (file-name-nondirectory
-                (directory-file-name default-directory))
-               session)
-      default-directory)
-     ((file-directory-p home-dir)
-      (file-name-as-directory home-dir))
-     (t nil))))
-
 (defun zellij-send--prompt-session-dir ()
   "作業ディレクトリをユーザーに選択させ、末尾スラッシュなしの絶対パスを返す。"
   (directory-file-name
@@ -515,7 +503,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
          (session (file-name-nondirectory dir)))
     (zellij-send--assert-session-unique session)
     (zellij-send--launch-session-process session dir)
-    (sleep-for 0.5)
+    (sleep-for 1.0)
     (zellij-send--send session zellij-send-default-command)
     (zellij-send--setup-session-buffer session dir)))
 
@@ -528,13 +516,14 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
          (choice (completing-read "Session: " choices nil t)))
     (if (string= choice "[New]")
         (zellij-send--create-new-session)
-      (let ((buf (zellij-send--get-or-create-buffer choice)))
-        (let ((dir (zellij-send--guess-directory choice)))
-          (when dir
-            (with-current-buffer buf
-              (setq-local default-directory dir))))
-        (switch-to-buffer buf)
-        (goto-char (point-max))))))
+      (if (get-buffer (zellij-send--buffer-name choice))
+          ;; バッファが既にある場合はそのまま切り替え
+          (progn
+            (switch-to-buffer (zellij-send--get-or-create-buffer choice))
+            (goto-char (point-max)))
+        ;; 初回接続時はディレクトリを選択させる
+        (let ((dir (zellij-send--prompt-session-dir)))
+          (zellij-send--setup-session-buffer choice dir))))))
 
 (add-to-list 'global-mode-string
              '(:eval (zellij-send--mode-line-indicator)) t)

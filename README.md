@@ -27,6 +27,14 @@ Use the `*ai-session-name*` buffer as a shared blackboard: write your message, s
 └──────────────────────────────────────┘
 ```
 
+## Why this tool?
+
+Emacs terminal emulators like `vterm` and `eat` pass key events directly to the child process, which means Emacs input methods (e.g. ddSKK) do not work inside them.
+
+`shell-mode` and `eshell` do support input methods, but they are not suited for running interactive TUI applications like Claude Code.
+
+This tool bridges the gap: compose text in a regular Emacs buffer (where your input method works normally), and have it sent to a zellij session (where TUI apps run fine).
+
 ## Requirements
 
 - Emacs 28 or later (`transient` is built in)
