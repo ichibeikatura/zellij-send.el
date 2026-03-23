@@ -504,6 +504,8 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (zellij-send--assert-session-unique session)
     (zellij-send--launch-session-process session dir)
     (sleep-for 1.0)
+    (zellij-send--send session "export TERM=xterm-256color")
+    (sleep-for 0.3)
     (zellij-send--send session zellij-send-default-command)
     (zellij-send--setup-session-buffer session dir)))
 
