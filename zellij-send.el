@@ -502,11 +502,18 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (let* ((dir (zellij-send--prompt-session-dir))
          (session (file-name-nondirectory dir)))
     (zellij-send--assert-session-unique session)
-    (zellij-send--launch-session-process session dir)
-    (sleep-for 1.0)
-    (zellij-send--send session "export TERM=xterm-256color")
-    (sleep-for 0.3)
-    (zellij-send--send session zellij-send-default-command)
+    (let ((proc (zellij-send--launch-session-process session dir)))
+      (sleep-for 1.0)
+      (zellij-send--send session "export TERM=xterm-256color")
+      (sleep-for 0.3)
+      (zellij-send--send session zellij-send-default-command)
+      ;; セットアップ完了後に初期クライアントを切断する。
+      ;; 切断後はセッションが headless になり、ユーザーがフルスクリーン端末で
+      ;; attach したときに正しい画面サイズにリサイズされる。
+      (run-at-time 1.0 nil
+                   (lambda ()
+                     (when (process-live-p proc)
+                       (delete-process proc)))))
     (zellij-send--setup-session-buffer session dir)))
 
 ;;;###autoload
