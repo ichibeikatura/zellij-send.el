@@ -131,7 +131,7 @@ busy → ready への遷移を検出するために使う。")
     (unwind-protect
         (let ((exit-code (call-process zellij-send-executable nil nil nil
                                        "--session" session
-                                       "action" "dump-screen" tmpfile)))
+                                       "action" "dump-screen" "--path" tmpfile)))
           (if (zerop exit-code)
               (let ((raw (with-temp-buffer
                            (insert-file-contents tmpfile)
@@ -483,11 +483,12 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 
 (defun zellij-send--launch-session-process (session dir)
   "SESSION 名・作業ディレクトリ DIR で zellij セッションを非同期起動する。"
-  (let ((process-environment (cons "TERM=xterm-256color" process-environment)))
-    (start-process "zellij-new-session" nil
-                   zellij-send-executable
-                   "--session" session
-                   "options" "--default-cwd" dir)))
+  (make-process
+   :name "zellij-new-session"
+   :buffer nil
+   :command (list zellij-send-executable "--session" session "options" "--default-cwd" dir)
+   :connection-type 'pty
+   :environment (cons "TERM=xterm-256color" process-environment)))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
