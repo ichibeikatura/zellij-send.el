@@ -344,6 +344,18 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (zellij-send--send session "/exit")
     (kill-buffer (current-buffer))))
 
+(defun zellij-send-open-eat ()
+  "このセッションの eat バッファを開く。なければ zellij attach で起動する。"
+  (interactive)
+  (zellij-send--assert-session)
+  (unless (require 'eat nil t)
+    (user-error "eat がインストールされていません（M-x package-install RET eat）"))
+  (let* ((session zellij-send--session)
+         (buf-name (zellij-send--eat-buffer-name session))
+         (buf (or (get-buffer buf-name)
+                  (eat-make buf-name zellij-send-executable nil "attach" session))))
+    (pop-to-buffer buf)))
+
 ;;; 返信バッファ
 
 (defun zellij-send--reply-send ()
@@ -405,6 +417,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   "ZellijSend メニュー"
   [["表示"
     ("a" "Claude Code の回答を表示" zellij-send-show-response)
+    ("t" "端末で表示 (eat)"         zellij-send-open-eat)
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)
     ("q" "終了"                     zellij-send-quit)]
    ["送信"
@@ -481,14 +494,18 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (when (member session (zellij-send--list-sessions))
     (user-error "セッション「%s」はすでに存在します" session)))
 
-(defun zellij-send--launch-session-process (session dir)
-  "SESSION 名・作業ディレクトリ DIR で zellij セッションを非同期起動する。"
-  (make-process
-   :name "zellij-new-session"
-   :buffer nil
-   :command (list zellij-send-executable "--session" session "options" "--default-cwd" dir)
-   :connection-type 'pty
-   :environment (cons "TERM=xterm-256color" process-environment)))
+(defun zellij-send--eat-buffer-name (session)
+  "SESSION に対応する eat バッファ名を返す。"
+  (format "*eat-%s*" session))
+
+(defun zellij-send--launch-eat-session (session dir)
+  "eat バッファで SESSION / DIR の zellij セッションを起動し、バッファを返す。"
+  (unless (require 'eat nil t)
+    (user-error "eat がインストールされていません（M-x package-install RET eat）"))
+  (eat-make (zellij-send--eat-buffer-name session)
+            zellij-send-executable
+            nil
+            "--session" session "options" "--default-cwd" dir))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
@@ -503,18 +520,10 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (let* ((dir (zellij-send--prompt-session-dir))
          (session (file-name-nondirectory dir)))
     (zellij-send--assert-session-unique session)
-    (let ((proc (zellij-send--launch-session-process session dir)))
+    (let ((eat-buf (zellij-send--launch-eat-session session dir)))
       (sleep-for 1.0)
-      (zellij-send--send session "export TERM=xterm-256color")
-      (sleep-for 0.3)
-      (zellij-send--send session zellij-send-default-command)
-      ;; セットアップ完了後に初期クライアントを切断する。
-      ;; 切断後はセッションが headless になり、ユーザーがフルスクリーン端末で
-      ;; attach したときに正しい画面サイズにリサイズされる。
-      (run-at-time 1.0 nil
-                   (lambda ()
-                     (when (process-live-p proc)
-                       (delete-process proc)))))
+      (when-let ((proc (get-buffer-process eat-buf)))
+        (process-send-string proc (concat zellij-send-default-command "\n"))))
     (zellij-send--setup-session-buffer session dir)))
 
 ;;;###autoload
