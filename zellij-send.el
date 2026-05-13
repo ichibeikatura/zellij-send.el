@@ -345,15 +345,22 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (kill-buffer (current-buffer))))
 
 (defun zellij-send-open-eat ()
-  "このセッションの eat バッファを開く。なければ zellij attach で起動する。"
+  "このセッションの eat バッファをビューモードで開く。なければ zellij attach で起動する。"
   (interactive)
   (zellij-send--assert-session)
   (unless (require 'eat nil t)
     (user-error "eat がインストールされていません（M-x package-install RET eat）"))
   (let* ((session zellij-send--session)
          (buf-name (zellij-send--eat-buffer-name session))
-         (buf (or (get-buffer buf-name)
+         (existing (get-buffer buf-name))
+         (buf (or existing
                   (eat-make buf-name zellij-send-executable nil "attach" session))))
+    (unless existing
+      ;; プロセス起動後に semi-char-mode になるので、遅延して emacs-mode に戻す
+      (run-with-timer 0.5 nil (lambda ()
+                                (when (buffer-live-p buf)
+                                  (with-current-buffer buf
+                                    (eat-emacs-mode))))))
     (pop-to-buffer buf)))
 
 ;;; 返信バッファ
