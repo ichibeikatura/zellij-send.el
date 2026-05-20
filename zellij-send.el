@@ -345,18 +345,13 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (kill-buffer (current-buffer))))
 
 (defun zellij-send-open-eat ()
-  "このセッションの eat バッファをビューモードで開く。なければ zellij attach で起動する。"
+  "このセッションの eat バッファをビューモードで開く。なければ zellij attach -c で起動する。"
   (interactive)
   (zellij-send--assert-session)
-  (unless (require 'eat nil t)
-    (user-error "eat がインストールされていません（M-x package-install RET eat）"))
   (let* ((session zellij-send--session)
-         (buf-name (zellij-send--eat-buffer-name session))
-         (existing (get-buffer buf-name))
-         (buf (or existing
-                  (eat-make buf-name zellij-send-executable nil "attach" session))))
+         (existing (get-buffer (zellij-send--eat-buffer-name session)))
+         (buf (or existing (zellij-send--launch-eat-session session))))
     (unless existing
-      ;; プロセス起動後に semi-char-mode になるので、遅延して emacs-mode に戻す
       (run-with-timer 0.5 nil (lambda ()
                                 (when (buffer-live-p buf)
                                   (with-current-buffer buf
@@ -505,14 +500,16 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   "SESSION に対応する eat バッファ名を返す。"
   (format "*eat-%s*" session))
 
-(defun zellij-send--launch-eat-session (session dir)
-  "eat バッファで SESSION / DIR の zellij セッションを起動し、バッファを返す。"
+(defun zellij-send--launch-eat-session (session &optional dir)
+  "eat バッファで SESSION に zellij attach -c を実行し、バッファを返す。
+DIR が指定された場合はそのディレクトリで起動する（新規セッション用）。"
   (unless (require 'eat nil t)
     (user-error "eat がインストールされていません（M-x package-install RET eat）"))
-  (eat-make (zellij-send--eat-buffer-name session)
-            zellij-send-executable
-            nil
-            "--session" session "options" "--default-cwd" dir))
+  (let ((default-directory (if dir (file-name-as-directory dir) default-directory)))
+    (eat-make (zellij-send--eat-buffer-name session)
+              zellij-send-executable
+              nil
+              "attach" "-c" session)))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
@@ -528,10 +525,32 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
          (session (file-name-nondirectory dir)))
     (zellij-send--assert-session-unique session)
     (let ((eat-buf (zellij-send--launch-eat-session session dir)))
-      (sleep-for 1.0)
-      (when-let ((proc (get-buffer-process eat-buf)))
-        (process-send-string proc (concat zellij-send-default-command "\n"))))
+      (run-with-timer 1.0 nil
+                      (lambda ()
+                        (when (buffer-live-p eat-buf)
+                          (when-let ((proc (get-buffer-process eat-buf)))
+                            (process-send-string proc
+                                                 (concat zellij-send-default-command "\n"))))))
+      (display-buffer eat-buf))
     (zellij-send--setup-session-buffer session dir)))
+
+(defun zellij-send--connect-existing-session (session)
+  "既存 SESSION に接続し、黒板バッファと eat バッファを開く。"
+  (let* ((eat-existing (get-buffer (zellij-send--eat-buffer-name session)))
+         (eat-buf (or eat-existing (zellij-send--launch-eat-session session))))
+    (unless eat-existing
+      (run-with-timer 0.5 nil
+                      (lambda ()
+                        (when (buffer-live-p eat-buf)
+                          (with-current-buffer eat-buf
+                            (eat-emacs-mode)))))
+      (display-buffer eat-buf))
+    (if (get-buffer (zellij-send--buffer-name session))
+        (progn
+          (switch-to-buffer (zellij-send--get-or-create-buffer session))
+          (goto-char (point-max)))
+      (let ((dir (zellij-send--prompt-session-dir)))
+        (zellij-send--setup-session-buffer session dir)))))
 
 ;;;###autoload
 (defun zellij-send ()
@@ -542,14 +561,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
          (choice (completing-read "Session: " choices nil t)))
     (if (string= choice "[New]")
         (zellij-send--create-new-session)
-      (if (get-buffer (zellij-send--buffer-name choice))
-          ;; バッファが既にある場合はそのまま切り替え
-          (progn
-            (switch-to-buffer (zellij-send--get-or-create-buffer choice))
-            (goto-char (point-max)))
-        ;; 初回接続時はディレクトリを選択させる
-        (let ((dir (zellij-send--prompt-session-dir)))
-          (zellij-send--setup-session-buffer choice dir))))))
+      (zellij-send--connect-existing-session choice))))
 
 (add-to-list 'global-mode-string
              '(:eval (zellij-send--mode-line-indicator)) t)

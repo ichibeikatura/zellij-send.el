@@ -6,6 +6,11 @@
 
 Emacs から zellij セッション上の AI エージェント（主に Claude Code）に日本語テキストを送る Emacs パッケージ。
 `M-x zellij-send` でセッションを選択し、専用バッファ（`*ai-セッション名*`）で入力・確認・返信を行う。
+このパッケージは 3 つの要素で成り立つ:
+- *ai-SESSION* バッファ（黒板）: ユーザーが入力するための主インターフェース
+- eat バッファ: zellij attach <session> を実行する。理由は (a) Claude Code の応答を生で確認できる、(b) zellij セッションは attach されたクライアントが存在しないと write-chars が期待通り動かないため、eat による attach が機能上必須
+- zellij セッション本体: バックグラウンドで動く実体
+zellij-send を呼び出すと、[New] か既存セッションかに関係なく、黒板バッファと eat バッファの両方が開くこと。eat 側で attach が確立してから write-chars 系のコマンドを送ること。
 
 ## 開発環境
 
