@@ -102,11 +102,12 @@ Inside the `*ai-session-name*` buffer:
 
 **Display**
 
-| Key | Action                                                    |
-|-----|-----------------------------------------------------------|
-| `a` | Show AI response (dumps the zellij screen)                |
-| `x` | Clear the buffer                                          |
-| `q` | Send `/exit` to end the session and close the buffer      |
+| Key | Action                                                                                         |
+|-----|------------------------------------------------------------------------------------------------|
+| `a` | Show AI response (dumps the zellij screen)                                                     |
+| `t` | Open terminal view (eat buffer, attaches to the zellij session)                                |
+| `x` | Clear the buffer                                                                               |
+| `q` | Delete session: close eat buffer, remove zellij session, and close buffer (asks confirmation)  |
 
 **Send**
 

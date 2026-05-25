@@ -337,12 +337,24 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (message "クリアしました"))
 
 (defun zellij-send-quit ()
-  "セッションに /exit を送り、バッファを閉じる。"
+  "eat バッファを閉じ、zellij セッションを削除して、このバッファも閉じる。"
   (interactive)
   (zellij-send--assert-session)
   (let ((session zellij-send--session))
-    (zellij-send--send session "/exit")
-    (kill-buffer (current-buffer))))
+    (unless (yes-or-no-p
+             (format "セッション [%s] を削除しますか? (eat バッファ・zellij セッションも消えます) " session))
+      (user-error "キャンセルしました"))
+    ;; eat バッファのプロセスを先に終了してからバッファを閉じる
+    (when-let ((eat-buf (get-buffer (zellij-send--eat-buffer-name session))))
+      (when-let ((proc (get-buffer-process eat-buf)))
+        (delete-process proc))
+      (kill-buffer eat-buf))
+    ;; zellij セッションを削除
+    (call-process zellij-send-executable nil nil nil
+                  "delete-session" session)
+    ;; このバッファを閉じる
+    (kill-buffer (current-buffer))
+    (message "セッション [%s] を削除しました" session)))
 
 (defun zellij-send-open-eat ()
   "このセッションの eat バッファをビューモードで開く。なければ zellij attach -c で起動する。"
