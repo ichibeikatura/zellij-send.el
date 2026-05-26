@@ -348,6 +348,8 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (when-let ((eat-buf (get-buffer (zellij-send--eat-buffer-name session))))
       (when-let ((proc (get-buffer-process eat-buf)))
         (delete-process proc))
+      (with-current-buffer eat-buf
+        (set-buffer-modified-p nil))
       (kill-buffer eat-buf))
     ;; zellij セッションを削除
     (call-process zellij-send-executable nil nil nil
