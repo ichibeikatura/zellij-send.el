@@ -578,11 +578,21 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 DIR が指定された場合はそのディレクトリで起動する（新規セッション用）。"
   (unless (require 'eat nil t)
     (user-error "eat がインストールされていません（M-x package-install RET eat）"))
-  (let ((default-directory (if dir (file-name-as-directory dir) default-directory)))
-    (eat-make (zellij-send--eat-buffer-name session)
-              zellij-send-executable
-              nil
-              "attach" "-c" session)))
+  (let* ((default-directory (if dir (file-name-as-directory dir) default-directory))
+         (buf (eat-make (zellij-send--eat-buffer-name session)
+                        zellij-send-executable
+                        nil
+                        "attach" "-c" session)))
+    (when-let ((proc (get-buffer-process buf)))
+      (let ((prev (process-sentinel proc)))
+        (set-process-sentinel
+         proc
+         (lambda (p status)
+           (when prev (funcall prev p status))
+           (let ((b (process-buffer p)))
+             (when (buffer-live-p b)
+               (kill-buffer b)))))))
+    buf))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
