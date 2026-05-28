@@ -337,26 +337,49 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (message "クリアしました"))
 
 (defun zellij-send-quit ()
-  "eat バッファを閉じ、zellij セッションを削除して、このバッファも閉じる。"
+  "Claude Code に /exit を送り、シェルを終了し、zellij セッションとバッファを削除する。"
   (interactive)
   (zellij-send--assert-session)
-  (let ((session zellij-send--session))
+  (let ((session zellij-send--session)
+        (main-buf (current-buffer)))
     (unless (yes-or-no-p
              (format "セッション [%s] を削除しますか? (eat バッファ・zellij セッションも消えます) " session))
       (user-error "キャンセルしました"))
-    ;; eat バッファのプロセスを先に終了してからバッファを閉じる
-    (when-let ((eat-buf (get-buffer (zellij-send--eat-buffer-name session))))
-      (when-let ((proc (get-buffer-process eat-buf)))
-        (delete-process proc))
-      (with-current-buffer eat-buf
-        (set-buffer-modified-p nil))
-      (kill-buffer eat-buf))
-    ;; zellij セッションを削除
-    (call-process zellij-send-executable nil nil nil
-                  "delete-session" session)
-    ;; このバッファを閉じる
-    (kill-buffer (current-buffer))
-    (message "セッション [%s] を削除しました" session)))
+    ;; 1. Claude Code に /exit を送信（失敗しても続行）
+    (condition-case nil
+        (zellij-send--send session "/exit")
+      (error nil))
+    (message "セッション [%s] を終了中..." session)
+    ;; 2. 2秒後にシェルへ exit を送信（Claude Code 終了後のシェルを抜ける）
+    (run-with-timer
+     2.0 nil
+     (lambda ()
+       (ignore-errors
+         (call-process zellij-send-executable nil nil nil
+                       "--session" session "action" "write-chars" "exit")
+         (call-process zellij-send-executable nil nil nil
+                       "--session" session "action" "write" "13"))
+       ;; 3. さらに 1.5秒後にクリーンアップ
+       (run-with-timer
+        1.5 nil
+        (lambda ()
+          ;; eat バッファのプロセスを終了してバッファを閉じる
+          (when-let ((eat-buf (get-buffer (zellij-send--eat-buffer-name session))))
+            (when (buffer-live-p eat-buf)
+              (ignore-errors
+                (when-let ((proc (get-buffer-process eat-buf)))
+                  (delete-process proc)))
+              (with-current-buffer eat-buf
+                (set-buffer-modified-p nil))
+              (kill-buffer eat-buf)))
+          ;; zellij セッションが残っていれば削除
+          (ignore-errors
+            (call-process zellij-send-executable nil nil nil
+                          "delete-session" session))
+          ;; 黒板バッファを閉じる
+          (when (buffer-live-p main-buf)
+            (kill-buffer main-buf))
+          (message "セッション [%s] を削除しました" session)))))))
 
 (defun zellij-send-open-eat ()
   "このセッションの eat バッファをビューモードで開く。なければ zellij attach -c で起動する。"
