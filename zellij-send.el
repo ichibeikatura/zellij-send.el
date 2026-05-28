@@ -125,23 +125,41 @@ busy → ready への遷移を検出するために使う。")
     (setq result (replace-regexp-in-string "\033." "" result))
     result))
 
-(defun zellij-send--dump-screen (session)
-  "SESSION のスクリーン内容を文字列として返す。失敗時は nil を返す。"
-  (let ((tmpfile (make-temp-file "zellij-dump-")))
-    (unwind-protect
-        (let ((exit-code (call-process zellij-send-executable nil nil nil
-                                       "--session" session
-                                       "action" "dump-screen" "--path" tmpfile)))
-          (if (zerop exit-code)
-              (let ((raw (with-temp-buffer
-                           (insert-file-contents tmpfile)
-                           (buffer-string))))
-                (replace-regexp-in-string "^─+" ""
-                 (zellij-send--strip-ansi
-                  (replace-regexp-in-string "\r" "" raw))))
-            nil))
-      (when (file-exists-p tmpfile)
-        (delete-file tmpfile)))))
+(defun zellij-send--process-dump (raw)
+  "dump-screen の生テキスト RAW を整形して返す。"
+  (replace-regexp-in-string "^─+" ""
+   (zellij-send--strip-ansi
+    (replace-regexp-in-string "\r" "" raw))))
+
+(defun zellij-send--dump-screen-async (session callback)
+  "SESSION のスクリーン内容を非同期で取得する。
+取得できたら整形済み文字列を、失敗時は nil を引数にして CALLBACK を呼ぶ。
+CALLBACK は要求元バッファをカレントにした状態で呼ばれる。"
+  (let ((tmpfile (make-temp-file "zellij-dump-"))
+        (req-buffer (current-buffer)))
+    (make-process
+     :name "zellij-dump"
+     :buffer nil
+     :noquery t
+     :command (list zellij-send-executable
+                    "--session" session
+                    "action" "dump-screen" "--path" tmpfile)
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (unwind-protect
+             (let ((content
+                    (when (and (zerop (process-exit-status proc))
+                               (file-exists-p tmpfile))
+                      (zellij-send--process-dump
+                       (with-temp-buffer
+                         (insert-file-contents tmpfile)
+                         (buffer-string))))))
+               (when (buffer-live-p req-buffer)
+                 (with-current-buffer req-buffer
+                   (funcall callback content))))
+           (when (file-exists-p tmpfile)
+             (delete-file tmpfile)))))))))
 
 ;;; プロンプト検出・ハイライト
 
@@ -232,15 +250,20 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 ;;; ポーリング
 
 (defun zellij-send--poll ()
-  "タイマーコールバック。バッファが未編集かつユーザーがクリアしていなければ dump-screen で更新する。"
+  "タイマーコールバック。dump-screen を非同期で要求し、結果が来たらバッファを更新する。"
   (when (and (buffer-live-p (current-buffer))
              zellij-send--session
              (not (buffer-modified-p))
              (not zellij-send--user-cleared))
-    (let ((content (zellij-send--dump-screen zellij-send--session)))
-      (when (and content (not (string= content (buffer-string))))
-        (zellij-send--update-buffer content)
-        (zellij-send--update-busy-state (zellij-send--is-ready content))))))
+    (zellij-send--dump-screen-async
+     zellij-send--session
+     (lambda (content)
+       (when (and content
+                  (not (buffer-modified-p))
+                  (not zellij-send--user-cleared)
+                  (not (string= content (buffer-string))))
+         (zellij-send--update-buffer content)
+         (zellij-send--update-busy-state (zellij-send--is-ready content)))))))
 
 (defun zellij-send--start-polling ()
   "ポーリングタイマーを開始する。"
@@ -321,12 +344,14 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   "zellij スクリーンの内容をバッファに取得・表示する。"
   (interactive)
   (zellij-send--assert-session)
-  (let ((content (zellij-send--dump-screen zellij-send--session)))
-    (if content
-        (progn
-          (zellij-send--update-buffer content)
-          (message "スクリーン内容を取得しました"))
-      (message "スクリーン内容の取得に失敗しました"))))
+  (zellij-send--dump-screen-async
+   zellij-send--session
+   (lambda (content)
+     (if content
+         (progn
+           (zellij-send--update-buffer content)
+           (message "スクリーン内容を取得しました"))
+       (message "スクリーン内容の取得に失敗しました")))))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
@@ -368,6 +393,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
             (when (buffer-live-p eat-buf)
               (ignore-errors
                 (when-let ((proc (get-buffer-process eat-buf)))
+                  (set-process-query-on-exit-flag proc nil)
                   (delete-process proc)))
               (with-current-buffer eat-buf
                 (set-buffer-modified-p nil))
@@ -484,7 +510,13 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (setq-local header-line-format
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
-  (zellij-send--start-polling)
+  ;; eat の attach 確立（0.5〜1.0 秒）より後にポーリングを開始して競合を避ける
+  (let ((buf (current-buffer)))
+    (run-with-timer 1.5 nil
+                    (lambda ()
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf
+                          (zellij-send--start-polling))))))
   (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t)
   (add-hook 'window-buffer-change-functions
             #'zellij-send--clear-notification-on-switch))
@@ -513,12 +545,16 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
                    zellij-send--session
                    (not zellij-send--user-cleared)
                    (not (buffer-modified-p)))
-          (let ((content (zellij-send--dump-screen zellij-send--session)))
-            (when content
-              (zellij-send--update-buffer content)
-              (when (zellij-send--is-ready content)
-                (setq zellij-send--notifying t)
-                (force-mode-line-update t)))))))))
+          (zellij-send--dump-screen-async
+           zellij-send--session
+           (lambda (content)
+             (when (and content
+                        (not zellij-send--user-cleared)
+                        (not (buffer-modified-p)))
+               (zellij-send--update-buffer content)
+               (when (zellij-send--is-ready content)
+                 (setq zellij-send--notifying t)
+                 (force-mode-line-update t))))))))))
 
 ;;; エントリポイント
 
@@ -567,8 +603,7 @@ DIR が指定された場合はそのディレクトリで起動する（新規�
                         (when (buffer-live-p eat-buf)
                           (when-let ((proc (get-buffer-process eat-buf)))
                             (process-send-string proc
-                                                 (concat zellij-send-default-command "\n"))))))
-      (display-buffer eat-buf))
+                                                 (concat zellij-send-default-command "\n")))))))
     (zellij-send--setup-session-buffer session dir)))
 
 (defun zellij-send--connect-existing-session (session)
@@ -580,8 +615,7 @@ DIR が指定された場合はそのディレクトリで起動する（新規�
                       (lambda ()
                         (when (buffer-live-p eat-buf)
                           (with-current-buffer eat-buf
-                            (eat-emacs-mode)))))
-      (display-buffer eat-buf))
+                            (eat-emacs-mode))))))
     (if (get-buffer (zellij-send--buffer-name session))
         (progn
           (switch-to-buffer (zellij-send--get-or-create-buffer session))

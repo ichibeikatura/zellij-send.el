@@ -32,7 +32,7 @@ zellij-send を呼び出すと、[New] か既存セッションかに関係な�
 ```
 Emacs バッファ (*ai-SESSION*)
   ├─ 入力: C-c C-c → zellij-send--send → zellij action write-chars + write 13
-  ├─ 表示: zellij action dump-screen → tmpfile 経由 → バッファ更新
+  ├─ 表示: zellij action dump-screen → tmpfile 経由 → バッファ更新（非同期 / make-process + sentinel）
   ├─ 自動受信: Stop フック (emacsclient) または ポーリング (run-at-time)
   └─ UI: transient メニュー (C-c C-a)
 ```
@@ -41,11 +41,11 @@ Emacs バッファ (*ai-SESSION*)
 
 - `call-process` または `start-process` を使い、**シェル文字列結合は行わない**
 - 引数は個別の文字列として渡す（コマンドインジェクション防止）
-- `dump-screen` は tempfile 経由:
+- `dump-screen` は **`make-process` + sentinel で非同期化**している（tmpfile 経由）:
   ```elisp
-  (call-process zellij-send-executable nil nil nil
-                "--session" session "action" "dump-screen" tmpfile)
+  (zellij-send--dump-screen-async session callback)
   ```
+  ポーリングは 2 秒ごとに再帰的に走るため、同期 `call-process` のままだと eat の attach クライアント（同一シングルスレッド内で pty I/O を処理）と相互待ちになり Emacs がフリーズする。これを避けるために非同期化している。コールバックは要求元バッファをカレントにした状態で呼ばれる。
 
 ### Enter キー送信の注意点
 
