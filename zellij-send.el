@@ -159,7 +159,7 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
                  (with-current-buffer req-buffer
                    (funcall callback content))))
            (when (file-exists-p tmpfile)
-             (delete-file tmpfile)))))))))
+             (delete-file tmpfile))))))))
 
 ;;; プロンプト検出・ハイライト
 
