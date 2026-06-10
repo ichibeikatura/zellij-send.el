@@ -73,17 +73,51 @@ busy → ready への遷移を検出するために使う。")
 
 ;;; セッション一覧の取得
 
-(defun zellij-send--list-sessions ()
-  "zellij list-sessions の出力をパースしてセッション名リストを返す。"
-  (let ((raw (shell-command-to-string
-              (concat zellij-send-executable " list-sessions 2>/dev/null"))))
-    (delq nil
-          (mapcar (lambda (line)
-                    (let ((clean (replace-regexp-in-string
-                                  "\033\\[[0-9;]*m" "" line)))
-                      (when (string-match "^\\([^ \t]+\\)" clean)
-                        (match-string 1 clean))))
-                  (split-string raw "\n" t)))))
+(defun zellij-send--parse-sessions (raw)
+  "RAW テキスト（list-sessions 出力）からセッション名リストを返す。"
+  (delq nil
+        (mapcar (lambda (line)
+                  (let ((clean (replace-regexp-in-string
+                                "\033\\[[0-9;]*m" "" line)))
+                    (when (string-match "^\\([^ \t]+\\)" clean)
+                      (match-string 1 clean))))
+                (split-string raw "\n" t))))
+
+(defun zellij-send--list-sessions-async (callback)
+  "list-sessions を非同期で実行し CALLBACK を呼ぶ。
+成功時: (callback sessions) — sessions は文字列リスト（空もあり）。
+タイムアウト時（5秒）: (callback :timeout)。"
+  (let* ((out-buf (generate-new-buffer " *zellij-list-sessions*"))
+         (err-buf (generate-new-buffer " *zellij-list-sessions-err*"))
+         (done nil)
+         timer proc)
+    (setq proc
+          (make-process
+           :name "zellij-list-sessions"
+           :buffer out-buf
+           :stderr err-buf
+           :noquery t
+           :command (list zellij-send-executable "list-sessions")
+           :sentinel
+           (lambda (p _)
+             (when (and (not done)
+                        (memq (process-status p) '(exit signal)))
+               (setq done t)
+               (when timer (cancel-timer timer))
+               (let ((sessions (zellij-send--parse-sessions
+                                (with-current-buffer out-buf (buffer-string)))))
+                 (ignore-errors (kill-buffer out-buf))
+                 (ignore-errors (kill-buffer err-buf))
+                 (funcall callback sessions))))))
+    (setq timer
+          (run-with-timer 5.0 nil
+                          (lambda ()
+                            (unless done
+                              (setq done t)
+                              (ignore-errors (delete-process proc))
+                              (ignore-errors (kill-buffer out-buf))
+                              (ignore-errors (kill-buffer err-buf))
+                              (funcall callback :timeout)))))))
 
 ;;; バッファ管理
 
@@ -564,9 +598,9 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
    (expand-file-name
     (read-directory-name "作業ディレクトリ: " default-directory))))
 
-(defun zellij-send--assert-session-unique (session)
-  "SESSION が既存セッション一覧に含まれる場合 user-error を発する。"
-  (when (member session (zellij-send--list-sessions))
+(defun zellij-send--assert-session-unique (session known-sessions)
+  "SESSION が KNOWN-SESSIONS に含まれる場合 user-error を発する。"
+  (when (member session known-sessions)
     (user-error "セッション「%s」はすでに存在します" session)))
 
 (defun zellij-send--eat-buffer-name (session)
@@ -602,11 +636,12 @@ DIR が指定された場合はそのディレクトリで起動する（新規�
     (switch-to-buffer buf)
     (goto-char (point-max))))
 
-(defun zellij-send--create-new-session ()
-  "新規 zellij セッションを作成して `zellij-send-default-command' を起動する。"
+(defun zellij-send--create-new-session (known-sessions)
+  "新規 zellij セッションを作成して `zellij-send-default-command' を起動する。
+KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
   (let* ((dir (zellij-send--prompt-session-dir))
          (session (file-name-nondirectory dir)))
-    (zellij-send--assert-session-unique session)
+    (zellij-send--assert-session-unique session known-sessions)
     (let ((eat-buf (zellij-send--launch-eat-session session dir)))
       (run-with-timer 1.0 nil
                       (lambda ()
@@ -637,12 +672,16 @@ DIR が指定された場合はそのディレクトリで起動する（新規�
 (defun zellij-send ()
   "zellij セッションを選択して入力バッファを開く。"
   (interactive)
-  (let* ((sessions (zellij-send--list-sessions))
-         (choices (append sessions (list "[New]")))
-         (choice (completing-read "Session: " choices nil t)))
-    (if (string= choice "[New]")
-        (zellij-send--create-new-session)
-      (zellij-send--connect-existing-session choice))))
+  (message "セッション一覧を取得中...")
+  (zellij-send--list-sessions-async
+   (lambda (sessions)
+     (if (eq sessions :timeout)
+         (message "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。")
+       (let* ((choices (append sessions (list "[New]")))
+              (choice (completing-read "Session: " choices nil t)))
+         (if (string= choice "[New]")
+             (zellij-send--create-new-session sessions)
+           (zellij-send--connect-existing-session choice)))))))
 
 (add-to-list 'global-mode-string
              '(:eval (zellij-send--mode-line-indicator)) t)
