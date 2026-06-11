@@ -39,13 +39,15 @@ Emacs バッファ (*ai-SESSION*)
 
 ### zellij コマンドの呼び出し方針
 
-- `call-process` または `start-process` を使い、**シェル文字列結合は行わない**
-- 引数は個別の文字列として渡す（コマンドインジェクション防止）
-- `dump-screen` は **`make-process` + sentinel で非同期化**している（tmpfile 経由）:
-  ```elisp
-  (zellij-send--dump-screen-async session callback)
-  ```
-  ポーリングは 2 秒ごとに再帰的に走るため、同期 `call-process` のままだと eat の attach クライアント（同一シングルスレッド内で pty I/O を処理）と相互待ちになり Emacs がフリーズする。これを避けるために非同期化している。コールバックは要求元バッファをカレントにした状態で呼ばれる。
+- **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）。同期 `call-process` は禁止
+- 引数は個別の文字列として渡し、**シェル文字列結合は行わない**（コマンドインジェクション防止）
+- 汎用ヘルパー: `(zellij-send--zellij-async args &optional callback)` — callback に exit code を渡す
+- 送信: `(zellij-send--send session text &optional callback)` — write-chars → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil
+- スクリーン取得: `(zellij-send--dump-screen-async session callback)` — tmpfile 経由。コールバックは要求元バッファをカレントにした状態で呼ばれる
+
+**同期呼び出し禁止の理由**: Emacs が `call-process` でブロックすると、eat の attach クライアント（同一シングルスレッド内で pty I/O を処理）の出力を読めなくなる。pty バッファが満杯になると zellij サーバがそのクライアントへの書き込みでブロックし、**ターミナル側クライアントも含めてセッション全体が入力不可**になる。同時に zellij action コマンドも完了しないため、Emacs と zellij サーバの相互待ちで双方が永久にフリーズする（Emacs を強制終了するとクライアントが切断され zellij 側だけ復帰する）。
+
+**送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。
 
 ### Enter キー送信の注意点
 

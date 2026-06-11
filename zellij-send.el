@@ -137,18 +137,42 @@ busy → ready への遷移を検出するために使う。")
 
 ;;; 送信
 
-(defun zellij-send--send (session text)
-  "SESSION に TEXT を送り、Enter キー（0x0D）を送信する。"
-  (let ((exit1 (call-process zellij-send-executable nil nil nil
-                             "--session" session
-                             "action" "write-chars" text))
-        (exit2 (call-process zellij-send-executable nil nil nil
-                             "--session" session
-                             "action" "write" "13")))
-    (unless (zerop exit1)
-      (user-error "zellij テキスト送信失敗 (exit: %d)" exit1))
-    (unless (zerop exit2)
-      (user-error "zellij Enter 送信失敗 (exit: %d)" exit2))))
+(defun zellij-send--zellij-async (args &optional callback)
+  "zellij を ARGS で非同期実行する。
+終了したら CALLBACK に exit code を渡して呼ぶ（CALLBACK は省略可）。
+同期 `call-process' は使わない: Emacs がブロックすると eat の attach
+クライアントの pty を読めなくなり、zellij サーバごと（ターミナル側の
+クライアントも含めて）デッドロックするため。"
+  (make-process
+   :name "zellij-async"
+   :buffer nil
+   :noquery t
+   :command (cons zellij-send-executable args)
+   :sentinel
+   (lambda (proc _event)
+     (when (memq (process-status proc) '(exit signal))
+       (when callback
+         (funcall callback (process-exit-status proc)))))))
+
+(defun zellij-send--send (session text &optional callback)
+  "SESSION に TEXT を送り、続けて Enter キー（0x0D）を非同期送信する。
+完了したら CALLBACK に成功なら t、失敗なら nil を渡して呼ぶ（省略可）。
+失敗時はメッセージも表示する。"
+  (zellij-send--zellij-async
+   (list "--session" session "action" "write-chars" text)
+   (lambda (exit1)
+     (if (not (zerop exit1))
+         (progn
+           (message "zellij テキスト送信失敗 (exit: %d)" exit1)
+           (when callback (funcall callback nil)))
+       (zellij-send--zellij-async
+        (list "--session" session "action" "write" "13")
+        (lambda (exit2)
+          (if (not (zerop exit2))
+              (progn
+                (message "zellij Enter 送信失敗 (exit: %d)" exit2)
+                (when callback (funcall callback nil)))
+            (when callback (funcall callback t)))))))))
 
 ;;; スクリーンダンプ
 
@@ -324,10 +348,12 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (if zellij-send--prompt-active
       (progn
         (zellij-send--assert-session)
-        (zellij-send--send zellij-send--session (number-to-string n))
+        (zellij-send--send zellij-send--session (number-to-string n)
+                           (lambda (ok)
+                             (when ok
+                               (message "選択 %d を送信しました" n))))
         (setq zellij-send--prompt-active nil)
-        (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
-        (message "選択 %d を送信しました" n))
+        (remove-overlays (point-min) (point-max) 'zellij-send-prompt t))
     (insert (number-to-string n))))
 
 (defun zellij-send-select-1 () (interactive) (zellij-send--select-or-insert 1))
@@ -340,23 +366,26 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   "セッションに /compact を送信してコンテキストを圧縮する。"
   (interactive)
   (zellij-send--assert-session)
-  (zellij-send--send zellij-send--session "/compact")
-  (message "圧縮しました"))
+  (zellij-send--send zellij-send--session "/compact"
+                     (lambda (ok)
+                       (when ok (message "圧縮しました")))))
 
 (defun zellij-send-cc-clear ()
   "セッションに /clear を送信してコンテキストをリセットする。"
   (interactive)
   (zellij-send--assert-session)
-  (zellij-send--send zellij-send--session "/clear")
-  (message "クリアしました（コンテキスト）"))
+  (zellij-send--send zellij-send--session "/clear"
+                     (lambda (ok)
+                       (when ok (message "クリアしました（コンテキスト）")))))
 
 (defun zellij-send-save-progress ()
   "現在の作業内容を CLAUDE.md に記録するよう依頼する。"
   (interactive)
   (zellij-send--assert-session)
   (zellij-send--send zellij-send--session
-                     "ここまでの作業内容と決定事項を CLAUDE.md に追記して")
-  (message "記録を依頼しました"))
+                     "ここまでの作業内容と決定事項を CLAUDE.md に追記して"
+                     (lambda (ok)
+                       (when ok (message "記録を依頼しました")))))
 
 ;;; インタラクティブコマンド
 
@@ -365,14 +394,20 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (interactive)
   (zellij-send--assert-session)
   (let* ((session zellij-send--session)
+         (buf (current-buffer))
          (text (string-trim (buffer-string))))
     (when (string-empty-p text)
       (user-error "送信するテキストが空です"))
-    (zellij-send--send session text)
-    (erase-buffer)
-    (set-buffer-modified-p nil)
-    (setq zellij-send--user-cleared nil)
-    (message "送信しました → [%s]" session)))
+    ;; 失敗時に入力テキストを失わないよう、クリアは成功後に行う
+    (zellij-send--send
+     session text
+     (lambda (ok)
+       (when (and ok (buffer-live-p buf))
+         (with-current-buffer buf
+           (erase-buffer)
+           (set-buffer-modified-p nil)
+           (setq zellij-send--user-cleared nil))
+         (message "送信しました → [%s]" session))))))
 
 (defun zellij-send-show-response ()
   "zellij スクリーンの内容をバッファに取得・表示する。"
@@ -405,19 +440,13 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
              (format "セッション [%s] を削除しますか? (eat バッファ・zellij セッションも消えます) " session))
       (user-error "キャンセルしました"))
     ;; 1. Claude Code に /exit を送信（失敗しても続行）
-    (condition-case nil
-        (zellij-send--send session "/exit")
-      (error nil))
+    (zellij-send--send session "/exit")
     (message "セッション [%s] を終了中..." session)
     ;; 2. 2秒後にシェルへ exit を送信（Claude Code 終了後のシェルを抜ける）
     (run-with-timer
      2.0 nil
      (lambda ()
-       (ignore-errors
-         (call-process zellij-send-executable nil nil nil
-                       "--session" session "action" "write-chars" "exit")
-         (call-process zellij-send-executable nil nil nil
-                       "--session" session "action" "write" "13"))
+       (zellij-send--send session "exit")
        ;; 3. さらに 1.5秒後にクリーンアップ
        (run-with-timer
         1.5 nil
@@ -433,13 +462,13 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
                 (set-buffer-modified-p nil))
               (kill-buffer eat-buf)))
           ;; zellij セッションが残っていれば削除
-          (ignore-errors
-            (call-process zellij-send-executable nil nil nil
-                          "delete-session" session))
-          ;; 黒板バッファを閉じる
-          (when (buffer-live-p main-buf)
-            (kill-buffer main-buf))
-          (message "セッション [%s] を削除しました" session)))))))
+          (zellij-send--zellij-async
+           (list "delete-session" session)
+           (lambda (_exit)
+             ;; 黒板バッファを閉じる
+             (when (buffer-live-p main-buf)
+               (kill-buffer main-buf))
+             (message "セッション [%s] を削除しました" session)))))))))
 
 (defun zellij-send-open-eat ()
   "このセッションの eat バッファをビューモードで開く。なければ zellij attach -c で起動する。"
@@ -464,25 +493,34 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
     (user-error "セッション情報がありません"))
   (let ((session zellij-send--session)
         (text (string-trim (buffer-string)))
+        (reply-buf (current-buffer))
         (main-buf zellij-send--reply-main-buffer)
         (wconf zellij-send--reply-window-config))
     (when (string-empty-p text)
       (user-error "送信するテキストが空です"))
-    (zellij-send--send session text)
-    (kill-buffer (current-buffer))
-    (if (window-configuration-p wconf)
-        (set-window-configuration wconf)
-      (when (and main-buf (buffer-live-p main-buf))
-        (pop-to-buffer main-buf)))
-    (message "送信しました → [%s]" session)))
+    ;; 失敗時は返信バッファを残してテキストを失わない
+    (zellij-send--send
+     session text
+     (lambda (ok)
+       (when ok
+         (when (buffer-live-p reply-buf)
+           (kill-buffer reply-buf))
+         (if (window-configuration-p wconf)
+             (set-window-configuration wconf)
+           (when (and main-buf (buffer-live-p main-buf))
+             (pop-to-buffer main-buf)))
+         (message "送信しました → [%s]" session))))))
 
 (defun zellij-send-reply-number ()
   "数字を入力して zellij セッションに送信する。"
   (interactive)
   (zellij-send--assert-session)
-  (let ((n (read-number "送る数字: ")))
-    (zellij-send--send zellij-send--session (number-to-string n))
-    (message "送信しました: %d → [%s]" n zellij-send--session)))
+  (let ((session zellij-send--session)
+        (n (read-number "送る数字: ")))
+    (zellij-send--send session (number-to-string n)
+                       (lambda (ok)
+                         (when ok
+                           (message "送信しました: %d → [%s]" n session))))))
 
 (defvar zellij-send-reply-mode-map
   (let ((map (make-sparse-keymap)))
