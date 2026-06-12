@@ -38,7 +38,7 @@ This tool bridges the gap: compose text in a regular Emacs buffer (where your in
 ## Requirements
 
 - Emacs 28 or later (`transient` is built in)
-- [zellij](https://zellij.dev/) installed and available on `$PATH`
+- [zellij](https://zellij.dev/) **0.44 or later** installed and available on `$PATH` (older versions have a different `dump-screen` CLI and cannot target panes by id)
 - [`markdown-mode`](https://github.com/jrblevin/markdown-mode) (optional): enables Markdown font decoration when installed
 
 ## Installation
@@ -77,7 +77,9 @@ M-x zellij-send
 
 A list of running zellij sessions is shown. Selecting one opens the `*ai-session-name*` buffer.
 
-Select `[New]` to create a new zellij session. You will be prompted for a working directory; the directory name becomes the session name. The command configured in `zellij-send-default-command` (default: `claude`) is launched automatically in the new session.
+Select `[New]` to create a new zellij session. You will be prompted for a working directory; the directory name becomes the session name. A **detached** (background) zellij session is created, and the command configured in `zellij-send-default-command` (default: `claude`) is launched in a new pane. The pane id is remembered, so no terminal client needs to be attached — everything works in the background. To watch the session live, run `zellij attach SESSION` in any terminal.
+
+For **existing** sessions (not created by this package), the pane id is unknown, so input is sent to the focused pane. This requires at least one attached client (e.g. your terminal); fully detached foreign sessions will not receive input.
 
 ### 2. Send text
 
@@ -102,12 +104,12 @@ Inside the `*ai-session-name*` buffer:
 
 **Display**
 
-| Key | Action                                                                                         |
-|-----|------------------------------------------------------------------------------------------------|
-| `a` | Show AI response (dumps the zellij screen)                                                     |
-| `t` | Open terminal view (eat buffer, attaches to the zellij session)                                |
-| `x` | Clear the buffer                                                                               |
-| `q` | Delete session: close eat buffer, remove zellij session, and close buffer (asks confirmation)  |
+| Key | Action                                                                          |
+|-----|---------------------------------------------------------------------------------|
+| `a` | Show AI response (dumps the zellij screen)                                      |
+| `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
+| `x` | Clear the buffer                                                                |
+| `q` | Delete session: remove the zellij session and close buffer (asks confirmation)  |
 
 **Send**
 
@@ -175,22 +177,79 @@ To set a custom path to the `zellij` executable:
 (setq zellij-send-executable "/usr/local/bin/zellij")
 ```
 
-## Auto-receive Setup (Claude Code Stop Hook)
+The Claude output log location (relative to the session's working directory; keep it in sync with the hook script):
 
-Automatically update the Emacs buffer whenever Claude Code finishes a response.
+```elisp
+(setq zellij-send-log-file ".zellij-send/claude-log.md")
+```
 
-This requires an Emacs server to be running (`(server-start)` or `emacs --daemon`).
+## Auto-receive & Markdown Log Setup (Claude Code Stop Hook)
+
+The Stop hook does two things every time Claude Code finishes a response:
+
+1. **Markdown log**: extracts the latest assistant message from the transcript and appends it to `.zellij-send/claude-log.md` in the working directory (open it with `C-c C-a` → `l`). Useful for reviewing what Claude said earlier in a long session.
+2. **Auto-receive**: updates the `*ai-session-name*` buffer via `emacsclient`. This part requires an Emacs server to be running (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
 
+Create `~/.claude/hooks/stop-zellij-send.sh` (requires `python3`):
+
 ```sh
-mkdir -p ~/.claude/hooks
-cat > ~/.claude/hooks/stop-zellij-send.sh << 'EOF'
 #!/bin/sh
-emacsclient -e "(zellij-send--on-claude-stop)" 2>/dev/null || true
-EOF
+# The hook JSON is passed via an env var because the heredoc occupies stdin
+ZJS_HOOK_INPUT=$(cat)
+export ZJS_HOOK_INPUT
+
+/usr/bin/python3 - <<'PY' 2>/dev/null
+import json, os, datetime
+
+data = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
+transcript_path = data.get("transcript_path")
+cwd = data.get("cwd") or ""
+
+if transcript_path and cwd and os.path.isfile(transcript_path):
+    last = None
+    with open(transcript_path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") != "assistant":
+                continue
+            msg = rec.get("message") or {}
+            texts = [c.get("text", "")
+                     for c in (msg.get("content") or [])
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            text = "\n\n".join(t for t in texts if t.strip())
+            if text.strip():
+                last = text
+    if last:
+        log_dir = os.path.join(cwd, ".zellij-send")
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(os.path.join(log_dir, "claude-log.md"), "a") as out:
+            out.write("\n## %s\n\n%s\n" % (stamp, last))
+PY
+
+# Run emacsclient in the background with a 10s watchdog so a busy/frozen
+# Emacs never blocks the Stop hook
+(
+  emacsclient -e "(zellij-send--on-claude-stop)" >/dev/null 2>&1 &
+  EC_PID=$!
+  sleep 10
+  kill "$EC_PID" 2>/dev/null
+) &
+exit 0
+```
+
+Then make it executable:
+
+```sh
 chmod +x ~/.claude/hooks/stop-zellij-send.sh
 ```
+
+Tip: add `.zellij-send/` to your `.gitignore` (or global gitignore) if you don't want the log committed.
 
 ### 2. Register the hook in Claude Code settings
 
@@ -232,9 +291,11 @@ With this in place, the `*ai-session-name*` buffer updates every time Claude Cod
 
 ## How It Works
 
-- **Sending text**: `zellij action write-chars` sends the text; `zellij action write 13` (CR) sends Enter
-- **Reading response**: `zellij action dump-screen` dumps the pane content to a temp file; ANSI escapes are stripped before displaying in the buffer
-- **Auto-receive (Stop hook)**: Claude Code Stop hook → `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
+- **New session**: `zellij attach --create-background` creates a detached session; `zellij run --cwd DIR -- claude` starts the agent in a new pane and returns its pane id, which is remembered for all later commands. No attached client (terminal emulator) is needed.
+- **Sending text**: `zellij action write-chars --pane-id ID` sends the text; `zellij action write --pane-id ID 13` (CR) sends Enter. Without a known pane id, the focused pane is targeted instead (requires an attached client).
+- **Reading response**: `zellij action dump-screen` prints the pane content to stdout (zellij 0.44+); ANSI escapes are stripped before displaying in the buffer
+- **All zellij calls are asynchronous** (`make-process` + sentinel) so Emacs never blocks
+- **Auto-receive (Stop hook)**: Claude Code Stop hook → appends the latest assistant message to the markdown log, then `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
 - **Polling**: Fetches screen content every `zellij-send-poll-interval` seconds (default: 2); skips update while the user is editing (`buffer-modified-p`)
 - **Reply buffer**: Opens via `pop-to-buffer`; after sending, `set-window-configuration` restores the previous window layout
 

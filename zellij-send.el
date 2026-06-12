@@ -41,8 +41,20 @@ Claude Code のデフォルトは ❯。Gemini CLI 等では変更する。"
   :type 'regexp
   :group 'zellij-send)
 
+(defcustom zellij-send-log-file ".zellij-send/claude-log.md"
+  "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
+実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
+変更する場合はフックスクリプト側も合わせること。"
+  :type 'string
+  :group 'zellij-send)
+
 (defvar-local zellij-send--session nil
   "このバッファに対応する zellij セッション名。")
+
+(defvar-local zellij-send--pane-id nil
+  "送信先ペインの ID（例: \"terminal_2\"）。
+このパッケージが `zellij run' で起動したペインのみ判明する。
+nil の場合は focused pane に送る（attach クライアントが必要）。")
 
 (defvar-local zellij-send--timer nil
   "ポーリングタイマー。")
@@ -140,9 +152,8 @@ busy → ready への遷移を検出するために使う。")
 (defun zellij-send--zellij-async (args &optional callback)
   "zellij を ARGS で非同期実行する。
 終了したら CALLBACK に exit code を渡して呼ぶ（CALLBACK は省略可）。
-同期 `call-process' は使わない: Emacs がブロックすると eat の attach
-クライアントの pty を読めなくなり、zellij サーバごと（ターミナル側の
-クライアントも含めて）デッドロックするため。"
+同期 `call-process' は使わない: Emacs の UI をブロックし、
+zellij サーバ側の都合で応答が遅れた場合にフリーズするため。"
   (make-process
    :name "zellij-async"
    :buffer nil
@@ -154,25 +165,36 @@ busy → ready への遷移を検出するために使う。")
        (when callback
          (funcall callback (process-exit-status proc)))))))
 
+(defun zellij-send--pane-args ()
+  "カレントバッファの `zellij-send--pane-id' から --pane-id 引数リストを返す。
+pane-id 不明なら nil（focused pane への送信になる）。"
+  (when zellij-send--pane-id
+    (list "--pane-id" zellij-send--pane-id)))
+
 (defun zellij-send--send (session text &optional callback)
   "SESSION に TEXT を送り、続けて Enter キー（0x0D）を非同期送信する。
+カレントバッファに `zellij-send--pane-id' があればそのペインへ、
+なければ focused pane へ送る（後者は attach クライアントが必要）。
 完了したら CALLBACK に成功なら t、失敗なら nil を渡して呼ぶ（省略可）。
 失敗時はメッセージも表示する。"
-  (zellij-send--zellij-async
-   (list "--session" session "action" "write-chars" text)
-   (lambda (exit1)
-     (if (not (zerop exit1))
-         (progn
-           (message "zellij テキスト送信失敗 (exit: %d)" exit1)
-           (when callback (funcall callback nil)))
-       (zellij-send--zellij-async
-        (list "--session" session "action" "write" "13")
-        (lambda (exit2)
-          (if (not (zerop exit2))
-              (progn
-                (message "zellij Enter 送信失敗 (exit: %d)" exit2)
-                (when callback (funcall callback nil)))
-            (when callback (funcall callback t)))))))))
+  (let ((pane-args (zellij-send--pane-args)))
+    (zellij-send--zellij-async
+     (append (list "--session" session "action" "write-chars")
+             pane-args (list "--" text))
+     (lambda (exit1)
+       (if (not (zerop exit1))
+           (progn
+             (message "zellij テキスト送信失敗 (exit: %d)" exit1)
+             (when callback (funcall callback nil)))
+         (zellij-send--zellij-async
+          (append (list "--session" session "action" "write")
+                  pane-args (list "--" "13"))
+          (lambda (exit2)
+            (if (not (zerop exit2))
+                (progn
+                  (message "zellij Enter 送信失敗 (exit: %d)" exit2)
+                  (when callback (funcall callback nil)))
+              (when callback (funcall callback t))))))))))
 
 ;;; スクリーンダンプ
 
@@ -190,34 +212,35 @@ busy → ready への遷移を検出するために使う。")
     (replace-regexp-in-string "\r" "" raw))))
 
 (defun zellij-send--dump-screen-async (session callback)
-  "SESSION のスクリーン内容を非同期で取得する。
+  "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。
+カレントバッファに `zellij-send--pane-id' があればそのペインをダンプする。
 取得できたら整形済み文字列を、失敗時は nil を引数にして CALLBACK を呼ぶ。
 CALLBACK は要求元バッファをカレントにした状態で呼ばれる。"
-  (let ((tmpfile (make-temp-file "zellij-dump-"))
-        (req-buffer (current-buffer)))
+  (let ((req-buffer (current-buffer))
+        (out-buf (generate-new-buffer " *zellij-dump*"))
+        (err-buf (generate-new-buffer " *zellij-dump-err*")))
     (make-process
      :name "zellij-dump"
-     :buffer nil
+     :buffer out-buf
+     :stderr err-buf
      :noquery t
-     :command (list zellij-send-executable
-                    "--session" session
-                    "action" "dump-screen" "--path" tmpfile)
+     :command (append (list zellij-send-executable
+                            "--session" session
+                            "action" "dump-screen")
+                      (when zellij-send--pane-id
+                        (list "--pane-id" zellij-send--pane-id)))
      :sentinel
      (lambda (proc _event)
        (when (memq (process-status proc) '(exit signal))
-         (unwind-protect
-             (let ((content
-                    (when (and (zerop (process-exit-status proc))
-                               (file-exists-p tmpfile))
-                      (zellij-send--process-dump
-                       (with-temp-buffer
-                         (insert-file-contents tmpfile)
-                         (buffer-string))))))
-               (when (buffer-live-p req-buffer)
-                 (with-current-buffer req-buffer
-                   (funcall callback content))))
-           (when (file-exists-p tmpfile)
-             (delete-file tmpfile))))))))
+         (let ((content
+                (when (zerop (process-exit-status proc))
+                  (zellij-send--process-dump
+                   (with-current-buffer out-buf (buffer-string))))))
+           (ignore-errors (kill-buffer out-buf))
+           (ignore-errors (kill-buffer err-buf))
+           (when (buffer-live-p req-buffer)
+             (with-current-buffer req-buffer
+               (funcall callback content)))))))))
 
 ;;; プロンプト検出・ハイライト
 
@@ -431,58 +454,37 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (message "クリアしました"))
 
 (defun zellij-send-quit ()
-  "Claude Code に /exit を送り、シェルを終了し、zellij セッションとバッファを削除する。"
+  "Claude Code に /exit を送り、zellij セッションとバッファを削除する。"
   (interactive)
   (zellij-send--assert-session)
   (let ((session zellij-send--session)
         (main-buf (current-buffer)))
     (unless (yes-or-no-p
-             (format "セッション [%s] を削除しますか? (eat バッファ・zellij セッションも消えます) " session))
+             (format "セッション [%s] を削除しますか? (zellij セッションも消えます) " session))
       (user-error "キャンセルしました"))
-    ;; 1. Claude Code に /exit を送信（失敗しても続行）
+    ;; Claude Code に /exit を送信（失敗しても続行）
     (zellij-send--send session "/exit")
     (message "セッション [%s] を終了中..." session)
-    ;; 2. 2秒後にシェルへ exit を送信（Claude Code 終了後のシェルを抜ける）
+    ;; 2秒後にセッションを強制削除してバッファを閉じる
     (run-with-timer
      2.0 nil
      (lambda ()
-       (zellij-send--send session "exit")
-       ;; 3. さらに 1.5秒後にクリーンアップ
-       (run-with-timer
-        1.5 nil
-        (lambda ()
-          ;; eat バッファのプロセスを終了してバッファを閉じる
-          (when-let ((eat-buf (get-buffer (zellij-send--eat-buffer-name session))))
-            (when (buffer-live-p eat-buf)
-              (ignore-errors
-                (when-let ((proc (get-buffer-process eat-buf)))
-                  (set-process-query-on-exit-flag proc nil)
-                  (delete-process proc)))
-              (with-current-buffer eat-buf
-                (set-buffer-modified-p nil))
-              (kill-buffer eat-buf)))
-          ;; zellij セッションが残っていれば削除
-          (zellij-send--zellij-async
-           (list "delete-session" session)
-           (lambda (_exit)
-             ;; 黒板バッファを閉じる
-             (when (buffer-live-p main-buf)
-               (kill-buffer main-buf))
-             (message "セッション [%s] を削除しました" session)))))))))
+       (zellij-send--zellij-async
+        (list "delete-session" "--force" session)
+        (lambda (_exit)
+          (when (buffer-live-p main-buf)
+            (kill-buffer main-buf))
+          (message "セッション [%s] を削除しました" session)))))))
 
-(defun zellij-send-open-eat ()
-  "このセッションの eat バッファをビューモードで開く。なければ zellij attach -c で起動する。"
+(defun zellij-send-open-log ()
+  "Claude の出力ログ（markdown）を別ウィンドウで開く。
+ログは Stop フックが `zellij-send-log-file' に追記する。"
   (interactive)
   (zellij-send--assert-session)
-  (let* ((session zellij-send--session)
-         (existing (get-buffer (zellij-send--eat-buffer-name session)))
-         (buf (or existing (zellij-send--launch-eat-session session))))
-    (unless existing
-      (run-with-timer 0.5 nil (lambda ()
-                                (when (buffer-live-p buf)
-                                  (with-current-buffer buf
-                                    (eat-emacs-mode))))))
-    (pop-to-buffer buf)))
+  (let ((file (expand-file-name zellij-send-log-file default-directory)))
+    (unless (file-exists-p file)
+      (user-error "ログファイルがまだありません: %s" file))
+    (find-file-other-window file)))
 
 ;;; 返信バッファ
 
@@ -541,6 +543,8 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
       (erase-buffer)
       (text-mode)
       (setq-local zellij-send--session session)
+      (setq-local zellij-send--pane-id
+                  (buffer-local-value 'zellij-send--pane-id main-buf))
       (setq-local zellij-send--reply-main-buffer main-buf)
       (setq-local zellij-send--reply-window-config wconf)
       (use-local-map zellij-send-reply-mode-map)
@@ -554,7 +558,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   "ZellijSend メニュー"
   [["表示"
     ("a" "Claude Code の回答を表示" zellij-send-show-response)
-    ("t" "端末で表示 (eat)"         zellij-send-open-eat)
+    ("l" "出力ログを開く (markdown)" zellij-send-open-log)
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)
     ("q" "終了"                     zellij-send-quit)]
    ["送信"
@@ -582,13 +586,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (setq-local header-line-format
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
-  ;; eat の attach 確立（0.5〜1.0 秒）より後にポーリングを開始して競合を避ける
-  (let ((buf (current-buffer)))
-    (run-with-timer 1.5 nil
-                    (lambda ()
-                      (when (buffer-live-p buf)
-                        (with-current-buffer buf
-                          (zellij-send--start-polling))))))
+  (zellij-send--start-polling)
   (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t)
   (add-hook 'window-buffer-change-functions
             #'zellij-send--clear-notification-on-switch))
@@ -641,70 +639,82 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (when (member session known-sessions)
     (user-error "セッション「%s」はすでに存在します" session)))
 
-(defun zellij-send--eat-buffer-name (session)
-  "SESSION に対応する eat バッファ名を返す。"
-  (format "*eat-%s*" session))
-
-(defun zellij-send--launch-eat-session (session &optional dir)
-  "eat バッファで SESSION に zellij attach -c を実行し、バッファを返す。
-DIR が指定された場合はそのディレクトリで起動する（新規セッション用）。"
-  (unless (require 'eat nil t)
-    (user-error "eat がインストールされていません（M-x package-install RET eat）"))
-  (let* ((default-directory (if dir (file-name-as-directory dir) default-directory))
-         (buf (eat-make (zellij-send--eat-buffer-name session)
-                        zellij-send-executable
-                        nil
-                        "attach" "-c" session)))
-    (when-let ((proc (get-buffer-process buf)))
-      (let ((prev (process-sentinel proc)))
-        (set-process-sentinel
-         proc
-         (lambda (p status)
-           (when prev (funcall prev p status))
-           (let ((b (process-buffer p)))
-             (when (buffer-live-p b)
-               (kill-buffer b)))))))
-    buf))
-
 (defun zellij-send--setup-session-buffer (session dir)
-  "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。"
+  "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。
+作成したバッファを返す。"
   (let ((buf (zellij-send--get-or-create-buffer session)))
     (with-current-buffer buf
       (setq-local default-directory (file-name-as-directory dir)))
     (switch-to-buffer buf)
-    (goto-char (point-max))))
+    (goto-char (point-max))
+    buf))
+
+(defun zellij-send--run-in-session-async (session dir command callback)
+  "SESSION に新しいペインを作って COMMAND（文字列）を起動する。
+DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"terminal_2\"）を、
+失敗したら nil を CALLBACK に渡す。attach クライアントは不要（zellij 0.44+）。"
+  (let ((out-buf (generate-new-buffer " *zellij-run*"))
+        (err-buf (generate-new-buffer " *zellij-run-err*")))
+    (make-process
+     :name "zellij-run"
+     :buffer out-buf
+     :stderr err-buf
+     :noquery t
+     :command (append (list zellij-send-executable "--session" session
+                            "run" "--cwd" dir "--name" command "--")
+                      (split-string command))
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (let ((out (with-current-buffer out-buf (buffer-string))))
+           (ignore-errors (kill-buffer out-buf))
+           (ignore-errors (kill-buffer err-buf))
+           (funcall callback
+                    (and (zerop (process-exit-status proc))
+                         (string-match "terminal_[0-9]+" out)
+                         (match-string 0 out)))))))))
 
 (defun zellij-send--create-new-session (known-sessions)
-  "新規 zellij セッションを作成して `zellij-send-default-command' を起動する。
+  "新規 detached zellij セッションを作成し claude ペインを起動する。
+attach クライアント（eat）は使わない: `zellij attach --create-background' で
+セッションを作り、`zellij run' で `zellij-send-default-command' を起動して
+返る pane-id を保持し、以後 --pane-id 指定で送受信する。
 KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
   (let* ((dir (zellij-send--prompt-session-dir))
          (session (file-name-nondirectory dir)))
     (zellij-send--assert-session-unique session known-sessions)
-    (let ((eat-buf (zellij-send--launch-eat-session session dir)))
-      (run-with-timer 1.0 nil
-                      (lambda ()
-                        (when (buffer-live-p eat-buf)
-                          (when-let ((proc (get-buffer-process eat-buf)))
-                            (process-send-string proc
-                                                 (concat zellij-send-default-command "\n")))))))
-    (zellij-send--setup-session-buffer session dir)))
+    (let ((buf (zellij-send--setup-session-buffer session dir)))
+      (zellij-send--zellij-async
+       (list "attach" "--create-background" session)
+       (lambda (exit)
+         (if (not (zerop exit))
+             (message "zellij セッション作成に失敗しました (exit: %d)" exit)
+           ;; セッション初期化を待ってから claude ペインを起動
+           (run-with-timer
+            0.5 nil
+            (lambda ()
+              (zellij-send--run-in-session-async
+               session dir zellij-send-default-command
+               (lambda (pane-id)
+                 (if (not pane-id)
+                     (message "%s の起動に失敗しました"
+                              zellij-send-default-command)
+                   (when (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (setq-local zellij-send--pane-id pane-id)))
+                   (message "セッション [%s] を作成しました (%s)"
+                            session pane-id))))))))))))
 
 (defun zellij-send--connect-existing-session (session)
-  "既存 SESSION に接続し、黒板バッファと eat バッファを開く。"
-  (let* ((eat-existing (get-buffer (zellij-send--eat-buffer-name session)))
-         (eat-buf (or eat-existing (zellij-send--launch-eat-session session))))
-    (unless eat-existing
-      (run-with-timer 0.5 nil
-                      (lambda ()
-                        (when (buffer-live-p eat-buf)
-                          (with-current-buffer eat-buf
-                            (eat-emacs-mode))))))
-    (if (get-buffer (zellij-send--buffer-name session))
-        (progn
-          (switch-to-buffer (zellij-send--get-or-create-buffer session))
-          (goto-char (point-max)))
-      (let ((dir (zellij-send--prompt-session-dir)))
-        (zellij-send--setup-session-buffer session dir)))))
+  "既存 SESSION 用の黒板バッファを開く。
+pane-id は不明なため focused pane へ送信する。完全に detached な
+セッションには届かないので、その場合はターミナルで attach しておくこと。"
+  (if (get-buffer (zellij-send--buffer-name session))
+      (progn
+        (switch-to-buffer (zellij-send--get-or-create-buffer session))
+        (goto-char (point-max)))
+    (let ((dir (zellij-send--prompt-session-dir)))
+      (zellij-send--setup-session-buffer session dir))))
 
 ;;;###autoload
 (defun zellij-send ()

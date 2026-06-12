@@ -38,7 +38,7 @@ Emacs から [zellij](https://zellij.dev/) セッションの AI エージェン
 ## 必要環境
 
 - Emacs 28 以上（`transient` 内蔵）
-- [zellij](https://zellij.dev/) がインストール済みで `$PATH` に通っていること
+- [zellij](https://zellij.dev/) **0.44 以上**がインストール済みで `$PATH` に通っていること（旧版は `dump-screen` の CLI 仕様が異なり、pane-id 指定もできません）
 - [`markdown-mode`](https://github.com/jrblevin/markdown-mode)（オプション）：インストール済みの場合、マークダウン装飾が有効になります
 
 ## インストール
@@ -77,6 +77,10 @@ M-x zellij-send
 
 起動中の zellij セッション一覧が表示されます。選択すると `*ai-セッション名*` バッファが開きます。
 
+`[New]` を選ぶと新規セッションを作成します。作業ディレクトリを聞かれ、ディレクトリ名がセッション名になります。zellij セッションは **detached（バックグラウンド）** で作られ、`zellij-send-default-command`（デフォルト: `claude`）が新しいペインで起動します。ペイン ID を記憶して送受信するため、ターミナルでの attach は不要です。途中経過を生で見たいときは任意のターミナルで `zellij attach セッション名` してください。
+
+**既存セッション**（このパッケージ以外で作ったもの）はペイン ID が分からないため、フォーカス中のペインに送信します。この場合は attach 中のクライアント（ターミナル等）が必要です。完全に detached なセッションには入力が届きません。
+
 ### 2. テキストを送信
 
 バッファにテキストを書いて `C-c C-c` で送信します。送信後バッファは自動的にクリアされます。
@@ -100,12 +104,12 @@ Claude Code が回答を終えると、`*ai-セッション名*` バッファが
 
 **表示**
 
-| キー | 動作                                                                               |
-|------|------------------------------------------------------------------------------------|
-| `a`  | AI の回答を表示（zellij スクリーンをダンプ）                                       |
-| `t`  | 端末で表示（eat バッファで zellij セッションに attach）                             |
-| `x`  | バッファの内容をクリア                                                             |
-| `q`  | セッションを削除（eat バッファ・zellij セッションを消してバッファを閉じる。確認あり） |
+| キー | 動作                                                                 |
+|------|----------------------------------------------------------------------|
+| `a`  | AI の回答を表示（zellij スクリーンをダンプ）                         |
+| `l`  | 出力ログを開く（markdown。Stop フックが追記）                        |
+| `x`  | バッファの内容をクリア                                               |
+| `q`  | セッションを削除（zellij セッションを消してバッファを閉じる。確認あり） |
 
 **送信**
 
@@ -152,22 +156,79 @@ Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*
 (setq zellij-send-executable "/usr/local/bin/zellij")
 ```
 
-## 自動受信のセットアップ（Claude Code Stop フック）
+Claude 出力ログの場所（セッション作業ディレクトリからの相対パス。フックスクリプト側と合わせること）:
 
-Claude Code の回答完了を Emacs に自動通知する設定です。
+```elisp
+(setq zellij-send-log-file ".zellij-send/claude-log.md")
+```
 
-この機能を使うには Emacs server が起動している必要があります（`(server-start)` または `emacs --daemon`）。
+## 自動受信 & markdown ログのセットアップ（Claude Code Stop フック）
+
+Stop フックは Claude Code の回答完了のたびに 2 つの処理を行います:
+
+1. **markdown ログ**: transcript から最新の assistant 出力を抽出し、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開けます）。長いセッションの途中で過去の出力を確認するのに便利です。
+2. **自動受信**: `emacsclient` 経由で `*ai-セッション名*` バッファを更新します。こちらは Emacs server の起動が必要です（`(server-start)` または `emacs --daemon`）。
 
 ### 1. フックスクリプトを作成
 
+`~/.claude/hooks/stop-zellij-send.sh` を作成します（`python3` が必要）:
+
 ```sh
-mkdir -p ~/.claude/hooks
-cat > ~/.claude/hooks/stop-zellij-send.sh << 'EOF'
 #!/bin/sh
-emacsclient -e "(zellij-send--on-claude-stop)" 2>/dev/null || true
-EOF
+# ヒアドキュメントが stdin を占有するため、フックの JSON は環境変数で渡す
+ZJS_HOOK_INPUT=$(cat)
+export ZJS_HOOK_INPUT
+
+/usr/bin/python3 - <<'PY' 2>/dev/null
+import json, os, datetime
+
+data = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
+transcript_path = data.get("transcript_path")
+cwd = data.get("cwd") or ""
+
+if transcript_path and cwd and os.path.isfile(transcript_path):
+    last = None
+    with open(transcript_path) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") != "assistant":
+                continue
+            msg = rec.get("message") or {}
+            texts = [c.get("text", "")
+                     for c in (msg.get("content") or [])
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            text = "\n\n".join(t for t in texts if t.strip())
+            if text.strip():
+                last = text
+    if last:
+        log_dir = os.path.join(cwd, ".zellij-send")
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(os.path.join(log_dir, "claude-log.md"), "a") as out:
+            out.write("\n## %s\n\n%s\n" % (stamp, last))
+PY
+
+# Emacs がビジー/フリーズしていても Stop フックをブロックしないよう、
+# emacsclient はバックグラウンド起動して 10 秒で打ち切る
+(
+  emacsclient -e "(zellij-send--on-claude-stop)" >/dev/null 2>&1 &
+  EC_PID=$!
+  sleep 10
+  kill "$EC_PID" 2>/dev/null
+) &
+exit 0
+```
+
+実行権限を付けます:
+
+```sh
 chmod +x ~/.claude/hooks/stop-zellij-send.sh
 ```
+
+ログをコミットしたくない場合は `.zellij-send/` を `.gitignore`（またはグローバル gitignore）に追加してください。
 
 ### 2. Claude Code の設定ファイルを作成
 
@@ -209,9 +270,11 @@ chmod +x ~/.claude/hooks/stop-zellij-send.sh
 
 ## 仕組み
 
-- テキスト送信: `zellij action write-chars` でテキストを送り、`zellij action write 13`（CR）で Enter を送信
-- 回答取得: `zellij action dump-screen` でペインの内容を一時ファイルに書き出し、ANSI エスケープを除去してバッファに表示
-- 自動受信（Stop フック）: Claude Code の Stop フック → `emacsclient` → `zellij-send--on-claude-stop` → 全 zellij-send バッファを更新
+- 新規セッション: `zellij attach --create-background` で detached セッションを作成し、`zellij run --cwd DIR -- claude` でエージェントを新ペインで起動。返ってきたペイン ID を記憶して以後のコマンドに使う。attach クライアント（ターミナルエミュレータ）は不要
+- テキスト送信: `zellij action write-chars --pane-id ID` でテキストを送り、`zellij action write --pane-id ID 13`（CR）で Enter を送信。ペイン ID 不明時はフォーカス中のペインに送る（attach クライアントが必要）
+- 回答取得: `zellij action dump-screen` でペインの内容を標準出力に取得（zellij 0.44+）、ANSI エスケープを除去してバッファに表示
+- **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）で Emacs はブロックしない
+- 自動受信（Stop フック）: Claude Code の Stop フック → 最新の assistant 出力を markdown ログに追記 → `emacsclient` → `zellij-send--on-claude-stop` → 全 zellij-send バッファを更新
 - ポーリング: `zellij-send-poll-interval`（デフォルト 2 秒）間隔でスクリーン内容を取得・差分更新。ユーザーが入力中（`buffer-modified-p`）は更新しない
 - 返信バッファ: `pop-to-buffer` で別ウィンドウに開き、送信後は `set-window-configuration` でウィンドウ構成を復元
 

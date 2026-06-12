@@ -6,16 +6,22 @@
 
 Emacs から zellij セッション上の AI エージェント（主に Claude Code）に日本語テキストを送る Emacs パッケージ。
 `M-x zellij-send` でセッションを選択し、専用バッファ（`*ai-セッション名*`）で入力・確認・返信を行う。
-このパッケージは 3 つの要素で成り立つ:
+このパッケージは 2 つの要素で成り立つ:
 - *ai-SESSION* バッファ（黒板）: ユーザーが入力するための主インターフェース
-- eat バッファ: zellij attach <session> を実行する。理由は (a) Claude Code の応答を生で確認できる、(b) zellij セッションは attach されたクライアントが存在しないと write-chars が期待通り動かないため、eat による attach が機能上必須
-- zellij セッション本体: バックグラウンドで動く実体
-zellij-send を呼び出すと、[New] か既存セッションかに関係なく、黒板バッファと eat バッファの両方が開くこと。eat 側で attach が確立してから write-chars 系のコマンドを送ること。
+- zellij セッション本体: detached（attach クライアントなし）でバックグラウンドで動く実体
+
+**attach クライアントは不要**（zellij 0.44+ で実機検証済み）。新規セッションは
+`zellij attach --create-background` で detached のまま作り、`zellij run` で claude を
+起動して返る pane-id（`terminal_N`）を保持し、以後すべての送受信を `--pane-id` 指定で行う。
+focused pane への送信（pane-id 指定なし）はクライアントがいないと届かないため、
+pane-id 不明の既存セッションに送る場合のみ使う（ターミナル側で attach していれば動く）。
+かつては eat による attach を必須としていたが、eat 連携が原因のフリーズが解消できず全廃した。
 
 ## 開発環境
 
 - Emacs 31、`lexical-binding: t`
 - 依存: `transient` 0.4以上（必須）、`markdown-mode`（オプション）
+- zellij **0.44 以上**（dump-screen の STDOUT 出力・`--pane-id` 指定に依存）
 - パッケージ管理: elpaca 想定
 
 ## ファイル構造
@@ -30,22 +36,22 @@ zellij-send を呼び出すと、[New] か既存セッションかに関係な�
 ## アーキテクチャ
 
 ```
-Emacs バッファ (*ai-SESSION*)
-  ├─ 入力: C-c C-c → zellij-send--send → zellij action write-chars + write 13
-  ├─ 表示: zellij action dump-screen → tmpfile 経由 → バッファ更新（非同期 / make-process + sentinel）
+Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
+  ├─ 入力: C-c C-c → zellij-send--send → zellij action write-chars/write 13（--pane-id 指定）
+  ├─ 表示: zellij action dump-screen → STDOUT 直読み → バッファ更新（非同期 / make-process + sentinel）
   ├─ 自動受信: Stop フック (emacsclient) または ポーリング (run-at-time)
+  ├─ ログ: Stop フックが transcript から assistant 出力を .zellij-send/claude-log.md に追記
   └─ UI: transient メニュー (C-c C-a)
 ```
 
 ### zellij コマンドの呼び出し方針
 
-- **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）。同期 `call-process` は禁止
-- 引数は個別の文字列として渡し、**シェル文字列結合は行わない**（コマンドインジェクション防止）
+- **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）。同期 `call-process` は禁止（Emacs の UI をブロックしフリーズの温床になる）
+- 引数は個別の文字列として渡し、**シェル文字列結合は行わない**（コマンドインジェクション防止）。ユーザーテキストの直前に `--` を置き、`-` 始まりのテキストがオプション扱いされるのを防ぐ
 - 汎用ヘルパー: `(zellij-send--zellij-async args &optional callback)` — callback に exit code を渡す
-- 送信: `(zellij-send--send session text &optional callback)` — write-chars → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil
-- スクリーン取得: `(zellij-send--dump-screen-async session callback)` — tmpfile 経由。コールバックは要求元バッファをカレントにした状態で呼ばれる
-
-**同期呼び出し禁止の理由**: Emacs が `call-process` でブロックすると、eat の attach クライアント（同一シングルスレッド内で pty I/O を処理）の出力を読めなくなる。pty バッファが満杯になると zellij サーバがそのクライアントへの書き込みでブロックし、**ターミナル側クライアントも含めてセッション全体が入力不可**になる。同時に zellij action コマンドも完了しないため、Emacs と zellij サーバの相互待ちで双方が永久にフリーズする（Emacs を強制終了するとクライアントが切断され zellij 側だけ復帰する）。
+- 送信: `(zellij-send--send session text &optional callback)` — write-chars → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil。カレントバッファの `zellij-send--pane-id` を呼び出し時に取り込むため、**必ず対象バッファをカレントにして呼ぶ**（返信バッファには pane-id をコピーしてある）
+- スクリーン取得: `(zellij-send--dump-screen-async session callback)` — STDOUT 直読み（zellij 0.44+、tmpfile 不使用）。コールバックは要求元バッファをカレントにした状態で呼ばれる
+- ペイン起動: `(zellij-send--run-in-session-async session dir command callback)` — `zellij run` の STDOUT から pane-id を抽出して callback に渡す
 
 **送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。
 
@@ -53,8 +59,8 @@ Emacs バッファ (*ai-SESSION*)
 
 `write-chars` に `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
 ```
-zellij action write-chars "テキスト"
-zellij action write 13    ; 0x0D = CR = Enter
+zellij action write-chars --pane-id terminal_N -- "テキスト"
+zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 ```
 
 ### ANSI エスケープの除去
@@ -140,14 +146,22 @@ zellij action write 13    ; 0x0D = CR = Enter
 - ユーザーが編集中（`buffer-modified-p` = t）はポーリングで上書きしない
 - `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・ポーリングの上書きを防ぐ
 
-## 自動受信（Stop フック）
+## 自動受信・出力ログ（Stop フック）
 
-Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` → `emacsclient` → `zellij-send--on-claude-stop` を経由してバッファを更新する。`;;;###autoload` が必須。
+Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処理を行う:
+1. フック stdin の JSON から `transcript_path` と `cwd` を取り、最新の assistant 出力を
+   `CWD/.zellij-send/claude-log.md`（`zellij-send-log-file` と対応）に時刻付きで追記（python3 使用）
+2. `emacsclient` → `zellij-send--on-claude-stop` でバッファを更新。`;;;###autoload` が必須
+
+ログは `C-c C-a` → `l`（`zellij-send-open-log`）で開く。
 
 ## 新規セッション作成
 
-`zellij-send--create-new-session` の起動コマンド:
-```
-zellij --session NAME options --default-cwd DIR
-```
-`start-process` で非同期・detached 起動（Emacs をブロックしない）。起動後 `sleep-for 0.5` してからコマンドを送信。
+`zellij-send--create-new-session` のフロー（すべて非同期）:
+1. `zellij attach --create-background NAME` — detached セッション作成（tty 不要）
+2. 0.5 秒待って `zellij --session NAME run --cwd DIR --name CMD -- CMD` — claude ペインを起動
+3. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
+   `zellij-send--pane-id` に保存
+
+pane-id はバッファローカルのため Emacs 再起動で失われる。その場合は既存セッション扱い
+（focused pane 送信）になるので、ターミナルで attach すれば送信できる。
