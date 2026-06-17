@@ -30,6 +30,15 @@
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-term "xterm-256color"
+  "zellij をサブプロセス起動する際に設定する TERM 環境変数。
+Emacs はサブプロセスに既定で TERM=dumb を渡すため、これがそのまま
+zellij サーバ・ペインに継承され、ペイン内のシェルでも TERM=dumb と
+なり starship 等が無効化される。サーバを起動する `attach
+--create-background' とペインを生む `run' をこの値で起動して回避する。"
+  :type 'string
+  :group 'zellij-send)
+
 (defcustom zellij-send-poll-interval 2.0
   "ポーリング間隔（秒）。0 でポーリング無効。"
   :type 'number
@@ -149,21 +158,29 @@ busy → ready への遷移を検出するために使う。")
 
 ;;; 送信
 
+(defun zellij-send--process-environment ()
+  "TERM を `zellij-send-term' に差し替えた `process-environment' を返す。
+Emacs 既定の TERM=dumb が zellij サーバ・ペインに継承されるのを防ぐ。"
+  (cons (concat "TERM=" zellij-send-term) process-environment))
+
 (defun zellij-send--zellij-async (args &optional callback)
   "zellij を ARGS で非同期実行する。
 終了したら CALLBACK に exit code を渡して呼ぶ（CALLBACK は省略可）。
 同期 `call-process' は使わない: Emacs の UI をブロックし、
-zellij サーバ側の都合で応答が遅れた場合にフリーズするため。"
-  (make-process
-   :name "zellij-async"
-   :buffer nil
-   :noquery t
-   :command (cons zellij-send-executable args)
-   :sentinel
-   (lambda (proc _event)
-     (when (memq (process-status proc) '(exit signal))
-       (when callback
-         (funcall callback (process-exit-status proc)))))))
+zellij サーバ側の都合で応答が遅れた場合にフリーズするため。
+TERM を上書きして起動する（サーバを起動する `attach
+--create-background' が TERM=dumb をペインに伝播させないため）。"
+  (let ((process-environment (zellij-send--process-environment)))
+    (make-process
+     :name "zellij-async"
+     :buffer nil
+     :noquery t
+     :command (cons zellij-send-executable args)
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (when callback
+           (funcall callback (process-exit-status proc))))))))
 
 (defun zellij-send--pane-args ()
   "カレントバッファの `zellij-send--pane-id' から --pane-id 引数リストを返す。
@@ -654,7 +671,8 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
 DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"terminal_2\"）を、
 失敗したら nil を CALLBACK に渡す。attach クライアントは不要（zellij 0.44+）。"
   (let ((out-buf (generate-new-buffer " *zellij-run*"))
-        (err-buf (generate-new-buffer " *zellij-run-err*")))
+        (err-buf (generate-new-buffer " *zellij-run-err*"))
+        (process-environment (zellij-send--process-environment)))
     (make-process
      :name "zellij-run"
      :buffer out-buf
