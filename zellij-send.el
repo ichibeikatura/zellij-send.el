@@ -720,6 +720,13 @@ KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
                    (when (buffer-live-p buf)
                      (with-current-buffer buf
                        (setq-local zellij-send--pane-id pane-id)))
+                   ;; `attach --create-background' が生むデフォルト shell ペイン
+                   ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
+                   ;; 致命的ではないので結果は無視する。
+                   (zellij-send--zellij-async
+                    (list "--session" session "action" "close-pane"
+                          "--pane-id" "terminal_0")
+                    #'ignore)
                    (message "セッション [%s] を作成しました (%s)"
                             session pane-id))))))))))))
 
