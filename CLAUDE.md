@@ -252,3 +252,17 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 attach クライアント無しで送信できる）。`M-x zellij-send` の既存セッション選択と
 ダッシュボードの自動接続（`zellij-send-dashboard-auto-connect` / `G`）は
 どちらもこの関数を使う。ディレクトリを尋ねるのは新規セッション作成時だけ。
+
+### セッションの検出（ダッシュボードの 2 本目のタイマー）
+
+再描画タイマー（既定 3 秒、バッファを読むだけ）とは別に、
+`zellij-send-dashboard-scan-interval`（既定 15 秒）の検出タイマーを持つ。
+**`zellij` を呼ぶのはこちらだけ**。`zellij-send-dashboard--sync-sessions` が
+`list-sessions` と突き合わせ、未接続セッションに接続し、消えたセッションの
+バッファを kill する（`--prune-gone`）。守るべき点:
+
+- **タイムアウト（`:timeout`）を「0 件」と解釈しない**。そのまま prune すると
+  zellij が一時的に応答しないだけで全行が消える
+- **編集中（`buffer-modified-p`）のバッファは kill しない**。書きかけの入力を失う
+- `--scanning` フラグで多重起動を防ぐ（応答が 15 秒を超えても `zellij` を重ねない）
+- ダッシュボードを閉じたら `--stop-timers` で両方止める

@@ -191,6 +191,8 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 
 Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, otherwise the first terminal pane). Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
 
+Connecting is not a one-shot at startup: the list is rescanned every `zellij-send-dashboard-scan-interval` seconds (default 15), so **a zellij session you start in the terminal while Emacs is already running shows up on its own** (press `G` if you want it immediately). The same scan kills the blackboard buffer of any session that has disappeared from `zellij list-sessions`, removing its row (`zellij-send-dashboard-prune-gone`, default `t`). Buffers you are editing (`buffer-modified-p`) are kept so unsent text is never lost, and a `list-sessions` timeout is not treated as "no sessions", so rows are never pruned on a hiccup. This scan is the only thing that calls `zellij`; the 3-second redraw just reads buffer contents.
+
 State is derived from each session buffer's contents — no extra `zellij` calls are made. A session counts as **working** when the spinner line is present (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`) **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). The screen check matters: while Claude Code streams plain prose it shows no spinner at all, so spinner-only detection reports an actively answering session as idle. When neither holds, the session flips to **done**, which clears once you look at that buffer.
 
 `Q` refuses to act on a session that is working, waiting for a choice, or freshly done, so a stray keypress cannot kill a session mid-task; `k` has no such guard.
@@ -219,6 +221,8 @@ By default the dashboard opens below the current window, sized to fit its conten
 | `zellij-send-dashboard-max-height`      | Height cap in lines (default 16)                            |
 | `zellij-send-dashboard-tail-width`      | Width of the 状況 column (default 40)                       |
 | `zellij-send-dashboard-refresh-interval`| Redraw interval in seconds (default 3; too short makes the list hard to navigate) |
+| `zellij-send-dashboard-scan-interval`   | Seconds between session scans (default 15; 0 disables auto-detection) |
+| `zellij-send-dashboard-prune-gone`      | Drop rows for sessions that ended (default `t`)             |
 
 The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
 

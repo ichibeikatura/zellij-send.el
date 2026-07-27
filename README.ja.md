@@ -191,6 +191,8 @@ Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*
 
 ダッシュボードを開くと、**まだバッファの無い起動中の zellij セッションすべてに自動接続します**（`zellij-send-dashboard-auto-connect`、既定 `t`）。何も尋ねません: 作業ディレクトリは `zellij action dump-layout` から、pane-id は `zellij action list-panes` から取得します（`zellij-send-default-command` と同名のタイトルのペインを優先、無ければ最初の端末ペイン）。pane-id が復元できるので、**Emacs を再起動した後でも attach クライアント無しで送信できます**。
 
+接続は起動時だけでなく `zellij-send-dashboard-scan-interval` 秒ごと（既定 15 秒）にも行います。そのため **Emacs を起動したままターミナルで `zellij` を立ち上げても、放っておけば一覧に増えます**（すぐ欲しいときは `G`）。同時に、zellij 側で終了したセッションの黒板バッファは kill して行を消します（`zellij-send-dashboard-prune-gone`、既定 `t`）。ただし**編集中のバッファ（`buffer-modified-p`）は残します** — 書きかけの入力を失わないためです。`list-sessions` がタイムアウトしたときは「セッション 0 件」とはみなさず、行を消しません。`zellij` を呼ぶのはこの検出だけで、3 秒ごとの再描画はバッファ内容を読むだけです。
+
 状態は各セッションバッファの内容から判定するため、**zellij を追加で呼びません**。「作業中」は、スピナー行（`zellij-send-dashboard-working-regexp`、既定 `esc to interrupt`）がある**か**、画面が `zellij-send-dashboard-active-window` 秒以内（既定 6 秒）に変化した場合です。この画面変化の判定が重要で、**Claude Code は本文を流している間スピナー行を出さない**ため、スピナーだけで見ていると回答中のセッションを「待機」と誤表示します。どちらも成り立たなくなると「完了」になり、そのバッファを表示した時点で解除されます。
 
 `Q` は作業中・選択待ち・完了のセッションを拒否するので、キーの打ち間違いで作業中のセッションを落とすことはありません（`k` にはこの保護はありません）。
@@ -219,6 +221,8 @@ QR は Claude Code 自身が半角ブロック文字で描くため、QR 生成�
 | `zellij-send-dashboard-max-height`      | 高さの上限行数（既定 16）                             |
 | `zellij-send-dashboard-tail-width`      | 「状況」列の幅（既定 40）                             |
 | `zellij-send-dashboard-refresh-interval`| 再描画間隔・秒（既定 3。短すぎると行を選びにくい）    |
+| `zellij-send-dashboard-scan-interval`   | セッション検出の間隔・秒（既定 15。0 で自動検出なし） |
+| `zellij-send-dashboard-prune-gone`      | 消えたセッションの行を消す（既定 `t`）                |
 
 `zellij-send-dashboard.el` を load-path に置く必要がありますが、`zellij-send.el` 本体はこれに依存しません。
 
