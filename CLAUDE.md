@@ -151,8 +151,12 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
   遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
 - **状態は本体に持たせない**: 各セッションバッファの内容から毎回算出する
   （本体の状態フラグはモードライン撤去時に削除済み）
-  - 作業中: 画面末尾に `zellij-send-dashboard-working-regexp`（既定 `esc to interrupt`
-    ＝ Claude Code のスピナー行）がある
+  - 作業中: スピナー行（`zellij-send-dashboard-working-regexp`、既定
+    `esc to interrupt`）がある **か**、画面が
+    `zellij-send-dashboard-active-window` 秒以内に変化した。
+    **Claude Code は本文を流している間スピナー行を出さない**（実機で確認）ため、
+    スピナーだけで判定すると回答中を「待機」と誤表示する。画面が動いていること
+    自体を処理中の証拠として使う
   - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
     ウィンドウに表示された時点で解除
   - 選択待ち: `zellij-send--detect-prompt`

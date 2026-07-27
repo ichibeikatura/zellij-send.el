@@ -74,9 +74,20 @@
 
 (defcustom zellij-send-dashboard-working-regexp "esc to interrupt"
   "AI が処理中であることを示す、画面上のスピナー行の正規表現。
-Claude Code は処理中に `✳ Frobnicating… (12s · esc to interrupt)' の
-ような行を出す。これが消えたら処理が終わったとみなす。"
+Claude Code は考え中・ツール実行中に
+`✳ Frobnicating… (12s · esc to interrupt)' のような行を出す。
+ただし**本文をそのまま流し込んでいる間はこの行が出ない**ため、
+これだけでは処理中を取りこぼす（`zellij-send-dashboard-active-window'
+による画面変化の検出と併用する）。"
   :type 'regexp
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-active-window 6.0
+  "画面が変化してから何秒間を「処理中」とみなすか。
+Claude Code は本文を流している間スピナー行を出さないので、
+スピナーだけでは応答中を検出できない。画面が動いていること自体を
+処理中の証拠として使う。0 にするとスピナー行だけで判定する。"
+  :type 'number
   :group 'zellij-send-dashboard)
 
 (defcustom zellij-send-dashboard-noise-regexps
@@ -209,12 +220,12 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
           (buffer-local-value 'zellij-send--session buf)))
    (buffer-list)))
 
-(defun zellij-send-dashboard--working-p (buf)
-  "BUF の画面にスピナー行があれば non-nil（＝AI が処理中）。"
+(defun zellij-send-dashboard--spinner-p (buf)
+  "BUF の画面にスピナー行があれば non-nil。"
   (with-current-buffer buf
     (save-excursion
       (goto-char (point-max))
-      ;; スピナーは画面下部にしか出ない。全体を毎秒走査しないよう末尾に限定する。
+      ;; スピナーは画面下部にしか出ない。全体を毎回走査しないよう末尾に限定する。
       (let ((beg (max (point-min) (- (point-max) 4000))))
         (re-search-backward zellij-send-dashboard-working-regexp beg t)))))
 
@@ -223,30 +234,43 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
   (with-current-buffer buf
     (zellij-send--detect-prompt)))
 
-(defun zellij-send-dashboard--status (buf session)
-  "BUF（SESSION）の状態シンボルを返す。
-判定は画面内容から毎回行う（本体は状態フラグを持たない）。
-`working' から `working' でなくなった瞬間に `done' を立て、
-そのセッションのバッファをユーザーが見た時点で `done' を下ろす。"
-  (let* ((st (gethash session zellij-send-dashboard--state))
-         (was-working (eq (plist-get st :status) 'working))
-         (working (zellij-send-dashboard--working-p buf))
-         (done (plist-get st :done)))
-    (cond
-     ;; 画面を見た＝確認済みとみなし、完了通知を下ろす
-     ((get-buffer-window buf t)
-      (when st (puthash session (plist-put st :done nil)
-                        zellij-send-dashboard--state))
-      (cond ((zellij-send-dashboard--prompt-p buf) 'prompt)
-            (working 'working)
-            (t 'idle)))
-     ((zellij-send-dashboard--prompt-p buf) 'prompt)
-     (working 'working)
-     ((or done was-working)
-      (when st (puthash session (plist-put st :done t)
-                        zellij-send-dashboard--state))
-      'done)
-     (t 'idle))))
+(defun zellij-send-dashboard--update-state (buf session)
+  "BUF（SESSION）の状態を判定して記録し、その plist を返す。
+判定は画面内容から毎回行う（本体は状態フラグを持たない）:
+- 処理中: スピナー行がある、または画面が
+  `zellij-send-dashboard-active-window' 秒以内に変化した
+- 完了: 処理中でなくなった瞬間に立て、バッファを表示した時点で下ろす
+- 選択待ち: 選択肢プロンプトがある"
+  (let* ((now (float-time))
+         (st (gethash session zellij-send-dashboard--state))
+         (tick (buffer-chars-modified-tick buf))
+         (changed (and st (not (equal (plist-get st :tick) tick))))
+         ;; 初回は「ずっと前から変化なし」とみなす（接続直後に
+         ;; 作業中と誤判定しないため）
+         (changed-at (cond (changed now)
+                           (st (plist-get st :changed-at))
+                           (t (- now zellij-send-dashboard-active-window 1))))
+         (prev-status (plist-get st :status))
+         (visible (get-buffer-window buf t))
+         (working (or (zellij-send-dashboard--spinner-p buf)
+                      (and (> zellij-send-dashboard-active-window 0)
+                           (< (- now changed-at)
+                              zellij-send-dashboard-active-window))))
+         (done (and (not working)
+                    (not visible)
+                    (or (eq prev-status 'working) (plist-get st :done))))
+         (status (cond ((zellij-send-dashboard--prompt-p buf) 'prompt)
+                       (working 'working)
+                       (done 'done)
+                       (t 'idle)))
+         (status-at (if (and st (eq status prev-status))
+                        (or (plist-get st :status-at) now)
+                      now)))
+    (puthash session
+             (list :tick tick :changed-at changed-at
+                   :status status :status-at status-at :done done)
+             zellij-send-dashboard--state)
+    (gethash session zellij-send-dashboard--state)))
 
 (defun zellij-send-dashboard--flag (buf)
   "BUF の表示が更新停止中かどうかを表す印を返す。
@@ -260,21 +284,6 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
            (propertize "✎" 'face 'font-lock-string-face
                        'help-echo "未送信の下書きあり: ポーリング停止中"))
           (t " "))))
-
-(defun zellij-send-dashboard--touch (session tick status)
-  "SESSION の TICK と STATUS の変化時刻を記録し、plist を返す。"
-  (let* ((now (float-time))
-         (st (gethash session zellij-send-dashboard--state)))
-    (if (null st)
-        (setq st (list :tick tick :changed-at now :status status :status-at now))
-      (unless (equal (plist-get st :tick) tick)
-        (setq st (plist-put st :tick tick))
-        (setq st (plist-put st :changed-at now)))
-      (unless (eq (plist-get st :status) status)
-        (setq st (plist-put st :status status))
-        (setq st (plist-put st :status-at now))))
-    (puthash session st zellij-send-dashboard--state)
-    st))
 
 (defun zellij-send-dashboard--gc-state (live-sessions)
   "LIVE-SESSIONS に無いセッションの記録を捨てる。"
@@ -335,9 +344,8 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
         entries sessions)
     (dolist (buf bufs)
       (let* ((session (buffer-local-value 'zellij-send--session buf))
-             (status (zellij-send-dashboard--status buf session))
-             (st (zellij-send-dashboard--touch
-                  session (buffer-chars-modified-tick buf) status)))
+             (st (zellij-send-dashboard--update-state buf session))
+             (status (plist-get st :status)))
         (push session sessions)
         (push (list buf
                     (vector (zellij-send-dashboard--flag buf)
@@ -612,6 +620,14 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
   "カーソル行のセッションに選択肢 3 を送る。"
   (interactive) (zellij-send-dashboard--send-choice 3))
 
+(defun zellij-send-dashboard-interrupt ()
+  "カーソル行のセッションの処理を中断する（Esc を送る）。
+状態は問わない。一覧の状態表示は数秒古いことがあり、「作業中に
+見えない」ことを理由に中断を拒むと止められなくなるため。"
+  (interactive)
+  (with-current-buffer (zellij-send-dashboard--buffer-at-point)
+    (zellij-send-interrupt)))
+
 (defun zellij-send-dashboard-compact ()
   "カーソル行のセッションに /compact を送る。"
   (interactive)
@@ -637,16 +653,8 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
   '(?█ ?▀ ?▄ ?▌ ?▐ ?░ ?▒ ?▓)
   "QR の描画に使われるブロック文字。表示時に幅 1 桁へ矯正する。")
 
-(defun zellij-send-dashboard--send-keys (session bytes callback)
-  "SESSION の対象ペインに BYTES（数値リスト）をキー入力として送る。
-カレントバッファの `zellij-send--pane-id' を使うので、
-必ずセッションバッファをカレントにして呼ぶこと。"
-  (zellij-send--zellij-async
-   (append (list "--session" session "action" "write")
-           (zellij-send--pane-args)
-           (list "--")
-           (mapcar #'number-to-string bytes))
-   callback))
+(defalias 'zellij-send-dashboard--send-keys #'zellij-send--send-keys
+  "キー入力の送信は本体の `zellij-send--send-keys' を使う。")
 
 (defun zellij-send-dashboard--extract-qr (screen)
   "SCREEN からブロック文字だけで構成された連続行（QR）を返す。無ければ nil。"
@@ -962,6 +970,7 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     (define-key map (kbd "e")   #'zellij-send-dashboard-reply)
     (define-key map (kbd "a")   #'zellij-send-dashboard-show-response)
     (define-key map (kbd "l")   #'zellij-send-dashboard-open-log)
+    (define-key map (kbd "i")   #'zellij-send-dashboard-interrupt)
     (define-key map (kbd "c")   #'zellij-send-dashboard-compact)
     (define-key map (kbd "k")   #'zellij-send-dashboard-kill-session)
     (define-key map (kbd "Q")   #'zellij-send-dashboard-quit-idle-session)
@@ -987,7 +996,7 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
          ("状況" 0 nil)])
   (setq tabulated-list-padding 1)
   (setq header-line-format
-        " RET:移動 o:別窓 e:返信 1/2/3:選択 a:取得 l:ログ c:圧縮 r:遠隔 Q:終了 k:削除 g:更新")
+        " RET:移動 o:別窓 e:返信 1/2/3:選択 i:中断 a:取得 l:ログ c:圧縮 r:遠隔 Q:終了 k:削除 g:更新")
   (tabulated-list-init-header)
   (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timer nil t))
 

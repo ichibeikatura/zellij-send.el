@@ -99,6 +99,8 @@ Inside the `*ai-session-name*` buffer:
 |-----------|-----------------------------------------|
 | `C-c C-c` | Send text (buffer is cleared)           |
 | `C-c C-a` | Open menu                               |
+| `C-c C-k` | Interrupt what the AI is doing (sends Esc) |
+| `M-p` / `M-n` | Recall a previously sent message    |
 
 ### Menu (`C-c C-a`)
 
@@ -117,15 +119,25 @@ Inside the `*ai-session-name*` buffer:
 |-----|--------------------------------------------------------------|
 | `e` | Open reply buffer (write a reply while reading the response) |
 | `n` | Send a number (prompts for input)                            |
+| `h` | Pick from the send history                                   |
 
 **Claude Code commands**
 
 | Key | Action                                                    |
 |-----|-----------------------------------------------------------|
+| `i` | Interrupt what the AI is doing (sends Esc)                                     |
 | `c` | Compress context (`/compact`)                                                  |
 | `C` | Reset context (`/clear`)                                                       |
 | `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
 | `q` | Delete session: remove the zellij session and close buffer (asks confirmation) |
+
+### Send history
+
+Every message you send is remembered per session (`zellij-send-history-max`, default 50). `M-p` walks back through it and `M-n` forward; going past the newest entry restores whatever you had typed before you started browsing. `C-c C-a` → `h` picks an entry with completion. The history is shared between the blackboard and the reply buffer, and survives closing either.
+
+### Interrupting
+
+`C-c C-k` (or `i` in the dashboard) sends `Esc` to the pane, which is how you stop Claude Code mid-answer. It works in any state on purpose: the dashboard's status is a few seconds old, so refusing to interrupt a session that merely *looks* idle would be the wrong call.
 
 ### Reply buffer (`C-c C-a` → `e`)
 
@@ -169,6 +181,7 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `1`/`2`/`3` | Send that numbered choice              |
 | `a`     | Fetch the screen manually                  |
 | `l`     | Open that session's log                    |
+| `i`     | Interrupt what the session is doing (Esc)  |
 | `c`     | Send `/compact`                            |
 | `r`     | Connect to Remote Control and show its QR  |
 | `Q`     | End the session — only if it is idle       |
@@ -178,7 +191,7 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 
 Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, otherwise the first terminal pane). Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
 
-State is derived from each session buffer's contents — no extra `zellij` calls are made. "Working" is detected from Claude Code's spinner line (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`); when the spinner disappears the session flips to "Done", which clears once you look at that buffer.
+State is derived from each session buffer's contents — no extra `zellij` calls are made. A session counts as **working** when the spinner line is present (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`) **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). The screen check matters: while Claude Code streams plain prose it shows no spinner at all, so spinner-only detection reports an actively answering session as idle. When neither holds, the session flips to **done**, which clears once you look at that buffer.
 
 `Q` refuses to act on a session that is working, waiting for a choice, or freshly done, so a stray keypress cannot kill a session mid-task; `k` has no such guard.
 

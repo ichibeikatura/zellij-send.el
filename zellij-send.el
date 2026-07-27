@@ -46,6 +46,11 @@ zellij サーバ・ペインに継承され、ペイン内のシェルでも TER
   :type 'number
   :group 'zellij-send)
 
+(defcustom zellij-send-history-max 50
+  "セッションごとに覚えておく送信履歴の数。"
+  :type 'integer
+  :group 'zellij-send)
+
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
   "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
 実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
@@ -206,6 +211,18 @@ pane-id 不明なら nil（focused pane への送信になる）。"
                   (when callback (funcall callback nil)))
               (when callback (funcall callback t))))))))))
 
+(defun zellij-send--send-keys (session bytes &optional callback)
+  "SESSION の対象ペインに BYTES（数値のリスト）をキー入力として送る。
+カレントバッファの `zellij-send--pane-id' を使うので、必ず対象バッファを
+カレントにして呼ぶこと。テキストではなく制御文字を送るための入口
+（例: Esc = 27）。"
+  (zellij-send--zellij-async
+   (append (list "--session" session "action" "write")
+           (zellij-send--pane-args)
+           (list "--")
+           (mapcar #'number-to-string bytes))
+   callback))
+
 ;;; スクリーンダンプ
 
 (defun zellij-send--strip-ansi (str)
@@ -337,6 +354,87 @@ pane-id が取れれば attach クライアント無しでも送信できる。
               (setq-local zellij-send--pane-id pane-id)))
           (when callback (funcall callback buf))))))))
 
+;;; 送信履歴
+
+;; 履歴はセッション名をキーにしたグローバル表に持つ。黒板バッファと
+;; 返信バッファで同じ履歴を共有し、バッファを閉じても残るため。
+;; 辿っている位置と下書きの退避はバッファローカル。
+
+(defvar zellij-send--history-table (make-hash-table :test #'equal)
+  "セッション名 -> 送信済みテキストのリスト（新しい順）。")
+
+(defvar-local zellij-send--history-index nil
+  "履歴を辿っている位置（0 が最新）。nil なら辿っていない。")
+
+(defvar-local zellij-send--history-draft nil
+  "履歴を辿り始める前のバッファ内容。")
+
+(defun zellij-send-history (session)
+  "SESSION の送信履歴（新しい順）を返す。"
+  (gethash session zellij-send--history-table))
+
+(defun zellij-send--history-add (session text)
+  "SESSION の履歴に TEXT を追加する。直前と同じ内容なら追加しない。"
+  (let ((history (zellij-send-history session)))
+    (unless (equal (car history) text)
+      (setq history (cons text history))
+      (when (> (length history) zellij-send-history-max)
+        (setq history (seq-take history zellij-send-history-max)))
+      (puthash session history zellij-send--history-table))))
+
+(defun zellij-send--history-replace (text)
+  "バッファの内容を TEXT で置き換える。
+ポーリングに上書きされないよう、変更済みのままにしておく。"
+  (erase-buffer)
+  (insert text)
+  (goto-char (point-max)))
+
+(defun zellij-send--history-move (delta)
+  "履歴を DELTA 分だけ辿ってバッファに出す。DELTA が正なら古い方へ。"
+  (zellij-send--assert-session)
+  (let* ((history (zellij-send-history zellij-send--session))
+         (index (+ (or zellij-send--history-index -1) delta)))
+    (unless history
+      (user-error "送信履歴がありません"))
+    (cond
+     ((< index 0)
+      ;; 最新より新しい側に戻ったら、辿り始める前の下書きに復帰する
+      (setq zellij-send--history-index nil)
+      (zellij-send--history-replace (or zellij-send--history-draft ""))
+      (setq zellij-send--history-draft nil)
+      (message "下書きに戻りました"))
+     ((>= index (length history))
+      (user-error "これ以上古い履歴はありません"))
+     (t
+      (when (null zellij-send--history-index)
+        (setq zellij-send--history-draft (buffer-string)))
+      (setq zellij-send--history-index index)
+      (zellij-send--history-replace (nth index history))
+      (message "履歴 %d/%d" (1+ index) (length history))))))
+
+(defun zellij-send-history-prev ()
+  "1 つ前に送信したテキストを呼び戻す。"
+  (interactive)
+  (zellij-send--history-move 1))
+
+(defun zellij-send-history-next ()
+  "1 つ後に送信したテキストを呼び戻す（最新まで戻ると下書きに復帰）。"
+  (interactive)
+  (zellij-send--history-move -1))
+
+(defun zellij-send-history-select ()
+  "送信履歴から選んでバッファに入れる。"
+  (interactive)
+  (zellij-send--assert-session)
+  (let ((history (zellij-send-history zellij-send--session)))
+    (unless history
+      (user-error "送信履歴がありません"))
+    (let ((choice (completing-read "履歴: " history nil t)))
+      (when (null zellij-send--history-index)
+        (setq zellij-send--history-draft (buffer-string)))
+      (setq zellij-send--history-index (seq-position history choice))
+      (zellij-send--history-replace choice))))
+
 ;;; プロンプト検出・ハイライト
 
 (defun zellij-send--detect-prompt ()
@@ -434,6 +532,20 @@ pane-id が取れれば attach クライアント無しでも送信できる。
                      (lambda (ok)
                        (when ok (message "クリアしました（コンテキスト）")))))
 
+(defun zellij-send-interrupt ()
+  "実行中の処理を中断する（対象ペインに Esc を送る）。
+状態は問わない。ダッシュボードの状態表示は数秒古いことがあり、
+「作業中に見えない」ことを理由に中断を拒むと止められなくなるため。"
+  (interactive)
+  (zellij-send--assert-session)
+  (let ((session zellij-send--session))
+    (zellij-send--send-keys
+     session '(27)
+     (lambda (exit)
+       (if (zerop exit)
+           (message "中断しました → [%s]" session)
+         (message "中断の送信に失敗しました (exit: %d)" exit))))))
+
 (defun zellij-send-save-progress ()
   "現在の作業内容を CLAUDE.md に記録するよう依頼する。"
   (interactive)
@@ -459,10 +571,14 @@ pane-id が取れれば attach クライアント無しでも送信できる。
      session text
      (lambda (ok)
        (when (and ok (buffer-live-p buf))
+         (zellij-send--history-add session text)
          (with-current-buffer buf
            (erase-buffer)
            (set-buffer-modified-p nil)
-           (setq zellij-send--user-cleared nil))
+           (setq zellij-send--user-cleared nil)
+           ;; 送信し終えたら履歴を辿る位置はリセットする
+           (setq zellij-send--history-index nil)
+           (setq zellij-send--history-draft nil))
          (message "送信しました → [%s]" session))))))
 
 (defun zellij-send-show-response ()
@@ -543,6 +659,7 @@ pane-id が取れれば attach クライアント無しでも送信できる。
      session text
      (lambda (ok)
        (when ok
+         (zellij-send--history-add session text)
          (when (buffer-live-p reply-buf)
            (kill-buffer reply-buf))
          (if (window-configuration-p wconf)
@@ -566,6 +683,9 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
     (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
+    (define-key map (kbd "C-c C-k") #'zellij-send-interrupt)
+    (define-key map (kbd "M-p")     #'zellij-send-history-prev)
+    (define-key map (kbd "M-n")     #'zellij-send-history-next)
     map)
   "zellij-send 返信バッファのキーマップ。")
 
@@ -611,8 +731,10 @@ pane-id が取れれば attach クライアント無しでも送信できる。
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)]
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
-    ("n" "答える（数字を送る）"         zellij-send-reply-number)]
+    ("n" "答える（数字を送る）"         zellij-send-reply-number)
+    ("h" "送信履歴から選ぶ"             zellij-send-history-select)]
    ["命令"
+    ("i" "中断 (Esc)"              zellij-send-interrupt)
     ("c" "圧縮 (/compact)"         zellij-send-compact)
     ("C" "リセット (/clear)"       zellij-send-cc-clear)
     ("s" "作業を記録"              zellij-send-save-progress)
@@ -624,6 +746,9 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'zellij-send-send)
     (define-key map (kbd "C-c C-a") #'zellij-send-menu)
+    (define-key map (kbd "C-c C-k") #'zellij-send-interrupt)
+    (define-key map (kbd "M-p")     #'zellij-send-history-prev)
+    (define-key map (kbd "M-n")     #'zellij-send-history-next)
     map)
   "zellij-send-mode のキーマップ。")
 
