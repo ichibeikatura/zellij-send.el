@@ -238,8 +238,10 @@ input=$(cat)
 printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
 rm -f "$TMP" 2>/dev/null
 
-# ステータス行はこれまでどおり出力する（既存の設定に置き換えてください）
-printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+# 何も出力しなければ TUI にステータス行は出ない（キャッシュは書かれるので
+# ダッシュボードは動く）。ステータス行が欲しい場合はここで出力する:
+#   printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+exit 0
 ```
 
 `chmod +x ~/.claude/hooks/statusline-zellij-send.sh`
@@ -256,6 +258,8 @@ printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir
 ```
 
 反映には Claude Code の再起動が必要です。
+
+上のスクリプトは何も出力しないので、Claude Code 側にステータス行は表示されません。フック自体は毎回呼ばれるため、キャッシュの更新には十分です。TUI にもステータス行が欲しい場合はここで出力してください。
 
 キャッシュは動作中の Claude Code セッションが更新するため、ダッシュボードには読み取り時点の古さ（`12s前の記録`）を添えて表示します。レート制限は Claude サブスクリプションのアカウントで、かつセッションの最初の API 応答以降にのみ現れます。
 

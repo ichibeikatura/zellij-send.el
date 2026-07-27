@@ -238,8 +238,10 @@ input=$(cat)
 printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
 rm -f "$TMP" 2>/dev/null
 
-# Print your status line as usual (replace with whatever you already use)
-printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+# Printing nothing hides the status line in the TUI — the cache is still written,
+# so the dashboard keeps working. To keep a status line, print it here instead:
+#   printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+exit 0
 ```
 
 `chmod +x ~/.claude/hooks/statusline-zellij-send.sh`
@@ -256,6 +258,8 @@ printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir
 ```
 
 Restart Claude Code (or open `/statusline` once) so the new status line takes effect.
+
+The script above prints nothing, so no status line appears in Claude Code — the hook still runs on every update, which is all the cache needs. Print something there if you want the TUI status line back.
 
 The cache is refreshed by any running Claude Code session, so the dashboard shows how old the reading is (`12s前の記録`). Rate limits are only present for Claude subscription accounts, and only after the first API response of a session.
 
