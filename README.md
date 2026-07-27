@@ -170,10 +170,22 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `a`     | Fetch the screen manually                  |
 | `l`     | Open that session's log                    |
 | `c`     | Send `/compact`                            |
-| `k`     | Delete the session                         |
+| `Q`     | End the session — only if it is idle       |
+| `k`     | Delete the session (any state)             |
 | `g`     | Refresh now                                |
 
 State is derived from each session buffer's contents — no extra `zellij` calls are made. "Working" is detected from Claude Code's spinner line (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`); when the spinner disappears the session flips to "Done", which clears once you look at that buffer.
+
+`Q` refuses to act on a session that is working, waiting for a choice, or freshly done, so a stray keypress cannot kill a session mid-task; `k` has no such guard.
+
+By default the dashboard opens below the current window, sized to fit its contents rather than taking over the frame:
+
+| Option                                  | Meaning                                                     |
+|-----------------------------------------|-------------------------------------------------------------|
+| `zellij-send-dashboard-display-action`  | `display-buffer` action (default: below, fit height)        |
+| `zellij-send-dashboard-fit-window`      | Re-fit the height on every refresh (default `t`)            |
+| `zellij-send-dashboard-max-height`      | Height cap in lines (default 16)                            |
+| `zellij-send-dashboard-tail-width`      | Width of the 状況 column (default 40)                       |
 
 The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
 

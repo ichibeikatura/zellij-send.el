@@ -43,6 +43,30 @@
   :type 'string
   :group 'zellij-send-dashboard)
 
+(defcustom zellij-send-dashboard-display-action
+  '((display-buffer-reuse-window display-buffer-below-selected)
+    (window-height . fit-window-to-buffer))
+  "ダッシュボードを表示するときの `display-buffer' アクション。
+セッションは数個しかないので、既定では下部に内容ぴったりの高さで開く。
+フレーム全体で開きたい場合は nil にする（`pop-to-buffer' の既定に戻る）。"
+  :type 'sexp
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-fit-window t
+  "non-nil なら再描画のたびにウィンドウ高さを内容に合わせる。"
+  :type 'boolean
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-max-height 16
+  "`zellij-send-dashboard-fit-window' が使うウィンドウの最大行数。"
+  :type 'integer
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-tail-width 40
+  "「状況」列に表示する画面末尾行の最大幅（桁）。"
+  :type 'integer
+  :group 'zellij-send-dashboard)
+
 (defcustom zellij-send-dashboard-working-regexp "esc to interrupt"
   "AI が処理中であることを示す、画面上のスピナー行の正規表現。
 Claude Code は処理中に `✳ Frobnicating… (12s · esc to interrupt)' の
@@ -247,7 +271,8 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
                                  (line-end-position)))))
             (unless (zellij-send-dashboard--noise-p s)
               (setq line s))))
-        (truncate-string-to-width (or line "") 70 nil nil "…")))))
+        (truncate-string-to-width (or line "")
+                                  zellij-send-dashboard-tail-width nil nil "…")))))
 
 (defun zellij-send-dashboard--status-cell (status)
   "STATUS のラベル文字列（face 付き）を返す。"
@@ -436,7 +461,18 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
       (when (null tabulated-list-entries)
         (insert "\n  セッションがありません（M-x zellij-send で開始）\n"))
       (when zellij-send-dashboard-show-usage
-        (zellij-send-dashboard--insert-usage)))))
+        (zellij-send-dashboard--insert-usage))))
+  (zellij-send-dashboard--fit-window))
+
+(defun zellij-send-dashboard--fit-window ()
+  "ダッシュボードのウィンドウ高さを内容に合わせる。
+セッションは数個しかないので、既定では画面を占有しない。"
+  (when zellij-send-dashboard-fit-window
+    (let ((win (get-buffer-window (current-buffer))))
+      (when (and (window-live-p win)
+                 (not (eq win (frame-root-window win))))
+        (with-demoted-errors "zellij-send-dashboard: %S"
+          (fit-window-to-buffer win zellij-send-dashboard-max-height))))))
 
 
 ;;; 操作
@@ -508,6 +544,23 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send-quit)))
 
+(defun zellij-send-dashboard-quit-idle-session ()
+  "カーソル行のセッションが待機中なら終了する（確認あり）。
+作業中・選択待ち・完了のセッションは誤終了を防ぐため拒否する
+（それでも終了したい場合は k）。"
+  (interactive)
+  (let* ((buf (zellij-send-dashboard--buffer-at-point))
+         (session (buffer-local-value 'zellij-send--session buf))
+         (status (plist-get (gethash session zellij-send-dashboard--state)
+                            :status)))
+    (unless (eq status 'idle)
+      (user-error "[%s] は待機中ではありません（%s）。強制終了するなら k"
+                  session
+                  (nth 0 (alist-get status
+                                    zellij-send-dashboard--status-alist))))
+    (with-current-buffer buf
+      (zellij-send-quit))))
+
 (defun zellij-send-dashboard-open-log ()
   "カーソル行のセッションの出力ログを開く。"
   (interactive)
@@ -554,6 +607,7 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
     (define-key map (kbd "l")   #'zellij-send-dashboard-open-log)
     (define-key map (kbd "c")   #'zellij-send-dashboard-compact)
     (define-key map (kbd "k")   #'zellij-send-dashboard-kill-session)
+    (define-key map (kbd "Q")   #'zellij-send-dashboard-quit-idle-session)
     (define-key map (kbd "1")   #'zellij-send-dashboard-select-1)
     (define-key map (kbd "2")   #'zellij-send-dashboard-select-2)
     (define-key map (kbd "3")   #'zellij-send-dashboard-select-3)
@@ -567,14 +621,14 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
 \\{zellij-send-dashboard-mode-map}"
   (setq tabulated-list-format
         [("" 2 nil)
-         ("状態" 12 nil)
-         ("セッション" 18 t)
-         ("経過" 7 nil)
-         ("無変化" 8 nil)
+         ("状態" 11 nil)
+         ("セッション" 16 t)
+         ("経過" 6 nil)
+         ("無変化" 7 nil)
          ("状況" 0 nil)])
   (setq tabulated-list-padding 1)
   (setq header-line-format
-        " RET:移動 o:別窓 e:返信 1/2/3:選択 a:取得 l:ログ c:圧縮 k:削除 g:更新")
+        " RET:移動 o:別窓 e:返信 1/2/3:選択 a:取得 l:ログ c:圧縮 Q:終了 k:削除 g:更新")
   (tabulated-list-init-header)
   (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timer nil t))
 
@@ -587,7 +641,10 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
       (unless (eq major-mode 'zellij-send-dashboard-mode)
         (zellij-send-dashboard-mode))
       (zellij-send-dashboard-refresh))
-    (pop-to-buffer buf)
+    (pop-to-buffer buf zellij-send-dashboard-display-action)
+    ;; ウィンドウができてから高さを合わせる（refresh 時点では未表示のことがある）
+    (with-current-buffer buf
+      (zellij-send-dashboard--fit-window))
     (zellij-send-dashboard--start-timer)))
 
 (provide 'zellij-send-dashboard)
