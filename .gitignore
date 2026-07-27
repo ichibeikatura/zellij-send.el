@@ -1,2 +1,14 @@
 /.DS_Store
 /emacs-ai-agent-bridge/
+
+# byte-compile 生成物
+*.elc
+
+# Stop フックが書くログ・作業用ログ
+/.zellij-send/
+*.log
+
+# 作業メモ・スクリーンショット（リポジトリ外扱い）
+/fix-*.md
+/prompt-*.md
+/ScreenShot*.png
