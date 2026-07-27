@@ -174,6 +174,9 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `Q`     | End the session — only if it is idle       |
 | `k`     | Delete the session (any state)             |
 | `g`     | Refresh now                                |
+| `G`     | Connect to any zellij session not yet listed |
+
+Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, otherwise the first terminal pane). Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
 
 State is derived from each session buffer's contents — no extra `zellij` calls are made. "Working" is detected from Claude Code's spinner line (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`); when the spinner disappears the session flips to "Done", which clears once you look at that buffer.
 

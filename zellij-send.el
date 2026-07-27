@@ -252,6 +252,91 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
              (with-current-buffer req-buffer
                (funcall callback content)))))))))
 
+;;; セッション情報の取得（cwd・pane-id）
+
+(defun zellij-send--zellij-output-async (session args callback)
+  "SESSION に対して zellij を ARGS で実行し、STDOUT を CALLBACK に渡す。
+失敗時は nil を渡す。"
+  (let ((out-buf (generate-new-buffer " *zellij-out*"))
+        (err-buf (generate-new-buffer " *zellij-out-err*")))
+    (make-process
+     :name "zellij-output"
+     :buffer out-buf
+     :stderr err-buf
+     :noquery t
+     :command (append (list zellij-send-executable "--session" session) args)
+     :sentinel
+     (lambda (proc _event)
+       (when (memq (process-status proc) '(exit signal))
+         (let ((out (and (zerop (process-exit-status proc))
+                         (with-current-buffer out-buf (buffer-string)))))
+           (ignore-errors (kill-buffer out-buf))
+           (ignore-errors (kill-buffer err-buf))
+           (funcall callback out)))))))
+
+(defun zellij-send--parse-panes (raw)
+  "`action list-panes' の出力 RAW から端末ペインの (ID . TITLE) を順に返す。
+出力は「PANE_ID  TYPE  TITLE」の表。plugin ペインは除外する。"
+  (delq nil
+        (mapcar
+         (lambda (line)
+           (let ((clean (string-trim (zellij-send--strip-ansi line))))
+             (when (string-match "\\`\\(terminal_[0-9]+\\)[ \t]+terminal[ \t]*\\(.*\\)\\'"
+                                 clean)
+               (cons (match-string 1 clean)
+                     (string-trim (match-string 2 clean))))))
+         (split-string raw "\n" t))))
+
+(defun zellij-send--pick-pane (panes)
+  "PANES（(ID . TITLE) のリスト）から送信先として最も妥当なものを選ぶ。
+`zellij-send-default-command' と同名のタイトルを優先し、
+無ければ最初の端末ペインを使う。"
+  (or (car (seq-find (lambda (p)
+                       (string= (cdr p) zellij-send-default-command))
+                     panes))
+      (caar panes)))
+
+(defun zellij-send--detect-pane-async (session callback)
+  "SESSION の送信先 pane-id を推定して CALLBACK に渡す（不明なら nil）。"
+  (zellij-send--zellij-output-async
+   session '("action" "list-panes")
+   (lambda (out)
+     (funcall callback
+              (and out (zellij-send--pick-pane
+                        (zellij-send--parse-panes out)))))))
+
+(defun zellij-send--parse-layout-cwd (raw)
+  "`action dump-layout' の出力 RAW からセッションの cwd を返す（無ければ nil）。"
+  (when (string-match "^[[:space:]]*cwd[[:space:]]+\"\\([^\"]+\\)\"" raw)
+    (match-string 1 raw)))
+
+(defun zellij-send--session-cwd-async (session callback)
+  "SESSION の作業ディレクトリを CALLBACK に渡す（不明なら nil）。"
+  (zellij-send--zellij-output-async
+   session '("action" "dump-layout")
+   (lambda (out)
+     (funcall callback (and out (zellij-send--parse-layout-cwd out))))))
+
+(defun zellij-send-attach-session-async (session &optional callback)
+  "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
+cwd は `dump-layout'、pane-id は `list-panes' から取得して設定する。
+pane-id が取れれば attach クライアント無しでも送信できる。
+用意できたら CALLBACK にバッファを渡す。"
+  (let ((buf (zellij-send--get-or-create-buffer session)))
+    (zellij-send--session-cwd-async
+     session
+     (lambda (cwd)
+       (when (and cwd (buffer-live-p buf) (file-directory-p cwd))
+         (with-current-buffer buf
+           (setq-local default-directory (file-name-as-directory cwd))))
+       (zellij-send--detect-pane-async
+        session
+        (lambda (pane-id)
+          (when (and pane-id (buffer-live-p buf))
+            (with-current-buffer buf
+              (setq-local zellij-send--pane-id pane-id)))
+          (when callback (funcall callback buf))))))))
+
 ;;; プロンプト検出・ハイライト
 
 (defun zellij-send--detect-prompt ()
@@ -671,14 +756,23 @@ KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。
-pane-id は不明なため focused pane へ送信する。完全に detached な
-セッションには届かないので、その場合はターミナルで attach しておくこと。"
-  (if (get-buffer (zellij-send--buffer-name session))
-      (progn
-        (switch-to-buffer (zellij-send--get-or-create-buffer session))
-        (goto-char (point-max)))
-    (let ((dir (zellij-send--prompt-session-dir)))
-      (zellij-send--setup-session-buffer session dir))))
+cwd と pane-id は zellij から取得するので、ディレクトリは尋ねない
+\(`zellij-send-attach-session-async' 参照)。pane-id が取れなかった
+場合のみ focused pane 送信になり、ターミナルでの attach が要る。"
+  (let ((known (get-buffer (zellij-send--buffer-name session))))
+    ;; バッファ生成は同期。cwd と pane-id は後から非同期で埋まる。
+    (switch-to-buffer (zellij-send--get-or-create-buffer session))
+    (goto-char (point-max))
+    (unless known
+      (zellij-send-attach-session-async
+       session
+       (lambda (buf)
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (message "セッション [%s] に接続しました%s" session
+                      (if zellij-send--pane-id
+                          (format " (%s)" zellij-send--pane-id)
+                        "（pane-id 不明: ターミナルで attach が必要です）")))))))))
 
 (defun zellij-send--select-session (sessions)
   "SESSIONS からセッションを選ばせ、対応するバッファを開く。

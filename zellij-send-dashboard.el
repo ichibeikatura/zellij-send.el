@@ -87,6 +87,14 @@ Claude Code の入力ボックスやフッタ行を除外し、
   :type '(repeat regexp)
   :group 'zellij-send-dashboard)
 
+(defcustom zellij-send-dashboard-auto-connect t
+  "non-nil なら起動時に、まだバッファの無い zellij セッションへ自動接続する。
+`zellij list-sessions' の各セッションについて cwd と pane-id を取得し
+（`zellij-send-attach-session-async'）、黒板バッファを用意する。
+ユーザーには何も尋ねない。"
+  :type 'boolean
+  :group 'zellij-send-dashboard)
+
 (defcustom zellij-send-dashboard-show-usage t
   "non-nil ならダッシュボードに Claude の使用状況（/usage 相当）を表示する。"
   :type 'boolean
@@ -441,7 +449,6 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
   (let* ((cache (zellij-send-dashboard--read-usage))
          (data (car cache))
          (limits (and data (alist-get 'rate_limits data))))
-    (insert "\n")
     (if (null limits)
         (insert (propertize
                  (if data
@@ -458,21 +465,26 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
       (zellij-send-dashboard--insert-usage-block
        "Current session" (alist-get 'five_hour limits))
       (zellij-send-dashboard--insert-usage-block
-       "Current week (all models)" (alist-get 'seven_day limits)))))
+       "Current week (all models)" (alist-get 'seven_day limits)))
+    ;; 表との区切り
+    (insert (propertize (make-string 46 ?─) 'face 'shadow) "\n")))
 
 (defun zellij-send-dashboard-refresh ()
   "ダッシュボードを再描画する。"
   (interactive)
   (setq tabulated-list-entries (zellij-send-dashboard--entries))
   (tabulated-list-print t t)
-  ;; 追記は表の後ろに限る。表より前に入れると tabulated-list-print が
-  ;; 復元したカーソル位置がずれる。
   (let ((inhibit-read-only t))
     (save-excursion
       (goto-char (point-max))
       (when (null tabulated-list-entries)
-        (insert "\n  セッションがありません（M-x zellij-send で開始）\n"))
-      (when zellij-send-dashboard-show-usage
+        (insert "\n  セッションがありません（M-x zellij-send で開始）\n")))
+    ;; 使用状況は表の上に置く。`tabulated-list-print' がカーソル位置を
+    ;; 復元したあとに point-min へ挿入するので、挿入分だけ point も一緒に
+    ;; ずれ、カーソルは同じ行に留まる。
+    (when zellij-send-dashboard-show-usage
+      (save-excursion
+        (goto-char (point-min))
         (zellij-send-dashboard--insert-usage))))
   (zellij-send-dashboard--fit-window))
 
@@ -842,6 +854,7 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     (define-key map (kbd "2")   #'zellij-send-dashboard-select-2)
     (define-key map (kbd "3")   #'zellij-send-dashboard-select-3)
     (define-key map (kbd "g")   #'zellij-send-dashboard-refresh)
+    (define-key map (kbd "G")   #'zellij-send-dashboard-connect-all)
     map)
   "zellij-send-dashboard-mode のキーマップ。")
 
@@ -862,9 +875,38 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
   (tabulated-list-init-header)
   (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timer nil t))
 
+(defun zellij-send-dashboard--connected-sessions ()
+  "すでに黒板バッファを持っているセッション名のリストを返す。"
+  (mapcar (lambda (buf) (buffer-local-value 'zellij-send--session buf))
+          (zellij-send-dashboard--session-buffers)))
+
+(defun zellij-send-dashboard-connect-all ()
+  "起動中の zellij セッションのうち、未接続のものに接続する。
+cwd と pane-id は zellij から取得するのでユーザーには何も尋ねない。"
+  (interactive)
+  (zellij-send--list-sessions-async
+   (lambda (sessions)
+     (if (eq sessions :timeout)
+         (message "zellij の応答がタイムアウトしました（5秒）")
+       (let ((new (seq-difference sessions
+                                  (zellij-send-dashboard--connected-sessions))))
+         (when new
+           (message "セッションに接続中: %s" (string-join new ", "))
+           (dolist (session new)
+             (zellij-send-attach-session-async
+              session
+              (lambda (_buf)
+                ;; 接続のたびに一覧へ反映する
+                (let ((db (get-buffer zellij-send-dashboard-buffer-name)))
+                  (when (buffer-live-p db)
+                    (with-current-buffer db
+                      (zellij-send-dashboard-refresh)))))))))))))
+
 ;;;###autoload
 (defun zellij-send-dashboard ()
-  "zellij-send セッションのダッシュボードを開く。"
+  "zellij-send セッションのダッシュボードを開く。
+`zellij-send-dashboard-auto-connect' が non-nil なら、起動中の zellij
+セッションのうちまだバッファの無いものに自動接続する。"
   (interactive)
   (let ((buf (get-buffer-create zellij-send-dashboard-buffer-name)))
     (with-current-buffer buf
@@ -875,7 +917,9 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     ;; ウィンドウができてから高さを合わせる（refresh 時点では未表示のことがある）
     (with-current-buffer buf
       (zellij-send-dashboard--fit-window))
-    (zellij-send-dashboard--start-timer)))
+    (zellij-send-dashboard--start-timer)
+    (when zellij-send-dashboard-auto-connect
+      (zellij-send-dashboard-connect-all))))
 
 (provide 'zellij-send-dashboard)
 

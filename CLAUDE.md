@@ -226,5 +226,16 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 3. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
    `zellij-send--pane-id` に保存
 
-pane-id はバッファローカルのため Emacs 再起動で失われる。その場合は既存セッション扱い
-（focused pane 送信）になるので、ターミナルで attach すれば送信できる。
+## 既存セッションへの接続（pane-id の復元）
+
+`zellij-send-attach-session-async` が、ユーザーに何も聞かずに黒板バッファを用意する:
+
+- cwd: `zellij action dump-layout` の先頭 `cwd "..."`
+- pane-id: `zellij action list-panes`（`PANE_ID  TYPE  TITLE` の表）から
+  TYPE=terminal の行を拾い、TITLE が `zellij-send-default-command` と一致する
+  ペインを優先。無ければ最初の端末ペイン
+
+これにより **pane-id はバッファローカルでも復元できる**（Emacs 再起動後も
+attach クライアント無しで送信できる）。`M-x zellij-send` の既存セッション選択と
+ダッシュボードの自動接続（`zellij-send-dashboard-auto-connect` / `G`）は
+どちらもこの関数を使う。ディレクトリを尋ねるのは新規セッション作成時だけ。

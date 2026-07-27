@@ -174,6 +174,9 @@ Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*
 | `Q`         | セッションを終了（待機中のみ）     |
 | `k`         | セッションを削除（状態を問わない） |
 | `g`         | 手動更新                           |
+| `G`         | 未接続の zellij セッションに接続   |
+
+ダッシュボードを開くと、**まだバッファの無い起動中の zellij セッションすべてに自動接続します**（`zellij-send-dashboard-auto-connect`、既定 `t`）。何も尋ねません: 作業ディレクトリは `zellij action dump-layout` から、pane-id は `zellij action list-panes` から取得します（`zellij-send-default-command` と同名のタイトルのペインを優先、無ければ最初の端末ペイン）。pane-id が復元できるので、**Emacs を再起動した後でも attach クライアント無しで送信できます**。
 
 状態は各セッションバッファの内容から判定するため、**zellij を追加で呼びません**。「作業中」は Claude Code のスピナー行（`zellij-send-dashboard-working-regexp`、既定 `esc to interrupt`）で検出し、スピナーが消えると「完了」になります。「完了」はそのバッファを表示した時点で解除されます。
 
