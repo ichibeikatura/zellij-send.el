@@ -29,6 +29,7 @@ pane-id 不明の既存セッションに送る場合のみ使う（ターミナ
 | ファイル | 役割 |
 |---|---|
 | `zellij-send.el` | パッケージ本体（全機能） |
+| `zellij-send-dashboard.el` | セッション一覧ダッシュボード（本体に依存。逆依存は禁止） |
 | `CLAUDE.md` | 本ドキュメント |
 | `README.md` | ユーザー向けドキュメント |
 | `LICENSE` | GPL v3 |
@@ -139,6 +140,23 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 ;;; Stop フックハンドラ
 ;;; エントリポイント
 ```
+
+## ダッシュボード（zellij-send-dashboard.el）
+
+`M-x zellij-send-dashboard` / メニュー `d`。全セッションを tabulated-list で一覧し、
+要対応順（選択待ち → 完了 → 作業中 → 待機）に並べる。
+
+- **依存は一方向**: dashboard → 本体。本体は `zellij-send-dashboard` を require せず、
+  メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
+  遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
+- **状態は本体に持たせない**: 各セッションバッファの内容から毎回算出する
+  （本体の状態フラグはモードライン撤去時に削除済み）
+  - 作業中: 画面末尾に `zellij-send-dashboard-working-regexp`（既定 `esc to interrupt`
+    ＝ Claude Code のスピナー行）がある
+  - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
+    ウィンドウに表示された時点で解除
+  - 選択待ち: `zellij-send--detect-prompt`
+- **zellij を追加で呼ばない**: 表示は本体のポーリング結果（バッファ内容）を読むだけ
 
 ## バッファの設計思想
 

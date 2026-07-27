@@ -106,10 +106,10 @@ Inside the `*ai-session-name*` buffer:
 
 | Key | Action                                                                          |
 |-----|---------------------------------------------------------------------------------|
+| `d` | Open the dashboard (all sessions at a glance)                                    |
 | `a` | Show AI response (dumps the zellij screen)                                      |
 | `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
 | `x` | Clear the buffer                                                                |
-| `q` | Delete session: remove the zellij session and close buffer (asks confirmation)  |
 
 **Send**
 
@@ -125,6 +125,7 @@ Inside the `*ai-session-name*` buffer:
 | `c` | Compress context (`/compact`)                                                  |
 | `C` | Reset context (`/clear`)                                                       |
 | `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
+| `q` | Delete session: remove the zellij session and close buffer (asks confirmation) |
 
 ### Reply buffer (`C-c C-a` → `e`)
 
@@ -139,6 +140,42 @@ After sending, the original window layout is restored automatically.
 ### Numbered prompts
 
 When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted. Send your choice with `C-c C-a` → `n`.
+
+## Dashboard (`zellij-send-dashboard.el`)
+
+`M-x zellij-send-dashboard` (or `C-c C-a` → `d`) lists every open session in one table, sorted so the ones needing your attention come first.
+
+```
+   状態        セッション      経過   無変化  状況
+ ❓ 選択待ち   proj-a          12s    3s     ❯ 1. Yes
+ ☝ 完了       proj-b          1m04   1m04   Done — 3 files changed
+ ✍ 作業中     proj-c          8s     0s     ✳ Frobnicating… (12s · esc to interrupt)
+ · 待機       proj-d          5m21   5m21   ❯
+```
+
+| Column   | Meaning                                                            |
+|----------|--------------------------------------------------------------------|
+| Flag     | `✎` unsent draft / `‖` cleared — polling is paused, display is stale |
+| 状態     | Waiting for choice / Done / Working / Idle                          |
+| 経過     | Time since entering the current state                               |
+| 無変化   | Time since the screen last changed (spots stuck sessions)           |
+| 状況     | Last meaningful line of the screen (e.g. the spinner)               |
+
+| Key     | Action                                     |
+|---------|--------------------------------------------|
+| `RET`   | Jump to the session buffer                 |
+| `o`     | Show it in another window, stay here       |
+| `e`     | Open a reply buffer for that session       |
+| `1`/`2`/`3` | Send that numbered choice              |
+| `a`     | Fetch the screen manually                  |
+| `l`     | Open that session's log                    |
+| `c`     | Send `/compact`                            |
+| `k`     | Delete the session                         |
+| `g`     | Refresh now                                |
+
+State is derived from each session buffer's contents — no extra `zellij` calls are made. "Working" is detected from Claude Code's spinner line (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`); when the spinner disappears the session flips to "Done", which clears once you look at that buffer.
+
+The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
 
 ## Customization
 

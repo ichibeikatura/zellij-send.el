@@ -507,20 +507,31 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
 
 ;;; Transient メニュー
 
+(defun zellij-send-open-dashboard ()
+  "セッション一覧ダッシュボードを開く。
+`zellij-send-dashboard' が読み込まれていない場合は require を試みる。
+本体はダッシュボードに依存しない（依存は dashboard → 本体の一方向）。"
+  (interactive)
+  (unless (fboundp 'zellij-send-dashboard)
+    (unless (require 'zellij-send-dashboard nil t)
+      (user-error "zellij-send-dashboard が読み込まれていません")))
+  (call-interactively 'zellij-send-dashboard))
+
 (transient-define-prefix zellij-send-menu ()
   "ZellijSend メニュー"
   [["表示"
+    ("d" "ダッシュボード（セッション一覧）" zellij-send-open-dashboard)
     ("a" "Claude Code の回答を表示" zellij-send-show-response)
     ("l" "出力ログを開く (markdown)" zellij-send-open-log)
-    ("x" "表示内容をクリア"         zellij-send-clear-buffer)
-    ("q" "終了"                     zellij-send-quit)]
+    ("x" "表示内容をクリア"         zellij-send-clear-buffer)]
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
     ("n" "答える（数字を送る）"         zellij-send-reply-number)]
    ["命令"
     ("c" "圧縮 (/compact)"         zellij-send-compact)
     ("C" "リセット (/clear)"       zellij-send-cc-clear)
-    ("s" "作業を記録"              zellij-send-save-progress)]])
+    ("s" "作業を記録"              zellij-send-save-progress)
+    ("q" "終了（セッション削除）"  zellij-send-quit)]])
 
 ;;; メジャーモード
 
