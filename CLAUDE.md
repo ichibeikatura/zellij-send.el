@@ -172,8 +172,17 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
   （`zellij-send-dashboard--wait-for-screen`）
 - 取り込み後は必ず `Esc`（バイト 27）を送ってペインをプロンプトに戻す。
   メニューに留まると以後の送信が壊れる
-- 表示バッファでは `char-width-table` をバッファローカルに差し替え、ブロック文字を
-  1 桁にする。既定では 2 桁（East Asian Ambiguous）になり QR が横に伸びて読めない
+- **QR は文字ではなく SVG 画像で描く**。半角ブロック（█=上下 / ▀=上 / ▄=下）から
+  モジュール行列を復元し、白地に黒＋静穏帯 4 モジュールで描画する
+  （`zellij-send-dashboard--qr-matrix` / `--qr-image`）。文字のまま貼るとフォントの
+  字形に左右されて読み取れない（M PLUS 等でブロック字形が行高を超える）。
+  SVG が使えない環境向けにテキスト版も残し、その場合は `char-width-table` を
+  バッファローカルに差し替えてブロック文字を 1 桁にする（既定は 2 桁＝
+  East Asian Ambiguous で、そのままだと横に伸びる）
+
+**フォント依存の描画は避ける**: 使用状況バーも同じ理由でブロック文字をやめ、
+空白に `:background` を付けて描くのが既定（`zellij-send-dashboard-usage-bar-style`
+の `face`）。グリフに頼らないのでフォントの字形に影響されない。
 - ローカルセッションを claude.ai に露出させる操作なので `yes-or-no-p` で必ず確認し、
   待機中のセッションに限る（作業中のペインに文字を打ち込まない）
 

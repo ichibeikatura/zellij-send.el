@@ -195,7 +195,7 @@ Because this exposes a local session to claude.ai, `r` always asks for confirmat
 | `zellij-send-dashboard-remote-control-timeout`    | How long to wait for the screens (default 40s) |
 | `zellij-send-dashboard-remote-control-poll`       | Polling interval while waiting (default 1.5s)  |
 
-Connecting takes ~10 seconds, so the wait is a poll with a timeout rather than a fixed sleep. The QR is shown in `*zellij-qr-SESSION*`, where block characters are forced to one column wide — at their default width of two (common in Japanese locales) the QR would be stretched horizontally and would not scan.
+Connecting takes ~10 seconds, so the wait is a poll with a timeout rather than a fixed sleep. The QR is shown in `*zellij-qr-SESSION*` as an **SVG image**, not as text: the half-block characters are parsed back into a module matrix (`█` = both, `▀` = upper, `▄` = lower) and redrawn as black squares on white with a 4-module quiet zone. Drawing it as text depends on the font's glyph metrics and usually will not scan. Size it with `zellij-send-dashboard-qr-module-size` (pixels per module, default 4 — about 165px for a 33-module code). If the frame has no SVG support the text version is used, with block characters forced to one column wide.
 
 By default the dashboard opens below the current window, sized to fit its contents rather than taking over the frame:
 
@@ -220,6 +220,8 @@ Current week   :███████▎               29% used Resets Jul 29 at
 ```
 
 It sits under the table, one line per limit, so it costs three lines of height.
+
+The bar is drawn as spaces with a background colour rather than block glyphs (`█`), because in some fonts (M PLUS, for one) the block glyph is taller than the line box and the bar breaks up. Set `zellij-send-dashboard-usage-bar-style` to `block` or `ascii` if you prefer.
 
 `/usage` only exists inside the TUI and the `claude` CLI has no `usage` subcommand, so this data has exactly one supported source: the JSON that Claude Code pipes to a **statusLine command** on stdin. Set up a status line that caches that JSON and the dashboard reads the cache — no extra processes, no undocumented APIs.
 
@@ -266,6 +268,7 @@ The cache is refreshed by any running Claude Code session, so the dashboard show
 | `zellij-send-dashboard-show-usage`            | Set to `nil` to hide the usage block (default `t`)  |
 | `zellij-send-dashboard-usage-file`            | Cache path (default `~/.claude/zellij-send-usage.json`) |
 | `zellij-send-dashboard-usage-bar-width`       | Bar width in columns (default 24)                   |
+| `zellij-send-dashboard-usage-bar-style`       | `face` coloured spaces (default), `block` █ glyphs, `ascii` `#`/`-` |
 | `zellij-send-dashboard-usage-timezone`        | Timezone label; `nil` uses `$TZ`, then `%Z`         |
 
 ## Customization

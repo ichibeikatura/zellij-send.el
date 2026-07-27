@@ -29,6 +29,10 @@
 (require 'cl-lib)
 (require 'subr-x)
 
+(declare-function svg-create "svg")
+(declare-function svg-rectangle "svg")
+(declare-function svg-image "svg")
+
 (defgroup zellij-send-dashboard nil
   "Dashboard for zellij-send sessions."
   :group 'zellij-send)
@@ -115,10 +119,27 @@ Claude Code の入力ボックスやフッタ行を除外し、
   :type 'integer
   :group 'zellij-send-dashboard)
 
+(defcustom zellij-send-dashboard-usage-bar-style 'face
+  "使用状況バーの描き方。
+`face'  — 空白に背景色を付ける。フォントに依存せず崩れない（既定）
+`block' — █ などのブロック文字を使う。等幅でも字形が行高を超える
+          フォント（M PLUS 等）では崩れる
+`ascii' — # と - だけで描く。どの環境でも確実"
+  :type '(choice (const :tag "背景色（推奨）" face)
+                 (const :tag "ブロック文字" block)
+                 (const :tag "ASCII" ascii))
+  :group 'zellij-send-dashboard)
+
 (defcustom zellij-send-dashboard-usage-timezone nil
   "使用状況のリセット時刻に添えるタイムゾーン表記。
 nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。"
   :type '(choice (const :tag "自動" nil) string)
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-qr-module-size 4
+  "QR 画像 1 モジュールあたりのピクセル数。
+33 モジュールの QR なら 4 で約 165px。大きすぎる・小さすぎる場合に調整する。"
+  :type 'integer
   :group 'zellij-send-dashboard)
 
 (defcustom zellij-send-dashboard-remote-control-timeout 40.0
@@ -377,16 +398,13 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
         ((>= pct 50) 'zellij-send-dashboard-usage-mid-face)
         (t           'zellij-send-dashboard-usage-low-face)))
 
-(defun zellij-send-dashboard--bar (pct)
-  "PCT（0-100）を表すバーを返す。
-幅は `zellij-send-dashboard-usage-bar-width' 桁。ブロック文字（█ など）は
-East Asian Ambiguous のため環境によっては 1 文字 2 桁で表示される。
-文字数ではなく桁数で割り当てないとバーが 2 倍の長さになるので、
+(defun zellij-send-dashboard--bar-block (pct width)
+  "PCT を表すブロック文字のバーを WIDTH 桁で返す。
+ブロック文字は East Asian Ambiguous のため環境によっては 1 文字 2 桁に
+なる。文字数ではなく桁数で割り当てないとバーが 2 倍の長さになるので、
 `string-width' で 1 ブロックあたりの桁数を測ってから計算する。"
-  (let* ((width zellij-send-dashboard-usage-bar-width)
-         (cell (max 1 (string-width "█")))
+  (let* ((cell (max 1 (string-width "█")))
          (blocks (max 1 (/ width cell)))
-         (pct (min 100 (max 0 (or pct 0))))
          (eighths (round (* (/ pct 100.0) blocks 8)))
          (full (/ eighths 8))
          (rest (% eighths 8))
@@ -394,6 +412,34 @@ East Asian Ambiguous のため環境によっては 1 文字 2 桁で表示さ�
                       (aref zellij-send-dashboard--bar-partials rest))))
     (concat (propertize bar 'face (zellij-send-dashboard--usage-face pct))
             (make-string (max 0 (- width (string-width bar))) ?\s))))
+
+(defun zellij-send-dashboard--bar-face (pct width)
+  "PCT を表すバーを、空白に背景色を付けて WIDTH 桁で返す。
+グリフを使わないのでフォントに左右されない（字形が行の高さを超える
+フォントでも崩れない）。"
+  (let* ((filled (round (* (/ pct 100.0) width)))
+         (color (face-foreground (zellij-send-dashboard--usage-face pct) nil t)))
+    (concat (propertize (make-string filled ?\s)
+                        'face (if color `(:background ,color) 'region))
+            (propertize (make-string (- width filled) ?\s)
+                        'face 'fringe))))
+
+(defun zellij-send-dashboard--bar-ascii (pct width)
+  "PCT を表すバーを # と - だけで WIDTH 桁で返す。"
+  (let ((filled (round (* (/ pct 100.0) width))))
+    (concat (propertize (make-string filled ?#)
+                        'face (zellij-send-dashboard--usage-face pct))
+            (propertize (make-string (- width filled) ?-) 'face 'shadow))))
+
+(defun zellij-send-dashboard--bar (pct)
+  "PCT（0-100）を表す幅 `zellij-send-dashboard-usage-bar-width' 桁のバーを返す。
+描き方は `zellij-send-dashboard-usage-bar-style' で選ぶ。"
+  (let ((width zellij-send-dashboard-usage-bar-width)
+        (pct (min 100 (max 0 (or pct 0)))))
+    (pcase zellij-send-dashboard-usage-bar-style
+      ('block (zellij-send-dashboard--bar-block pct width))
+      ('ascii (zellij-send-dashboard--bar-ascii pct width))
+      (_      (zellij-send-dashboard--bar-face pct width)))))
 
 (defun zellij-send-dashboard--tz-label ()
   "リセット時刻に添えるタイムゾーン表記を返す。"
@@ -621,6 +667,60 @@ URL はペイン幅で折り返されるため、行頭の空白ごと改行を�
     (when (string-match "https://claude\\.ai/code/[A-Za-z0-9_-]+" joined)
       (match-string 0 joined))))
 
+(defun zellij-send-dashboard--qr-matrix (lines)
+  "QR の半角ブロック行 LINES からモジュール行列（真偽値の行のリスト）を作る。
+1 文字が上下 2 モジュールを表す: █=両方 ▀=上 ▄=下 空白=なし。
+左右の空白列は切り落とす（余白は SVG 側で付ける）。"
+  (let* ((width (apply #'max (mapcar #'length lines)))
+         (rows nil))
+    (dolist (line lines)
+      (let ((top (make-vector width nil))
+            (bot (make-vector width nil)))
+        (dotimes (i width)
+          (let ((c (if (< i (length line)) (aref line i) ?\s)))
+            (cond ((eq c ?█) (aset top i t) (aset bot i t))
+                  ((eq c ?▀) (aset top i t))
+                  ((eq c ?▄) (aset bot i t)))))
+        (push top rows)
+        (push bot rows)))
+    (setq rows (nreverse rows))
+    ;; 末尾の空行を削る（最終行の下半分は余りなので必ず空になる）
+    (while (and rows (not (seq-some #'identity (car (last rows)))))
+      (setq rows (butlast rows)))
+    ;; 全行が空白の列を左右から削る
+    (let ((left 0) (right (1- width)))
+      (while (and (< left width)
+                  (not (seq-some (lambda (r) (aref r left)) rows)))
+        (setq left (1+ left)))
+      (while (and (> right left)
+                  (not (seq-some (lambda (r) (aref r right)) rows)))
+        (setq right (1- right)))
+      (mapcar (lambda (r) (seq-subseq r left (1+ right))) rows))))
+
+(defun zellij-send-dashboard--qr-image (lines)
+  "QR の行 LINES から SVG 画像を作って返す。作れなければ nil。
+文字で描くとフォントの字形に左右されて読み取れないため、画像にする。
+スキャンできるよう、テーマに関係なく白地に黒で描く。"
+  (when (and (display-graphic-p) (image-type-available-p 'svg)
+             (require 'svg nil t))
+    (ignore-errors
+      (let* ((matrix (zellij-send-dashboard--qr-matrix lines))
+             (rows (length matrix))
+             (cols (length (car matrix)))
+             (m zellij-send-dashboard-qr-module-size)
+             (quiet (* m 4))                     ; QR 規格の静穏帯は 4 モジュール
+             (w (+ (* cols m) (* 2 quiet)))
+             (h (+ (* rows m) (* 2 quiet)))
+             (svg (svg-create w h)))
+        (svg-rectangle svg 0 0 w h :fill "white")
+        (let ((y quiet))
+          (dolist (row matrix)
+            (dotimes (x cols)
+              (when (aref row x)
+                (svg-rectangle svg (+ quiet (* x m)) y m m :fill "black")))
+            (setq y (+ y m))))
+        (svg-image svg :scale 1.0 :ascent 'center)))))
+
 (defun zellij-send-dashboard--show-qr (session screen)
   "SESSION の SCREEN から QR と URL を取り出して専用バッファに表示する。"
   (let ((qr (zellij-send-dashboard--extract-qr screen))
@@ -638,10 +738,16 @@ URL はペイン幅で折り返されるため、行頭の空白ごと改行を�
         (setq-local cursor-type nil)
         (insert (propertize (format " Remote Control — [%s]\n\n" session)
                             'face 'bold))
-        (if qr
-            (insert (mapconcat #'identity qr "\n") "\n\n")
+        (cond
+         ((null qr)
           (insert (propertize " QR コードを取得できませんでした。\n\n"
                               'face 'warning)))
+         ;; 画像で描ければそちらを使う（文字だとフォント次第で読めない）
+         ((zellij-send-dashboard--qr-image qr)
+          (insert " ")
+          (insert-image (zellij-send-dashboard--qr-image qr))
+          (insert "\n\n"))
+         (t (insert (mapconcat #'identity qr "\n") "\n\n")))
         (if url
             (insert " " (propertize url 'face 'link) "\n\n"
                     (propertize " スマホでスキャンするか、上の URL を開いてください。\n"
