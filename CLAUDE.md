@@ -158,6 +158,27 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
   - 選択待ち: `zellij-send--detect-prompt`
 - **zellij を追加で呼ばない**: 表示は本体のポーリング結果（バッファ内容）を読むだけ
 
+### 使用状況（/usage 相当）
+
+`/usage` は Claude Code の TUI 内でしか実行できず、`claude` CLI にも `usage`
+サブコマンドは無い（transcript にもレート制限は残らない）。取得できる公式ルートは
+**statusLine コマンドの stdin JSON だけ**:
+
+```
+rate_limits.five_hour.{used_percentage, resets_at}   ; resets_at は Unix 秒
+rate_limits.seven_day.{used_percentage, resets_at}
+context_window.used_percentage
+```
+
+そのため statusLine フック側で JSON をキャッシュに保存し（README 参照）、
+`zellij-send-dashboard--read-usage` はそれを読むだけにする。**ダッシュボードから
+claude を起動したりペインに `/usage` を打ち込んだりしないこと**（セッションに割り込む）。
+キャッシュは動作中の Claude Code セッションだけが更新するため、表示には
+mtime からの経過時間を必ず添える（古い数字を最新に見せない）。
+
+am/pm と月名は `format-time-string` の `%p` / `%b` がロケール依存（日本語環境では
+「午後」「 7」になる）ため自前で組み立てる。
+
 ## バッファの設計思想
 
 `*ai-SESSION*` バッファは「黒板」として使う:

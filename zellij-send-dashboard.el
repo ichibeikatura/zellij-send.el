@@ -63,6 +63,43 @@ Claude Code の入力ボックスやフッタ行を除外し、
   :type '(repeat regexp)
   :group 'zellij-send-dashboard)
 
+(defcustom zellij-send-dashboard-show-usage t
+  "non-nil ならダッシュボードに Claude の使用状況（/usage 相当）を表示する。"
+  :type 'boolean
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-usage-file
+  (expand-file-name "~/.claude/zellij-send-usage.json")
+  "Claude Code の statusLine フックが書き出す使用状況 JSON のパス。
+`/usage' の情報（`rate_limits.five_hour' / `seven_day' の
+`used_percentage' と `resets_at'）は statusLine フックの stdin JSON
+としてのみ供給される。README の手順でフックを登録すること。"
+  :type 'file
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-usage-bar-width 50
+  "使用状況バーの文字幅。"
+  :type 'integer
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-usage-timezone nil
+  "使用状況のリセット時刻に添えるタイムゾーン表記。
+nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。"
+  :type '(choice (const :tag "自動" nil) string)
+  :group 'zellij-send-dashboard)
+
+(defface zellij-send-dashboard-usage-low-face
+  '((t :inherit success))
+  "使用率が低いときのバーの face。")
+
+(defface zellij-send-dashboard-usage-mid-face
+  '((t :inherit warning))
+  "使用率が中程度のときのバーの face。")
+
+(defface zellij-send-dashboard-usage-high-face
+  '((t :inherit error))
+  "使用率が高いときのバーの face。")
+
 (defface zellij-send-dashboard-prompt-face
   '((t :inherit warning :weight bold))
   "選択肢待ちのセッションに使う face。")
@@ -262,16 +299,144 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
                   (string< sa sb)
                 (< pa pb)))))))
 
+;;; 使用状況（/usage 相当）
+
+;; Claude Code の /usage は TUI 内でしか実行できず、CLI にも
+;; サブコマンドが無い。レート制限の情報は statusLine フックの stdin
+;; JSON としてのみ供給されるため、フック側でその JSON をファイルに
+;; 保存し、ここでは読むだけにする（zellij も claude も呼ばない）。
+
+(defconst zellij-send-dashboard--bar-partials
+  ["" "▏" "▎" "▍" "▌" "▋" "▊" "▉"]
+  "バー末尾に使う 1/8 刻みの部分ブロック。")
+
+(defun zellij-send-dashboard--read-usage ()
+  "使用状況 JSON を読み、(DATA . MTIME) を返す。読めなければ nil。"
+  (let ((file zellij-send-dashboard-usage-file))
+    (when (and file (file-readable-p file))
+      (with-demoted-errors "zellij-send-dashboard: usage 読み込み失敗 %S"
+        (let ((mtime (file-attribute-modification-time
+                      (file-attributes file))))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (cons (json-parse-buffer :object-type 'alist
+                                     :null-object nil
+                                     :false-object nil)
+                  mtime)))))))
+
+(defun zellij-send-dashboard--usage-face (pct)
+  "PCT に応じたバーの face を返す。"
+  (cond ((>= pct 80) 'zellij-send-dashboard-usage-high-face)
+        ((>= pct 50) 'zellij-send-dashboard-usage-mid-face)
+        (t           'zellij-send-dashboard-usage-low-face)))
+
+(defun zellij-send-dashboard--bar (pct)
+  "PCT（0-100）を表すバーを返す。
+幅は `zellij-send-dashboard-usage-bar-width' 桁。ブロック文字（█ など）は
+East Asian Ambiguous のため環境によっては 1 文字 2 桁で表示される。
+文字数ではなく桁数で割り当てないとバーが 2 倍の長さになるので、
+`string-width' で 1 ブロックあたりの桁数を測ってから計算する。"
+  (let* ((width zellij-send-dashboard-usage-bar-width)
+         (cell (max 1 (string-width "█")))
+         (blocks (max 1 (/ width cell)))
+         (pct (min 100 (max 0 (or pct 0))))
+         (eighths (round (* (/ pct 100.0) blocks 8)))
+         (full (/ eighths 8))
+         (rest (% eighths 8))
+         (bar (concat (make-string full ?█)
+                      (aref zellij-send-dashboard--bar-partials rest))))
+    (concat (propertize bar 'face (zellij-send-dashboard--usage-face pct))
+            (make-string (max 0 (- width (string-width bar))) ?\s))))
+
+(defun zellij-send-dashboard--tz-label ()
+  "リセット時刻に添えるタイムゾーン表記を返す。"
+  (or zellij-send-dashboard-usage-timezone
+      (getenv "TZ")
+      (format-time-string "%Z")))
+
+(defconst zellij-send-dashboard--month-names
+  ["Jan" "Feb" "Mar" "Apr" "May" "Jun"
+   "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"]
+  "月の英略称。`format-time-string' の %b はロケール依存で
+日本語環境では \" 7\" のようになるため、自前で持つ。")
+
+(defun zellij-send-dashboard--fmt-reset (epoch)
+  "EPOCH（Unix 秒）を `/usage' と同じ書式のリセット時刻表記にする。
+当日ならば時刻のみ、翌日以降は日付を添える。
+am/pm と月名はロケールに依存しないよう自前で組み立てる。"
+  (when (numberp epoch)
+    (let* ((time (seconds-to-time epoch))
+           (dec (decode-time time))
+           (minute (nth 1 dec))
+           (hour (nth 2 dec))
+           (h12 (if (zerop (% hour 12)) 12 (% hour 12)))
+           (ampm (if (< hour 12) "am" "pm"))
+           ;; 分が 00 なら /usage と同じく分を省く（例: "9pm"）
+           (clock (if (zerop minute)
+                      (format "%d%s" h12 ampm)
+                    (format "%d:%02d%s" h12 minute ampm)))
+           (same-day (equal (format-time-string "%F" time)
+                            (format-time-string "%F"))))
+      (format "Resets %s (%s)"
+              (if same-day
+                  clock
+                (format "%s %d at %s"
+                        (aref zellij-send-dashboard--month-names
+                              (1- (nth 4 dec)))
+                        (nth 3 dec) clock))
+              (zellij-send-dashboard--tz-label)))))
+
+(defun zellij-send-dashboard--insert-usage-block (title limit)
+  "LIMIT（alist）を TITLE 付きで 1 ブロック挿入する。"
+  (let ((pct (alist-get 'used_percentage limit))
+        (resets (alist-get 'resets_at limit)))
+    (when (numberp pct)
+      (insert (propertize title 'face 'bold) "\n"
+              (zellij-send-dashboard--bar pct)
+              (format "  %d%% used\n" (round pct)))
+      (when-let* ((line (zellij-send-dashboard--fmt-reset resets)))
+        (insert (propertize line 'face 'shadow) "\n"))
+      (insert "\n"))))
+
+(defun zellij-send-dashboard--insert-usage ()
+  "使用状況をバッファ末尾に挿入する。"
+  (let* ((cache (zellij-send-dashboard--read-usage))
+         (data (car cache))
+         (limits (and data (alist-get 'rate_limits data))))
+    (insert "\n")
+    (if (null limits)
+        (insert (propertize
+                 (if data
+                     "使用状況: レート制限の情報がありません（Claude サブスク以外、または API 応答前）\n"
+                   (format "使用状況: %s がありません（README の statusLine フック設定を参照）\n"
+                           (abbreviate-file-name
+                            zellij-send-dashboard-usage-file)))
+                 'face 'shadow))
+      (insert (propertize
+               (format "── 使用状況 ─ %s前の記録 ─────────────\n"
+                       (zellij-send-dashboard--fmt-elapsed
+                        (float-time (time-since (cdr cache)))))
+               'face 'shadow))
+      (zellij-send-dashboard--insert-usage-block
+       "Current session" (alist-get 'five_hour limits))
+      (zellij-send-dashboard--insert-usage-block
+       "Current week (all models)" (alist-get 'seven_day limits)))))
+
 (defun zellij-send-dashboard-refresh ()
   "ダッシュボードを再描画する。"
   (interactive)
   (setq tabulated-list-entries (zellij-send-dashboard--entries))
   (tabulated-list-print t t)
-  (when (null tabulated-list-entries)
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char (point-max))
-        (insert "\n  セッションがありません（M-x zellij-send で開始）\n")))))
+  ;; 追記は表の後ろに限る。表より前に入れると tabulated-list-print が
+  ;; 復元したカーソル位置がずれる。
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-max))
+      (when (null tabulated-list-entries)
+        (insert "\n  セッションがありません（M-x zellij-send で開始）\n"))
+      (when zellij-send-dashboard-show-usage
+        (zellij-send-dashboard--insert-usage)))))
 
 
 ;;; 操作

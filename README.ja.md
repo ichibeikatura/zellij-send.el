@@ -106,10 +106,10 @@ Claude Code が回答を終えると、`*ai-セッション名*` バッファが
 
 | キー | 動作                                                                 |
 |------|----------------------------------------------------------------------|
+| `d`  | ダッシュボード（全セッション一覧）を開く                             |
 | `a`  | AI の回答を表示（zellij スクリーンをダンプ）                         |
 | `l`  | 出力ログを開く（markdown。Stop フックが追記）                        |
 | `x`  | バッファの内容をクリア                                               |
-| `q`  | セッションを削除（zellij セッションを消してバッファを閉じる。確認あり） |
 
 **送信**
 
@@ -122,9 +122,10 @@ Claude Code が回答を終えると、`*ai-セッション名*` バッファが
 
 | キー | 動作                                         |
 |------|----------------------------------------------|
-| `c`  | コンテキストを圧縮（`/compact`）             |
-| `C`  | コンテキストをリセット（`/clear`）           |
-| `s`  | 作業内容を `CLAUDE.md` に記録するよう依頼    |
+| `c`  | コンテキストを圧縮（`/compact`）                                       |
+| `C`  | コンテキストをリセット（`/clear`）                                     |
+| `s`  | 作業内容を `CLAUDE.md` に記録するよう依頼                              |
+| `q`  | セッションを削除（zellij セッションを消してバッファを閉じる。確認あり） |
 
 ### 返信バッファ（`C-c C-a` → `e`）
 
@@ -139,6 +140,100 @@ Claude Code が回答を終えると、`*ai-セッション名*` バッファが
 ### 選択肢プロンプトへの応答
 
 Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*ai-セッション名*` バッファが自動更新されて選択肢がハイライトされます。選択肢は `C-c C-a` → `n` で送信します。
+
+## ダッシュボード（`zellij-send-dashboard.el`）
+
+`M-x zellij-send-dashboard`（または `C-c C-a` → `d`）で、開いている全セッションを1つの表に並べます。要対応のものが上に来るよう並び替えられます。
+
+```
+   状態        セッション      経過   無変化  状況
+ ❓ 選択待ち   proj-a          12s    3s     ❯ 1. Yes
+ ☝ 完了       proj-b          1m04   1m04   完了 — 3 ファイル変更
+ ✍ 作業中     proj-c          8s     0s     ✳ Frobnicating… (12s · esc to interrupt)
+ · 待機       proj-d          5m21   5m21   ❯
+```
+
+| 列       | 意味                                                                  |
+|----------|-----------------------------------------------------------------------|
+| フラグ   | `✎` 未送信の下書きあり / `‖` クリア済み — ポーリング停止中で表示が古い |
+| 状態     | 選択待ち / 完了 / 作業中 / 待機                                       |
+| 経過     | その状態になってからの時間                                            |
+| 無変化   | 画面が最後に変わってからの時間（詰まったセッションを見つけられる）    |
+| 状況     | 画面末尾の意味のある行（スピナー行など）                              |
+
+| キー        | 動作                              |
+|-------------|-----------------------------------|
+| `RET`       | そのセッションのバッファへ移動     |
+| `o`         | 別ウィンドウに表示（一覧に留まる） |
+| `e`         | そのセッションの返信バッファを開く |
+| `1`/`2`/`3` | 選択肢を送信                       |
+| `a`         | 画面を手動で取得                   |
+| `l`         | そのセッションのログを開く         |
+| `c`         | `/compact` を送信                  |
+| `k`         | セッションを削除                   |
+| `g`         | 手動更新                           |
+
+状態は各セッションバッファの内容から判定するため、**zellij を追加で呼びません**。「作業中」は Claude Code のスピナー行（`zellij-send-dashboard-working-regexp`、既定 `esc to interrupt`）で検出し、スピナーが消えると「完了」になります。「完了」はそのバッファを表示した時点で解除されます。
+
+`zellij-send-dashboard.el` を load-path に置く必要がありますが、`zellij-send.el` 本体はこれに依存しません。
+
+### ダッシュボードに使用状況（`/usage`）を表示する
+
+Claude Code の `/usage` と同じセッション/週の使用状況を表示できます:
+
+```
+── 使用状況 ─ 12s前の記録 ─────────────
+Current session
+███████████████                       30% used
+Resets 6:40pm (Asia/Tokyo)
+
+Current week (all models)
+██████████████▍                       29% used
+Resets Jul 29 at 9pm (Asia/Tokyo)
+```
+
+`/usage` は TUI 内でしか実行できず、`claude` CLI にも `usage` サブコマンドはありません。この情報を取得できる公式ルートは **statusLine コマンドの stdin に渡される JSON だけ**です。そこで、その JSON をキャッシュに保存するステータス行を設定し、ダッシュボードはそれを読むだけにします（追加プロセス・非公開 API なし）。
+
+**1. `~/.claude/hooks/statusline-zellij-send.sh` を作成:**
+
+```sh
+#!/bin/sh
+CACHE="$HOME/.claude/zellij-send-usage.json"
+TMP="$CACHE.$$.tmp"
+
+input=$(cat)
+
+# 書いてから rename する（Emacs が書きかけを読まないように）
+printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
+rm -f "$TMP" 2>/dev/null
+
+# ステータス行はこれまでどおり出力する（既存の設定に置き換えてください）
+printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+```
+
+`chmod +x ~/.claude/hooks/statusline-zellij-send.sh`
+
+**2. `~/.claude/settings.json` に登録:**
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/.claude/hooks/statusline-zellij-send.sh"
+  }
+}
+```
+
+反映には Claude Code の再起動が必要です。
+
+キャッシュは動作中の Claude Code セッションが更新するため、ダッシュボードには読み取り時点の古さ（`12s前の記録`）を添えて表示します。レート制限は Claude サブスクリプションのアカウントで、かつセッションの最初の API 応答以降にのみ現れます。
+
+| 変数                                     | 意味                                                        |
+|------------------------------------------|-------------------------------------------------------------|
+| `zellij-send-dashboard-show-usage`       | `nil` で使用状況を非表示（既定 `t`）                        |
+| `zellij-send-dashboard-usage-file`       | キャッシュのパス（既定 `~/.claude/zellij-send-usage.json`） |
+| `zellij-send-dashboard-usage-bar-width`  | バーの文字幅（既定 50）                                     |
+| `zellij-send-dashboard-usage-timezone`   | タイムゾーン表記。`nil` なら `$TZ`、次に `%Z`               |
 
 ## カスタマイズ
 

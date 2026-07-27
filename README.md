@@ -177,6 +177,64 @@ State is derived from each session buffer's contents — no extra `zellij` calls
 
 The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
 
+### Usage limits (`/usage`) in the dashboard
+
+The dashboard can show the same session/weekly limits that `/usage` prints inside Claude Code:
+
+```
+── 使用状況 ─ 12s前の記録 ─────────────
+Current session
+███████████████                       30% used
+Resets 6:40pm (Asia/Tokyo)
+
+Current week (all models)
+██████████████▍                       29% used
+Resets Jul 29 at 9pm (Asia/Tokyo)
+```
+
+`/usage` only exists inside the TUI and the `claude` CLI has no `usage` subcommand, so this data has exactly one supported source: the JSON that Claude Code pipes to a **statusLine command** on stdin. Set up a status line that caches that JSON and the dashboard reads the cache — no extra processes, no undocumented APIs.
+
+**1. Create `~/.claude/hooks/statusline-zellij-send.sh`:**
+
+```sh
+#!/bin/sh
+CACHE="$HOME/.claude/zellij-send-usage.json"
+TMP="$CACHE.$$.tmp"
+
+input=$(cat)
+
+# Write then rename, so Emacs never reads a half-written file
+printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
+rm -f "$TMP" 2>/dev/null
+
+# Print your status line as usual (replace with whatever you already use)
+printf '%s' "$input" | jq -r '"\(.model.display_name) | \(.workspace.current_dir)"'
+```
+
+`chmod +x ~/.claude/hooks/statusline-zellij-send.sh`
+
+**2. Register it in `~/.claude/settings.json`:**
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/.claude/hooks/statusline-zellij-send.sh"
+  }
+}
+```
+
+Restart Claude Code (or open `/statusline` once) so the new status line takes effect.
+
+The cache is refreshed by any running Claude Code session, so the dashboard shows how old the reading is (`12s前の記録`). Rate limits are only present for Claude subscription accounts, and only after the first API response of a session.
+
+| Option                                        | Meaning                                             |
+|-----------------------------------------------|-----------------------------------------------------|
+| `zellij-send-dashboard-show-usage`            | Set to `nil` to hide the usage block (default `t`)  |
+| `zellij-send-dashboard-usage-file`            | Cache path (default `~/.claude/zellij-send-usage.json`) |
+| `zellij-send-dashboard-usage-bar-width`       | Bar width in characters (default 50)                |
+| `zellij-send-dashboard-usage-timezone`        | Timezone label; `nil` uses `$TZ`, then `%Z`         |
+
 ## Customization
 
 To set a custom path to the `zellij` executable:
