@@ -205,6 +205,7 @@ QR は Claude Code 自身が半角ブロック文字で描くため、QR 生成�
 | `zellij-send-dashboard-fit-window`      | 再描画のたびに高さを合わせる（既定 `t`）              |
 | `zellij-send-dashboard-max-height`      | 高さの上限行数（既定 16）                             |
 | `zellij-send-dashboard-tail-width`      | 「状況」列の幅（既定 40）                             |
+| `zellij-send-dashboard-refresh-interval`| 再描画間隔・秒（既定 3。短すぎると行を選びにくい）    |
 
 `zellij-send-dashboard.el` を load-path に置く必要がありますが、`zellij-send.el` 本体はこれに依存しません。
 
@@ -214,14 +215,11 @@ Claude Code の `/usage` と同じセッション/週の使用状況を表示で
 
 ```
 ── 使用状況 ─ 12s前の記録 ─────────────
-Current session
-███████████████                       30% used
-Resets 6:40pm (Asia/Tokyo)
-
-Current week (all models)
-██████████████▍                       29% used
-Resets Jul 29 at 9pm (Asia/Tokyo)
+Current session:███████▌               30% used Resets 6:40pm (Asia/Tokyo)
+Current week   :███████▎               29% used Resets Jul 29 at 9pm (Asia/Tokyo)
 ```
+
+表の下に、1 種別 1 行で表示します（高さは 3 行分）。
 
 `/usage` は TUI 内でしか実行できず、`claude` CLI にも `usage` サブコマンドはありません。この情報を取得できる公式ルートは **statusLine コマンドの stdin に渡される JSON だけ**です。そこで、その JSON をキャッシュに保存するステータス行を設定し、ダッシュボードはそれを読むだけにします（追加プロセス・非公開 API なし）。
 
@@ -267,7 +265,7 @@ exit 0
 |------------------------------------------|-------------------------------------------------------------|
 | `zellij-send-dashboard-show-usage`       | `nil` で使用状況を非表示（既定 `t`）                        |
 | `zellij-send-dashboard-usage-file`       | キャッシュのパス（既定 `~/.claude/zellij-send-usage.json`） |
-| `zellij-send-dashboard-usage-bar-width`  | バーの文字幅（既定 50）                                     |
+| `zellij-send-dashboard-usage-bar-width`  | バーの表示幅・桁（既定 24）                                 |
 | `zellij-send-dashboard-usage-timezone`   | タイムゾーン表記。`nil` なら `$TZ`、次に `%Z`               |
 
 ## カスタマイズ

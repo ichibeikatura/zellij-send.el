@@ -205,6 +205,7 @@ By default the dashboard opens below the current window, sized to fit its conten
 | `zellij-send-dashboard-fit-window`      | Re-fit the height on every refresh (default `t`)            |
 | `zellij-send-dashboard-max-height`      | Height cap in lines (default 16)                            |
 | `zellij-send-dashboard-tail-width`      | Width of the 状況 column (default 40)                       |
+| `zellij-send-dashboard-refresh-interval`| Redraw interval in seconds (default 3; too short makes the list hard to navigate) |
 
 The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
 
@@ -214,14 +215,11 @@ The dashboard can show the same session/weekly limits that `/usage` prints insid
 
 ```
 ── 使用状況 ─ 12s前の記録 ─────────────
-Current session
-███████████████                       30% used
-Resets 6:40pm (Asia/Tokyo)
-
-Current week (all models)
-██████████████▍                       29% used
-Resets Jul 29 at 9pm (Asia/Tokyo)
+Current session:███████▌               30% used Resets 6:40pm (Asia/Tokyo)
+Current week   :███████▎               29% used Resets Jul 29 at 9pm (Asia/Tokyo)
 ```
+
+It sits under the table, one line per limit, so it costs three lines of height.
 
 `/usage` only exists inside the TUI and the `claude` CLI has no `usage` subcommand, so this data has exactly one supported source: the JSON that Claude Code pipes to a **statusLine command** on stdin. Set up a status line that caches that JSON and the dashboard reads the cache — no extra processes, no undocumented APIs.
 
@@ -267,7 +265,7 @@ The cache is refreshed by any running Claude Code session, so the dashboard show
 |-----------------------------------------------|-----------------------------------------------------|
 | `zellij-send-dashboard-show-usage`            | Set to `nil` to hide the usage block (default `t`)  |
 | `zellij-send-dashboard-usage-file`            | Cache path (default `~/.claude/zellij-send-usage.json`) |
-| `zellij-send-dashboard-usage-bar-width`       | Bar width in characters (default 50)                |
+| `zellij-send-dashboard-usage-bar-width`       | Bar width in columns (default 24)                   |
 | `zellij-send-dashboard-usage-timezone`        | Timezone label; `nil` uses `$TZ`, then `%Z`         |
 
 ## Customization

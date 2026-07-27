@@ -33,8 +33,9 @@
   "Dashboard for zellij-send sessions."
   :group 'zellij-send)
 
-(defcustom zellij-send-dashboard-refresh-interval 1.0
-  "ダッシュボードの再描画間隔（秒）。0 で自動更新なし（g で手動更新）。"
+(defcustom zellij-send-dashboard-refresh-interval 3.0
+  "ダッシュボードの再描画間隔（秒）。0 で自動更新なし（g で手動更新）。
+短すぎると行を選ぶ操作の途中で再描画が入り、カーソルが動かしにくくなる。"
   :type 'number
   :group 'zellij-send-dashboard)
 
@@ -109,8 +110,8 @@ Claude Code の入力ボックスやフッタ行を除外し、
   :type 'file
   :group 'zellij-send-dashboard)
 
-(defcustom zellij-send-dashboard-usage-bar-width 50
-  "使用状況バーの文字幅。"
+(defcustom zellij-send-dashboard-usage-bar-width 24
+  "使用状況バーの表示幅（桁）。"
   :type 'integer
   :group 'zellij-send-dashboard)
 
@@ -432,16 +433,28 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
                         (nth 3 dec) clock))
               (zellij-send-dashboard--tz-label)))))
 
-(defun zellij-send-dashboard--insert-usage-block (title limit)
-  "LIMIT（alist）を TITLE 付きで 1 ブロック挿入する。"
+(defconst zellij-send-dashboard--usage-labels
+  '((five_hour . "Current session")
+    (seven_day . "Current week"))
+  "レート制限の種別 -> 表示ラベル（`/usage' の見出しに合わせる）。")
+
+(defun zellij-send-dashboard--insert-usage-line (key limit width)
+  "LIMIT（alist）を 1 行で挿入する。KEY はラベル、WIDTH はラベル幅。
+「ラベル:バー NN% used Resets ...」の 1 行にまとめる（縦を使わない）。"
   (let ((pct (alist-get 'used_percentage limit))
-        (resets (alist-get 'resets_at limit)))
+        (resets (alist-get 'resets_at limit))
+        (label (alist-get key zellij-send-dashboard--usage-labels)))
     (when (numberp pct)
-      (insert (propertize title 'face 'bold) "\n"
+      ;; `format' に %-*s は無いので桁幅で自前に揃える
+      (insert (propertize
+               (concat label
+                       (make-string (max 0 (- width (string-width label))) ?\s)
+                       ":")
+               'face 'bold)
               (zellij-send-dashboard--bar pct)
-              (format "  %d%% used\n" (round pct)))
+              (format " %3d%% used" (round pct)))
       (when-let* ((line (zellij-send-dashboard--fmt-reset resets)))
-        (insert (propertize line 'face 'shadow) "\n"))
+        (insert " " (propertize line 'face 'shadow)))
       (insert "\n"))))
 
 (defun zellij-send-dashboard--insert-usage ()
@@ -458,33 +471,30 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
                             zellij-send-dashboard-usage-file)))
                  'face 'shadow))
       (insert (propertize
-               (format "── 使用状況 ─ %s前の記録 ─────────────\n"
+               (format "── 使用状況 ─ %s前の記録 %s\n"
                        (zellij-send-dashboard--fmt-elapsed
-                        (float-time (time-since (cdr cache)))))
+                        (float-time (time-since (cdr cache))))
+                       (make-string 13 ?─))
                'face 'shadow))
-      (zellij-send-dashboard--insert-usage-block
-       "Current session" (alist-get 'five_hour limits))
-      (zellij-send-dashboard--insert-usage-block
-       "Current week (all models)" (alist-get 'seven_day limits)))
-    ;; 表との区切り
-    (insert (propertize (make-string 46 ?─) 'face 'shadow) "\n")))
+      (let ((width (apply #'max (mapcar (lambda (c) (string-width (cdr c)))
+                                        zellij-send-dashboard--usage-labels))))
+        (dolist (key '(five_hour seven_day))
+          (zellij-send-dashboard--insert-usage-line
+           key (alist-get key limits) width))))))
 
 (defun zellij-send-dashboard-refresh ()
   "ダッシュボードを再描画する。"
   (interactive)
   (setq tabulated-list-entries (zellij-send-dashboard--entries))
   (tabulated-list-print t t)
+  ;; 追記は表の後ろに限る。表より前に入れると、カーソルが使用状況の行に
+  ;; あるときに `tabulated-list-print' が行を特定できず先頭に戻ってしまう。
   (let ((inhibit-read-only t))
     (save-excursion
       (goto-char (point-max))
       (when (null tabulated-list-entries)
-        (insert "\n  セッションがありません（M-x zellij-send で開始）\n")))
-    ;; 使用状況は表の上に置く。`tabulated-list-print' がカーソル位置を
-    ;; 復元したあとに point-min へ挿入するので、挿入分だけ point も一緒に
-    ;; ずれ、カーソルは同じ行に留まる。
-    (when zellij-send-dashboard-show-usage
-      (save-excursion
-        (goto-char (point-min))
+        (insert "\n  セッションがありません（M-x zellij-send で開始）\n"))
+      (when zellij-send-dashboard-show-usage
         (zellij-send-dashboard--insert-usage))))
   (zellij-send-dashboard--fit-window))
 
