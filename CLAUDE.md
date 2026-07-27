@@ -239,6 +239,15 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 3. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
    `zellij-send--pane-id` に保存
 
+**セッションの大きさは環境変数で決まる**。zellij は tty が無いとき `COLUMNS` /
+`LINES` を見て、無ければ **25 桁 × 24 行**という極端に狭いサイズになる。Emacs の
+サブプロセスには tty も `COLUMNS` も渡らないため、放っておくと必ずこれを踏む。
+Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、狭いペインでは
+本文が細切れに折り返されて読めない（実測: 25 桁）。`zellij-send-session-size`
+（既定 `(320 . 80)`）を `zellij-send--process-environment` で `COLUMNS` / `LINES`
+として渡して回避する。`TERM` と同じ経路なので、**両方ともここに集約する**こと。
+既存セッションのサイズは後から変えられない（作り直しが必要）。
+
 ## 既存セッションへの接続（pane-id の復元）
 
 `zellij-send-attach-session-async` が、ユーザーに何も聞かずに黒板バッファを用意する:

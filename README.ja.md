@@ -302,6 +302,16 @@ Claude 出力ログの場所（セッション作業ディレクトリからの�
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
 
+新しく作るセッションの大きさ（既定 320 桁 × 80 行）:
+
+```elisp
+(setq zellij-send-session-size '(320 . 80))  ; nil なら zellij 任せ
+```
+
+zellij は tty が無いとき環境変数 `COLUMNS` / `LINES` を見ます。Emacs のサブプロセスにはどちらも渡らないため、**この設定が無いと `attach --create-background` で作ったセッションは 25 桁 × 24 行**になります。Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、狭いペインだと本文が細切れに折り返されて読めません。広く取っておけば長い行のまま届き、Emacs 側の幅で視覚的に折り返されます（`truncate-lines` が `nil` の場合）。
+
+ターミナルから `zellij attach` すると、zellij の仕様でそのクライアントの大きさまでセッションが縮みます。広いまま使いたいときは attach しないでください。
+
 ## 自動受信 & markdown ログのセットアップ（Claude Code Stop フック）
 
 Stop フックは Claude Code の回答完了のたびに 2 つの処理を行います:

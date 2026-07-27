@@ -41,6 +41,21 @@ zellij サーバ・ペインに継承され、ペイン内のシェルでも TER
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-session-size '(320 . 80)
+  "新しく作る zellij セッションのサイズ (COLUMNS . LINES)。nil なら zellij 任せ。
+zellij は tty が無いとき環境変数 COLUMNS / LINES を見る。Emacs の
+サブプロセスには tty も COLUMNS も渡らないため、既定のままだと
+`attach --create-background' で作ったセッションが 25 桁 × 24 行になり、
+Claude Code が自分でペイン幅に合わせて改行を入れる都合で出力が
+細切れに折り返される。広く取っておくと本文が長い行のまま届き、
+Emacs 側で好きなように折り返せる。
+
+なおターミナルから attach すると、zellij の仕様で
+そのクライアントの大きさまでセッションが縮む。"
+  :type '(choice (const :tag "zellij 任せ" nil)
+                 (cons (integer :tag "桁") (integer :tag "行")))
+  :group 'zellij-send)
+
 (defcustom zellij-send-poll-interval 2.0
   "ポーリング間隔（秒）。0 でポーリング無効。"
   :type 'number
@@ -157,9 +172,17 @@ zellij の出力は 1 行 1 セッションで
 ;;; 送信
 
 (defun zellij-send--process-environment ()
-  "TERM を `zellij-send-term' に差し替えた `process-environment' を返す。
-Emacs 既定の TERM=dumb が zellij サーバ・ペインに継承されるのを防ぐ。"
-  (cons (concat "TERM=" zellij-send-term) process-environment))
+  "zellij を起動するための `process-environment' を返す。
+TERM を `zellij-send-term' に差し替え（Emacs 既定の TERM=dumb が
+zellij サーバ・ペインに継承されるのを防ぐ）、`zellij-send-session-size'
+が non-nil なら COLUMNS / LINES も渡す（tty が無いとき zellij は
+これを見る。未設定だと 25 桁 × 24 行の極端に狭いペインになる）。"
+  (let ((env (cons (concat "TERM=" zellij-send-term) process-environment)))
+    (when zellij-send-session-size
+      (setq env (append (list (format "COLUMNS=%d" (car zellij-send-session-size))
+                              (format "LINES=%d" (cdr zellij-send-session-size)))
+                        env)))
+    env))
 
 (defun zellij-send--zellij-async (args &optional callback)
   "zellij を ARGS で非同期実行する。

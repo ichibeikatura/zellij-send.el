@@ -302,6 +302,16 @@ The Claude output log location (relative to the session's working directory; kee
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
 
+The size of newly created sessions (default 320 columns x 80 lines):
+
+```elisp
+(setq zellij-send-session-size '(320 . 80))  ; nil leaves it to zellij
+```
+
+With no tty attached, zellij reads the `COLUMNS` / `LINES` environment variables. Emacs passes neither to its subprocesses, so **without this setting a session created by `attach --create-background` is only 25 columns wide by 24 lines**. Claude Code hard-wraps its own output to the pane width, so a narrow pane shreds every paragraph into stubs. A wide pane delivers long lines intact and lets Emacs wrap them visually instead (as long as `truncate-lines` is `nil`).
+
+Attaching from a terminal shrinks the session to that client's size — that is how zellij works. Don't attach if you want to keep the full width.
+
 ## Auto-receive & Markdown Log Setup (Claude Code Stop Hook)
 
 The Stop hook does two things every time Claude Code finishes a response:
