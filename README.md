@@ -170,6 +170,7 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `a`     | Fetch the screen manually                  |
 | `l`     | Open that session's log                    |
 | `c`     | Send `/compact`                            |
+| `r`     | Connect to Remote Control and show its QR  |
 | `Q`     | End the session — only if it is idle       |
 | `k`     | Delete the session (any state)             |
 | `g`     | Refresh now                                |
@@ -177,6 +178,21 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 State is derived from each session buffer's contents — no extra `zellij` calls are made. "Working" is detected from Claude Code's spinner line (`zellij-send-dashboard-working-regexp`, default `esc to interrupt`); when the spinner disappears the session flips to "Done", which clears once you look at that buffer.
 
 `Q` refuses to act on a session that is working, waiting for a choice, or freshly done, so a stray keypress cannot kill a session mid-task; `k` has no such guard.
+
+### Remote Control QR (`r`)
+
+`r` connects the session under the cursor to [Remote Control](https://claude.ai/code) and shows its QR code in Emacs, so you can carry on from your phone.
+
+Claude Code draws the QR itself using half-block characters, so no QR generator is needed — zellij-send sends `/remote-control` to the pane, waits for the menu, picks **Show QR code**, captures the screen, and dismisses the overlay with `Esc` so the pane returns to its prompt. The session URL is extracted too and copied to the kill ring.
+
+Because this exposes a local session to claude.ai, `r` always asks for confirmation, and — like `Q` — it only works on an **idle** session, since it types into the pane.
+
+| Option                                            | Meaning                                        |
+|---------------------------------------------------|------------------------------------------------|
+| `zellij-send-dashboard-remote-control-timeout`    | How long to wait for the screens (default 40s) |
+| `zellij-send-dashboard-remote-control-poll`       | Polling interval while waiting (default 1.5s)  |
+
+Connecting takes ~10 seconds, so the wait is a poll with a timeout rather than a fixed sleep. The QR is shown in `*zellij-qr-SESSION*`, where block characters are forced to one column wide — at their default width of two (common in Japanese locales) the QR would be stretched horizontally and would not scan.
 
 By default the dashboard opens below the current window, sized to fit its contents rather than taking over the frame:
 

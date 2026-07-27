@@ -158,6 +158,25 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
   - 選択待ち: `zellij-send--detect-prompt`
 - **zellij を追加で呼ばない**: 表示は本体のポーリング結果（バッファ内容）を読むだけ
 
+### Remote Control の QR（ダッシュボードの `r`）
+
+`/remote-control` をペインに送り、Claude Code が描く QR を dump-screen で取り込む
+（QR 生成器は不要）。実機検証で判明した注意点:
+
+- **メニューはカーソル移動量を「行数」で数えてはいけない**。項目の説明文が折り返して
+  複数行になるため、行数で数えると `Show QR code` を通り越して
+  `Disconnect this session` を選んでしまう（実際に踏んだ）。項目ラベルの並びで数え、
+  さらに **Enter の前に `❯` が `Show QR code` にあることを確認する**
+  （`zellij-send-dashboard--qr-confirm-and-enter`）
+- **接続に 10 秒以上かかる**。固定待ちではなくタイムアウト付きポーリングにする
+  （`zellij-send-dashboard--wait-for-screen`）
+- 取り込み後は必ず `Esc`（バイト 27）を送ってペインをプロンプトに戻す。
+  メニューに留まると以後の送信が壊れる
+- 表示バッファでは `char-width-table` をバッファローカルに差し替え、ブロック文字を
+  1 桁にする。既定では 2 桁（East Asian Ambiguous）になり QR が横に伸びて読めない
+- ローカルセッションを claude.ai に露出させる操作なので `yes-or-no-p` で必ず確認し、
+  待機中のセッションに限る（作業中のペインに文字を打ち込まない）
+
 ### 使用状況（/usage 相当）
 
 `/usage` は Claude Code の TUI 内でしか実行できず、`claude` CLI にも `usage`
