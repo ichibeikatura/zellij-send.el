@@ -161,7 +161,22 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
     ウィンドウに表示された時点で解除
   - 選択待ち: `zellij-send--detect-prompt`
 - **zellij を追加で呼ばない**: 表示は本体のポーリング結果（バッファ内容）を読むだけ
+  （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）
 
+### キーと更新（Emacs の作法）
+
+- `g` が更新。`revert-buffer-function` も `zellij-send-dashboard-refresh` に
+  差し替える。既定の `tabulated-list-revert` は `tabulated-list-entries` を
+  作り直さないため、`M-x revert-buffer` やマウス経由だと使用状況の再取得を
+  含む更新が走らない
+- `?` が `zellij-send-dashboard-help`（`*zellij-dashboard-help*` を
+  `with-help-window` で出す。`q` で閉じる）。**キー一覧は
+  `zellij-send-dashboard--keys` に書き、ヘルプはそこから描く**。
+  ヘルプは各行を実際のキーマップと突き合わせ、食い違えば「← 未割り当て」と
+  印を付けるので、キーを足したらこの表にも足すこと
+- **`header-line-format` にキーヒントを置いても無駄**。直後の
+  `tabulated-list-init-header` が列見出しで上書きする（かつてこれで
+  ヒントが表示されていなかった）
 ### Remote Control の QR（ダッシュボードの `r`）
 
 `/remote-control` をペインに送り、Claude Code が描く QR を dump-screen で取り込む

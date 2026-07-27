@@ -1013,6 +1013,30 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
 
 ;;; メジャーモード
 
+(defconst zellij-send-dashboard--keys
+  '(("移動")
+    ("RET" zellij-send-dashboard-visit              "そのセッションのバッファへ移動")
+    ("o"   zellij-send-dashboard-visit-other-window "別ウィンドウに表示（一覧に留まる）")
+    ("e"   zellij-send-dashboard-reply              "そのセッションの返信バッファを開く")
+    ("l"   zellij-send-dashboard-open-log           "そのセッションの出力ログを開く")
+    ("送信")
+    ("1/2/3" zellij-send-dashboard-select-1         "選択肢の番号を送る")
+    ("i"   zellij-send-dashboard-interrupt          "処理を中断する（Esc を送る）")
+    ("c"   zellij-send-dashboard-compact            "/compact を送る")
+    ("r"   zellij-send-dashboard-remote-control     "Remote Control に接続して QR を表示")
+    ("一覧")
+    ("g"   zellij-send-dashboard-refresh            "手動で更新する（revert-buffer）")
+    ("G"   zellij-send-dashboard-connect-all        "未接続のセッションに接続し、消えた行を消す")
+    ("a"   zellij-send-dashboard-show-response      "画面を手動で取得する")
+    ("?"   zellij-send-dashboard-help               "このキー一覧を出す")
+    ("終了")
+    ("Q"   zellij-send-dashboard-quit-idle-session  "セッションを終了する（待機中のみ）")
+    ("k"   zellij-send-dashboard-kill-session       "セッションを削除する（状態を問わない）"))
+  "ヘルプ（`zellij-send-dashboard-help'）に出すキー一覧。
+要素は (KEY COMMAND DESC)、または見出しだけの (TITLE)。
+COMMAND はキーマップとの食い違いを検査するために持つ
+（`zellij-send-dashboard-help' が実際の割り当てと突き合わせる）。")
+
 (defvar zellij-send-dashboard-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'zellij-send-dashboard-visit)
@@ -1030,8 +1054,30 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     (define-key map (kbd "3")   #'zellij-send-dashboard-select-3)
     (define-key map (kbd "g")   #'zellij-send-dashboard-refresh)
     (define-key map (kbd "G")   #'zellij-send-dashboard-connect-all)
+    (define-key map (kbd "?")   #'zellij-send-dashboard-help)
     map)
   "zellij-send-dashboard-mode のキーマップ。")
+
+(defun zellij-send-dashboard-help ()
+  "ダッシュボードのキー一覧を `*zellij-dashboard-help*' に出す。
+`q' で閉じる。実際のキーマップと突き合わせ、食い違いがあれば印を付ける。"
+  (interactive)
+  (let ((map zellij-send-dashboard-mode-map))
+    (with-help-window "*zellij-dashboard-help*"
+      (princ "zellij-send ダッシュボードのキー\n")
+      (dolist (row zellij-send-dashboard--keys)
+        (if (null (cdr row))
+            (princ (format "\n%s\n" (car row)))
+          (let* ((key (nth 0 row))
+                 (cmd (nth 1 row))
+                 (desc (nth 2 row))
+                 ;; 1/2/3 のようにまとめて書いた行は先頭のキーで引く
+                 (probe (car (split-string key "/")))
+                 (bound (lookup-key map (kbd probe)))
+                 (ok (eq bound cmd)))
+            (princ (format "  %-5s %s%s\n" key desc
+                           (if ok "" (format "  ← 未割り当て（%S）" bound)))))))
+      (princ "\n  C-h m で Emacs 標準の説明も見られます。\n"))))
 
 (define-derived-mode zellij-send-dashboard-mode tabulated-list-mode "ZS-Dash"
   "zellij-send セッションの状態一覧。
@@ -1045,9 +1091,14 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
          ("無変化" 7 nil)
          ("状況" 0 nil)])
   (setq tabulated-list-padding 1)
-  (setq header-line-format
-        " RET:移動 o:別窓 e:返信 1/2/3:選択 i:中断 a:取得 l:ログ c:圧縮 r:遠隔 Q:終了 k:削除 g:更新")
+  ;; header-line にキーヒントを置いても `tabulated-list-init-header' が
+  ;; 列見出しで上書きしてしまう。キー一覧は ? （--help）で出す。
   (tabulated-list-init-header)
+  ;; g・M-x revert-buffer・マウスのどれでも同じ更新にする。
+  ;; `tabulated-list-revert' は `tabulated-list-entries' を作り直さないので、
+  ;; 使用状況の再取得を含む自前の refresh に差し替える。
+  (setq-local revert-buffer-function
+              (lambda (&rest _) (zellij-send-dashboard-refresh)))
   (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timers nil t))
 
 (defun zellij-send-dashboard--connected-sessions ()

@@ -186,8 +186,11 @@ When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer u
 | `r`     | Connect to Remote Control and show its QR  |
 | `Q`     | End the session — only if it is idle       |
 | `k`     | Delete the session (any state)             |
-| `g`     | Refresh now                                |
+| `g`     | Refresh now (`revert-buffer`)              |
 | `G`     | Connect to any zellij session not yet listed |
+| `?`     | Show the key list                          |
+
+The bindings follow Emacs convention: `g` refreshes (`revert-buffer-function` is replaced too, so `M-x revert-buffer` and mouse-driven reverts run the same refresh), the stronger `G` connects, and `?` lists the keys in `*zellij-dashboard-help*` (`q` closes it). `C-h m` works as well.
 
 Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, otherwise the first terminal pane). Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
 

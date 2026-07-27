@@ -186,8 +186,11 @@ Claude Code が番号付き選択肢（`❯ 1.` 形式）を表示すると、`*
 | `r`         | Remote Control に接続して QR 表示  |
 | `Q`         | セッションを終了（待機中のみ）     |
 | `k`         | セッションを削除（状態を問わない） |
-| `g`         | 手動更新                           |
+| `g`         | 手動更新（`revert-buffer`）        |
 | `G`         | 未接続の zellij セッションに接続   |
+| `?`         | キー一覧を表示                     |
+
+キーは Emacs の作法に合わせてあります。`g` が更新（`revert-buffer-function` も差し替えてあるので `M-x revert-buffer` やマウス経由でも同じ更新になります）、その強い版の `G` が接続、`?` がキー一覧です。`?` は `*zellij-dashboard-help*` を開き、`q` で閉じます。`C-h m` でも一覧を見られます。
 
 ダッシュボードを開くと、**まだバッファの無い起動中の zellij セッションすべてに自動接続します**（`zellij-send-dashboard-auto-connect`、既定 `t`）。何も尋ねません: 作業ディレクトリは `zellij action dump-layout` から、pane-id は `zellij action list-panes` から取得します（`zellij-send-default-command` と同名のタイトルのペインを優先、無ければ最初の端末ペイン）。pane-id が復元できるので、**Emacs を再起動した後でも attach クライアント無しで送信できます**。
 
