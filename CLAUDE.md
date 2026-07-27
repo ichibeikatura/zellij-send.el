@@ -55,6 +55,10 @@ Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
 
 **送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。
 
+**sentinel の中でミニバッファ入力をしない**: sentinel / プロセスフィルタは quit が抑止された状態で走ることがあり、その中で `completing-read` や `read-directory-name` を呼ぶと C-g が効かない・入力が壊れる。非同期結果を受けてユーザーに質問する場合は `(run-at-time 0 nil #'FUNC ARGS)` で sentinel を抜けてから行う（`zellij-send` → `zellij-send--select-session` がこの形）。
+
+**セッション一覧のパース**: `zellij-send--parse-sessions` は `NAME [Created ...]` 形式の行だけを採用し、EXITED セッションと「セッション 0 件」の案内文（`No active zellij sessions found.`）を除外する。先頭トークンを無条件に拾うと案内文から `No` というセッション名が生まれる。
+
 ### Enter キー送信の注意点
 
 `write-chars` に `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
@@ -126,9 +130,7 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 ;;; スクリーンダンプ
 ;;; プロンプト検出・ハイライト
 ;;; バッファ更新（共通処理）
-;;; 通知
 ;;; ポーリング
-;;; 選択肢の即送信
 ;;; Claude Code コマンド
 ;;; インタラクティブコマンド
 ;;; 返信バッファ
@@ -145,6 +147,9 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 - セッション情報は `header-line-format` に表示
 - ユーザーが編集中（`buffer-modified-p` = t）はポーリングで上書きしない
 - `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・ポーリングの上書きを防ぐ
+- 更新時は point と `window-start` を復元する（`zellij-send--update-buffer`）。毎回 `point-min` に飛ばすと 2 秒ごとに読んでいる位置が失われる
+- **モードライン通知は持たない**（2026-07-27 撤去）。`global-mode-string` への `:eval` 登録は再描画のたびに全バッファを走査するうえ、状態表示は別途 `zellij-send-dashboard.el` で扱う。作業中/完了の検知（`zellij-send-ready-regexp` / `--is-ready` / `--notifying` / `--was-busy`）も併せて削除済み
+- 数字キー（`1`/`2`/`3`）の即送信も撤去。プロンプト表示後にバッファへ本文を書くと数字が誤送信されるため。選択肢の送信は `C-c C-a` → `n`（`zellij-send-reply-number`）。プロンプト行のハイライトは維持
 
 ## 自動受信・出力ログ（Stop フック）
 

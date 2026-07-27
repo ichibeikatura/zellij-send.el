@@ -13,8 +13,10 @@
 
 ;;; Code:
 
-(require 'cl-lib)
 (require 'transient)
+
+(declare-function markdown-mode "markdown-mode")
+(declare-function zellij-send-mode "zellij-send")
 
 (defgroup zellij-send nil
   "Send text to zellij sessions."
@@ -44,12 +46,6 @@ zellij サーバ・ペインに継承され、ペイン内のシェルでも TER
   :type 'number
   :group 'zellij-send)
 
-(defcustom zellij-send-ready-regexp "^❯\\s-*$"
-  "AIツールが入力待ちに戻ったことを示すプロンプトの正規表現。
-Claude Code のデフォルトは ❯。Gemini CLI 等では変更する。"
-  :type 'regexp
-  :group 'zellij-send)
-
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
   "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
 実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
@@ -68,9 +64,6 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 (defvar-local zellij-send--timer nil
   "ポーリングタイマー。")
 
-(defvar-local zellij-send--prompt-active nil
-  "選択肢プロンプトが表示中なら non-nil。")
-
 (defvar-local zellij-send--user-cleared nil
   "ユーザーが意図してクリアした場合 non-nil。ポーリング・Stop フックの上書きを防ぐ。")
 
@@ -80,13 +73,6 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 (defvar-local zellij-send--reply-window-config nil
   "返信バッファを開く前のウィンドウ構成。")
 
-(defvar-local zellij-send--notifying nil
-  "AI応答完了の通知中なら non-nil。modeline 表示に使う。")
-
-(defvar-local zellij-send--was-busy nil
-  "直前のポーリングで AI が処理中だった場合 non-nil。
-busy → ready への遷移を検出するために使う。")
-
 (defmacro zellij-send--assert-session ()
   "カレントバッファが zellij-send セッションに紐付いていなければエラーを発する。"
   '(unless zellij-send--session
@@ -95,12 +81,19 @@ busy → ready への遷移を検出するために使う。")
 ;;; セッション一覧の取得
 
 (defun zellij-send--parse-sessions (raw)
-  "RAW テキスト（list-sessions 出力）からセッション名リストを返す。"
+  "RAW テキスト（list-sessions 出力）から生存セッション名リストを返す。
+zellij の出力は 1 行 1 セッションで
+「NAME [Created ...] (current)」の形式（ANSI 付き）。
+以下は除外する:
+- EXITED セッション（送信しても届かないため）
+- セッションが 0 件のときの案内文
+  （\"No active zellij sessions found.\" — 従来はこれを
+  セッション名 \"No\" として拾ってしまっていた）。"
   (delq nil
         (mapcar (lambda (line)
-                  (let ((clean (replace-regexp-in-string
-                                "\033\\[[0-9;]*m" "" line)))
-                    (when (string-match "^\\([^ \t]+\\)" clean)
+                  (let ((clean (string-trim (zellij-send--strip-ansi line))))
+                    (when (and (string-match "\\`\\([^ \t]+\\)[ \t]+\\[Created" clean)
+                               (not (string-match-p "EXITED" clean)))
                       (match-string 1 clean))))
                 (split-string raw "\n" t))))
 
@@ -267,9 +260,13 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
     (goto-char (point-min))
     (re-search-forward "❯[[:space:]]*[1-9]\\." nil t)))
 
+(defun zellij-send--clear-prompt-highlight ()
+  "選択肢行のハイライトを消す。"
+  (remove-overlays (point-min) (point-max) 'zellij-send-prompt t))
+
 (defun zellij-send--highlight-prompt ()
   "選択肢行をハイライトする。"
-  (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)
+  (zellij-send--clear-prompt-highlight)
   (save-excursion
     (goto-char (point-min))
     (while (re-search-forward "^.*❯[[:space:]]*[1-9]\\..*$" nil t)
@@ -280,70 +277,24 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
 ;;; バッファ更新（共通処理）
 
 (defun zellij-send--update-buffer (content)
-  "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。"
-  (with-silent-modifications
-    (erase-buffer)
-    (insert content)
-    (goto-char (point-min)))
+  "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。
+カーソル位置とウィンドウの表示開始位置は可能な範囲で復元する
+（ポーリング更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。"
+  (let* ((win (get-buffer-window (current-buffer) t))
+         (pos (point))
+         (wstart (and (window-live-p win) (window-start win))))
+    (with-silent-modifications
+      (erase-buffer)
+      (insert content))
+    (goto-char (min pos (point-max)))
+    (when (window-live-p win)
+      (set-window-point win (point))
+      (when wstart
+        (set-window-start win (min wstart (point-max)) t))))
   (set-buffer-modified-p nil)
   (if (zellij-send--detect-prompt)
-      (progn
-        (setq zellij-send--prompt-active t)
-        (zellij-send--highlight-prompt)
-        (message "選択: 1 / 2 / 3 キーで選択できます"))
-    (setq zellij-send--prompt-active nil)
-    (remove-overlays (point-min) (point-max) 'zellij-send-prompt t)))
-
-;;; 通知
-
-(defun zellij-send--is-ready (content)
-  "CONTENT の末尾5行に `zellij-send-ready-regexp' がマッチすれば non-nil を返す。"
-  (let* ((lines (split-string content "\n"))
-         (tail (last lines 5))
-         (tail-str (mapconcat #'identity tail "\n")))
-    (string-match-p zellij-send-ready-regexp tail-str)))
-
-(defun zellij-send--mode-line-indicator ()
-  "作業中・完了の zellij-send バッファがあれば modeline 用文字列を返す。"
-  (let* ((live-bufs (cl-remove-if-not #'buffer-live-p (buffer-list)))
-         (working-bufs (cl-remove-if-not
-                        (lambda (buf)
-                          (buffer-local-value 'zellij-send--was-busy buf))
-                        live-bufs))
-         (notifying-bufs (cl-remove-if-not
-                          (lambda (buf)
-                            (buffer-local-value 'zellij-send--notifying buf))
-                          live-bufs))
-         (session-names (lambda (bufs)
-                          (mapconcat
-                           (lambda (buf)
-                             (buffer-local-value 'zellij-send--session buf))
-                           bufs ", ")))
-         (parts (list (when notifying-bufs
-                        (format "☝ done! (%s)" (funcall session-names notifying-bufs)))
-                      (when working-bufs
-                        (format "✍ working (%s)" (funcall session-names working-bufs))))))
-    (let ((str (mapconcat #'identity (delq nil parts) "  ")))
-      (if (string-empty-p str) "" (concat " " str)))))
-
-(defun zellij-send--clear-notification-on-switch (&rest _)
-  "カレントバッファが通知中の zellij-send バッファなら通知をクリアする。"
-  (when (and (eq major-mode 'zellij-send-mode)
-             zellij-send--notifying)
-    (setq zellij-send--notifying nil)
-    (force-mode-line-update t)))
-
-(defun zellij-send--update-busy-state (ready)
-  "READY に基づいて busy/notifying 状態を遷移させる。
-READY が non-nil かつ直前が busy なら通知を発火し、was-busy をクリアする。
-READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
-  (cond
-   ((and ready zellij-send--was-busy)
-    (setq zellij-send--was-busy nil)
-    (setq zellij-send--notifying t)
-    (force-mode-line-update t))
-   ((not ready)
-    (setq zellij-send--was-busy t))))
+      (zellij-send--highlight-prompt)
+    (zellij-send--clear-prompt-highlight)))
 
 ;;; ポーリング
 
@@ -360,8 +311,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
                   (not (buffer-modified-p))
                   (not zellij-send--user-cleared)
                   (not (string= content (buffer-string))))
-         (zellij-send--update-buffer content)
-         (zellij-send--update-busy-state (zellij-send--is-ready content)))))))
+         (zellij-send--update-buffer content))))))
 
 (defun zellij-send--start-polling ()
   "ポーリングタイマーを開始する。"
@@ -380,25 +330,6 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (when zellij-send--timer
     (cancel-timer zellij-send--timer)
     (setq zellij-send--timer nil)))
-
-;;; 選択肢の即送信
-
-(defun zellij-send--select-or-insert (n)
-  "プロンプト中なら N 番を送信、そうでなければ数字を挿入する。"
-  (if zellij-send--prompt-active
-      (progn
-        (zellij-send--assert-session)
-        (zellij-send--send zellij-send--session (number-to-string n)
-                           (lambda (ok)
-                             (when ok
-                               (message "選択 %d を送信しました" n))))
-        (setq zellij-send--prompt-active nil)
-        (remove-overlays (point-min) (point-max) 'zellij-send-prompt t))
-    (insert (number-to-string n))))
-
-(defun zellij-send-select-1 () (interactive) (zellij-send--select-or-insert 1))
-(defun zellij-send-select-2 () (interactive) (zellij-send--select-or-insert 2))
-(defun zellij-send-select-3 () (interactive) (zellij-send--select-or-insert 3))
 
 ;;; Claude Code コマンド
 
@@ -488,10 +419,15 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
      (lambda ()
        (zellij-send--zellij-async
         (list "delete-session" "--force" session)
-        (lambda (_exit)
-          (when (buffer-live-p main-buf)
-            (kill-buffer main-buf))
-          (message "セッション [%s] を削除しました" session)))))))
+        (lambda (exit)
+          (if (zerop exit)
+              (progn
+                (when (buffer-live-p main-buf)
+                  (kill-buffer main-buf))
+                (message "セッション [%s] を削除しました" session))
+            ;; 削除に失敗したらバッファは残す（再操作できるようにするため）
+            (message "セッション [%s] の削除に失敗しました (exit: %d)"
+                     session exit))))))))
 
 (defun zellij-send-open-log ()
   "Claude の出力ログ（markdown）を別ウィンドウで開く。
@@ -592,9 +528,6 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'zellij-send-send)
     (define-key map (kbd "C-c C-a") #'zellij-send-menu)
-    (define-key map (kbd "1") #'zellij-send-select-1)
-    (define-key map (kbd "2") #'zellij-send-select-2)
-    (define-key map (kbd "3") #'zellij-send-select-3)
     map)
   "zellij-send-mode のキーマップ。")
 
@@ -604,9 +537,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
   (zellij-send--start-polling)
-  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t)
-  (add-hook 'window-buffer-change-functions
-            #'zellij-send--clear-notification-on-switch))
+  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t))
 
 (if (require 'markdown-mode nil t)
     (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
@@ -638,10 +569,7 @@ READY が nil（= AI が処理中）なら was-busy フラグを立てる。"
              (when (and content
                         (not zellij-send--user-cleared)
                         (not (buffer-modified-p)))
-               (zellij-send--update-buffer content)
-               (when (zellij-send--is-ready content)
-                 (setq zellij-send--notifying t)
-                 (force-mode-line-update t))))))))))
+               (zellij-send--update-buffer content)))))))))
 
 ;;; エントリポイント
 
@@ -741,6 +669,16 @@ pane-id は不明なため focused pane へ送信する。完全に detached な
     (let ((dir (zellij-send--prompt-session-dir)))
       (zellij-send--setup-session-buffer session dir))))
 
+(defun zellij-send--select-session (sessions)
+  "SESSIONS からセッションを選ばせ、対応するバッファを開く。
+ミニバッファ入力を含むため、プロセス sentinel の中から直接呼ばないこと
+\(`zellij-send' 参照)。"
+  (let* ((choices (append sessions (list "[New]")))
+         (choice (completing-read "Session: " choices nil t)))
+    (if (string= choice "[New]")
+        (zellij-send--create-new-session sessions)
+      (zellij-send--connect-existing-session choice))))
+
 ;;;###autoload
 (defun zellij-send ()
   "zellij セッションを選択して入力バッファを開く。"
@@ -750,14 +688,10 @@ pane-id は不明なため focused pane へ送信する。完全に detached な
    (lambda (sessions)
      (if (eq sessions :timeout)
          (message "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。")
-       (let* ((choices (append sessions (list "[New]")))
-              (choice (completing-read "Session: " choices nil t)))
-         (if (string= choice "[New]")
-             (zellij-send--create-new-session sessions)
-           (zellij-send--connect-existing-session choice)))))))
-
-(add-to-list 'global-mode-string
-             '(:eval (zellij-send--mode-line-indicator)) t)
+       ;; コールバックはプロセス sentinel の中で走る。sentinel 内では
+       ;; quit が抑止されるため、そのままミニバッファ入力を行うと C-g が
+       ;; 効かない・入力が壊れる。タイマーで sentinel を抜けてから聞く。
+       (run-at-time 0 nil #'zellij-send--select-session sessions)))))
 
 (provide 'zellij-send)
 ;;; zellij-send.el ends here

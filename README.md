@@ -122,9 +122,9 @@ Inside the `*ai-session-name*` buffer:
 
 | Key | Action                                                    |
 |-----|-----------------------------------------------------------|
-| `c` | Compress context (`/compact`)                             |
-| `C` | Reset context (`/clear`)                                  |
-| `s` | Ask Claude to record progress to `CLAUDE.md`              |
+| `c` | Compress context (`/compact`)                                                  |
+| `C` | Reset context (`/clear`)                                                       |
+| `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
 
 ### Reply buffer (`C-c C-a` → `e`)
 
@@ -136,38 +136,9 @@ Opens `*zellij-reply-session-name*`. You can read the AI's response in `*ai-sess
 
 After sending, the original window layout is restored automatically.
 
-### Quick response to numbered prompts
+### Numbered prompts
 
-When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted.
-
-| Key | Action                      |
-|-----|-----------------------------|
-| `1` | Send choice 1 immediately   |
-| `2` | Send choice 2 immediately   |
-| `3` | Send choice 3 immediately   |
-
-When no prompt is active, these keys insert the digit as normal.
-
-## Mode Line Indicator
-
-While an AI session is running, a status indicator appears in the mode line:
-
-| State      | Display                          |
-|------------|----------------------------------|
-| Working    | `✍ working (session-name)`       |
-| Done       | `☝ done! (session-name)`         |
-
-When multiple sessions are active, names are shown comma-separated, e.g. `☝ done! (proj1, proj2)`.
-
-The indicator uses `global-mode-string`. If you use [doom-modeline](https://github.com/seagle0128/doom-modeline), add the `misc-info` segment to your modeline definition:
-
-```elisp
-(doom-modeline-def-modeline 'main
-  '(...)
-  '(... misc-info ...))
-```
-
-The `☝ done!` indicator clears automatically when you switch to the session buffer.
+When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted. Send your choice with `C-c C-a` → `n`.
 
 ## Customization
 
