@@ -86,7 +86,11 @@ Claude Code は考え中・ツール実行中に
   "画面が変化してから何秒間を「処理中」とみなすか。
 Claude Code は本文を流している間スピナー行を出さないので、
 スピナーだけでは応答中を検出できない。画面が動いていること自体を
-処理中の証拠として使う。0 にするとスピナー行だけで判定する。"
+処理中の証拠として使う。0 にするとスピナー行だけで判定する。
+
+変化時刻は本体の `zellij-send--last-change-time'（subscribe が記録）を使う。
+**ユーザーが編集中でバッファ更新を抑止している間も記録される**ので、
+バッファ内容の変化だけを見ていた頃のような取りこぼしは起きない。"
   :type 'number
   :group 'zellij-send-dashboard)
 
@@ -266,10 +270,15 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
   (let* ((now (float-time))
          (st (gethash session zellij-send-dashboard--state))
          (tick (buffer-chars-modified-tick buf))
+         ;; 本体（subscribe）が記録した最終変化時刻を優先する。バッファ内容の
+         ;; 変化だけを見ると、ユーザーが編集中で更新を抑止している間の変化を
+         ;; 取りこぼす。取れないときだけ tick の変化で代用する
+         (reported (buffer-local-value 'zellij-send--last-change-time buf))
          (changed (and st (not (equal (plist-get st :tick) tick))))
          ;; 初回は「ずっと前から変化なし」とみなす（接続直後に
          ;; 作業中と誤判定しないため）
-         (changed-at (cond (changed now)
+         (changed-at (cond (reported reported)
+                           (changed now)
                            (st (plist-get st :changed-at))
                            (t (- now zellij-send-dashboard-active-window 1))))
          (prev-status (plist-get st :status))
