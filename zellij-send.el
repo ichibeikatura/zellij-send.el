@@ -214,10 +214,16 @@ pane-id 不明なら nil（focused pane への送信になる）。"
 カレントバッファに `zellij-send--pane-id' があればそのペインへ、
 なければ focused pane へ送る（後者は attach クライアントが必要）。
 完了したら CALLBACK に成功なら t、失敗なら nil を渡して呼ぶ（省略可）。
-失敗時はメッセージも表示する。"
+失敗時はメッセージも表示する。
+
+本文は `write-chars' ではなく `paste'（bracketed paste）で送る。
+`write-chars' は改行を LF のまま渡すため、LF で入力を確定する受け手
+（シェルなど）だと複数行テキストが行ごとに実行されてしまう。
+`paste' は受け手が bracketed paste を有効にしている時だけマーカーで
+包むので、対応していないペインへ送っても余計な文字は現れない。"
   (let ((pane-args (zellij-send--pane-args)))
     (zellij-send--zellij-async
-     (append (list "--session" session "action" "write-chars")
+     (append (list "--session" session "action" "paste")
              pane-args (list "--" text))
      (lambda (exit1)
        (if (not (zerop exit1))

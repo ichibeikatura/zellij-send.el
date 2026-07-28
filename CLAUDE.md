@@ -38,7 +38,7 @@ pane-id 不明の既存セッションに送る場合のみ使う（ターミナ
 
 ```
 Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
-  ├─ 入力: C-c C-c → zellij-send--send → zellij action write-chars/write 13（--pane-id 指定）
+  ├─ 入力: C-c C-c → zellij-send--send → zellij action paste/write 13（--pane-id 指定）
   ├─ 表示: zellij action dump-screen → STDOUT 直読み → バッファ更新（非同期 / make-process + sentinel）
   ├─ 自動受信: Stop フック (emacsclient) または ポーリング (run-at-time)
   ├─ ログ: Stop フックが transcript から assistant 出力を .zellij-send/claude-log.md に追記
@@ -50,7 +50,7 @@ Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
 - **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）。同期 `call-process` は禁止（Emacs の UI をブロックしフリーズの温床になる）
 - 引数は個別の文字列として渡し、**シェル文字列結合は行わない**（コマンドインジェクション防止）。ユーザーテキストの直前に `--` を置き、`-` 始まりのテキストがオプション扱いされるのを防ぐ
 - 汎用ヘルパー: `(zellij-send--zellij-async args &optional callback)` — callback に exit code を渡す
-- 送信: `(zellij-send--send session text &optional callback)` — write-chars → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil。カレントバッファの `zellij-send--pane-id` を呼び出し時に取り込むため、**必ず対象バッファをカレントにして呼ぶ**（返信バッファには pane-id をコピーしてある）
+- 送信: `(zellij-send--send session text &optional callback)` — paste → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil。カレントバッファの `zellij-send--pane-id` を呼び出し時に取り込むため、**必ず対象バッファをカレントにして呼ぶ**（返信バッファには pane-id をコピーしてある）
 - スクリーン取得: `(zellij-send--dump-screen-async session callback)` — STDOUT 直読み（zellij 0.44+、tmpfile 不使用）。コールバックは要求元バッファをカレントにした状態で呼ばれる
 - ペイン起動: `(zellij-send--run-in-session-async session dir command callback)` — `zellij run` の STDOUT から pane-id を抽出して callback に渡す
 
@@ -62,11 +62,29 @@ Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
 
 ### Enter キー送信の注意点
 
-`write-chars` に `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
+テキストに `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
 ```
-zellij action write-chars --pane-id terminal_N -- "テキスト"
+zellij action paste --pane-id terminal_N -- "テキスト"
 zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 ```
+
+**本文は `write-chars` ではなく `paste` で送る**（2026-07-28 実測で決定）:
+
+- `write-chars` は改行を LF のまま渡す。**Claude Code は LF では送信を確定しない**
+  （実測: 3 行を `write-chars` で送っても入力欄に 3 行入るだけで送信されない）ため
+  Claude Code 相手なら壊れないが、**シェルは LF で確定する**（実測: zsh ペインに 2 行送ると
+  1 行目が実行された）。`zellij-send-default-command` は変更可能なので防御的に `paste` を使う
+- `paste` は**受け手が bracketed paste を有効にしている時だけ**マーカーで包む。
+  有効にしていないペイン（canonical mode の `cat` 等）には素の文字列が渡るので、
+  `[200~` がリテラルで現れる心配はない。切替用の defcustom は不要
+- **`ESC[200~` を手で組んではいけない**。単独の
+  `zellij action write -- 27 91 50 48 48 126` は zellij の入力パーサに食われてペインに届かない
+  （実測で確認。`ESC[200~Q` のように余分なバイトを足すと素通しされる）。
+  全バイトを 1 回の `write` にまとめれば届くが、日本語は 1 文字 3 バイトなので argv が肥大する
+- 副作用: 長文は Claude Code の入力欄で `[Pasted text #1 +59 lines]` に畳まれる
+  （実測 60 行）。内容は完全に送信されるが、`*ai-SESSION*` バッファには
+  本文ではなくプレースホルダが映る
+- `paste` は zellij 0.44.0 で追加（#4817）。必要バージョンの引き上げは不要
 
 ### ANSI エスケープの除去
 

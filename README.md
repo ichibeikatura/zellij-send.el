@@ -19,7 +19,7 @@ Use the `*ai-session-name*` buffer as a shared blackboard: write your message, s
 │  C-c C-c → send → buffer cleared    │
 │  C-c C-a → menu                     │
 └──────────────────────────────────────┘
-         │ zellij action write-chars
+         │ zellij action paste
          ▼
 ┌──────────────────────────────────────┐
 │  zellij: mysession                   │
@@ -419,12 +419,18 @@ With this in place, the `*ai-session-name*` buffer updates every time Claude Cod
 - Check that `~/.claude/hooks/stop-zellij-send.sh` is executable (`chmod +x`).
 
 **Garbled characters / text not sending**
-- `zellij action write-chars` assumes UTF-8. Make sure your terminal encoding is set to UTF-8.
+- `zellij action paste` assumes UTF-8. Make sure your terminal encoding is set to UTF-8.
+
+**Long text shows as `[Pasted text #1 +N lines]` in the pane**
+- Expected. Text is sent with `zellij action paste` (bracketed paste), and Claude Code collapses
+  large pastes into a placeholder in its input box. The full text is still submitted; only the
+  pane's display is collapsed, so the `*ai-SESSION*` buffer mirrors the placeholder rather than
+  the body.
 
 ## How It Works
 
 - **New session**: `zellij attach --create-background` creates a detached session; `zellij run --cwd DIR -- claude` starts the agent in a new pane and returns its pane id, which is remembered for all later commands. No attached client (terminal emulator) is needed.
-- **Sending text**: `zellij action write-chars --pane-id ID` sends the text; `zellij action write --pane-id ID 13` (CR) sends Enter. Without a known pane id, the focused pane is targeted instead (requires an attached client).
+- **Sending text**: `zellij action paste --pane-id ID` sends the text as a bracketed paste; `zellij action write --pane-id ID 13` (CR) sends Enter. Without a known pane id, the focused pane is targeted instead (requires an attached client). `paste` is used instead of `write-chars` because `write-chars` passes newlines through as bare LF, which a shell (or any agent that submits on LF) treats as multiple separate lines. `paste` wraps the text in bracketed-paste markers only when the receiving pane has that mode enabled, so panes that do not support it still receive plain text.
 - **Reading response**: `zellij action dump-screen` prints the pane content to stdout (zellij 0.44+); ANSI escapes are stripped before displaying in the buffer
 - **All zellij calls are asynchronous** (`make-process` + sentinel) so Emacs never blocks
 - **Auto-receive (Stop hook)**: Claude Code Stop hook → appends the latest assistant message to the markdown log, then `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
