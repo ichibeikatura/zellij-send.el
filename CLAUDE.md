@@ -288,6 +288,32 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 
 ログは `C-c C-a` → `l`（`zellij-send-open-log`）で開く。
 
+## セッションの終了（zellij-send-quit）
+
+**エージェントが終了してもセッションは消えない**（2026-07-28 実測）。`/exit` で claude が
+落ちてもペインは残り、`list-sessions` にセッションが居続ける。したがって
+「セッションが消えるのを待つ」実装は必ずタイムアウトする。
+
+終了の判定には **`zellij action list-panes --all` の `EXITED` 列**を使う:
+
+```
+TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X Y ROWS COLS
+0 0 Tab #1 terminal_1 terminal claude claude - true false true 0 1 48 50
+```
+
+- 列は 2 個以上の空白区切りだが、**TITLE と COMMAND 自体に空白が入る**
+  （例: `caffeinate -i -t 300`）。位置の決め打ちは禁止。`zellij-send--parse-pane-exited`
+  はヘッダ行から `PANE_ID` と `EXITED` の列位置を求め、フィールド数がヘッダと
+  一致しない行は読み飛ばす
+- 判定できないときは `:unknown` を返し、**絶対に t を返さない**。t は
+  「セッションを消してよい」の合図なので、誤検出が最も危険
+- pane-id 不明のセッションでは `list-sessions` の消滅を見る（ターミナル側で
+  閉じられた場合に効く）。`:timeout` を「0 件」と解釈しないこと
+- 終了を検出したら結局 `delete-session --force` で消す（セッションは自然には消えない）。
+  `zellij-send-quit-timeout`（既定 10 秒）を超えたら待つのをやめて同じ強制削除に落ちる
+
+実測: アイドル状態の claude セッションなら **1.3 秒**で検出・削除できる（旧実装は固定 2 秒待ち）。
+
 ## 新規セッション作成
 
 `zellij-send--create-new-session` のフロー（すべて非同期）:

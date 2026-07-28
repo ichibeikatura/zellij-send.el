@@ -62,6 +62,38 @@
                   "alive [Created 1m ago]\ndead [Created 5m ago] (EXITED - attach to resurrect)\n")
                  '("alive"))))
 
+;;; zellij-send--parse-pane-exited
+
+(defconst zellij-send-test--list-panes-all
+  (concat
+   "TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS\n"
+   "0  0  Tab #1  plugin_0  plugin  (.) - zellij:link  zellij:link  -  false  false  false  13  13  25  25\n"
+   "0  0  Tab #1  terminal_1  terminal  claude  claude  -  true  false  true  0  1  48  50\n"
+   "0  0  Tab #1  terminal_2  terminal  claude  caffeinate -i -t 300  /Users/x  true  false  false  0  1  47  209\n")
+  "実機（zellij 0.44.3）の `action list-panes --all' 出力を写したもの。")
+
+(ert-deftest zellij-send-test-parse-pane-exited ()
+  "EXITED 列を読む。列位置はヘッダから求めるので、COMMAND に空白が入っても崩れない。"
+  (should (eq (zellij-send--parse-pane-exited
+               zellij-send-test--list-panes-all "terminal_1")
+              t))
+  (should (eq (zellij-send--parse-pane-exited
+               zellij-send-test--list-panes-all "terminal_2")
+              nil))
+  ;; 居ないペインは :unknown（「終了した」と誤判定しない）
+  (should (eq (zellij-send--parse-pane-exited
+               zellij-send-test--list-panes-all "terminal_9")
+              :unknown)))
+
+(ert-deftest zellij-send-test-parse-pane-exited-broken-input ()
+  "壊れた入力で t を返さない。t は「消してよい」の合図なので誤検出が最も危険。"
+  (should (eq (zellij-send--parse-pane-exited nil "terminal_1") :unknown))
+  (should (eq (zellij-send--parse-pane-exited "" "terminal_1") :unknown))
+  ;; EXITED 列を持たない旧来の表（list-panes を --all なしで叩いた場合）
+  (should (eq (zellij-send--parse-pane-exited
+               "PANE_ID  TYPE  TITLE\nterminal_1  terminal  claude\n" "terminal_1")
+              :unknown)))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

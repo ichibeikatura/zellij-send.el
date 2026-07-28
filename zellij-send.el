@@ -66,6 +66,17 @@ Emacs 側で好きなように折り返せる。
   :type 'integer
   :group 'zellij-send)
 
+(defcustom zellij-send-quit-timeout 10.0
+  "`zellij-send-quit' が /exit の効果を待つ上限（秒）。
+これを超えたら `delete-session --force' に切り替える。"
+  :type 'number
+  :group 'zellij-send)
+
+(defcustom zellij-send-quit-poll-interval 0.5
+  "`zellij-send-quit' がセッションの消滅を確認する間隔（秒）。"
+  :type 'number
+  :group 'zellij-send)
+
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
   "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
 実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
@@ -653,33 +664,107 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   (setq zellij-send--user-cleared t)
   (message "クリアしました"))
 
+(defun zellij-send--force-delete-session (session main-buf reason)
+  "SESSION を `delete-session --force' で削除し、成功したら MAIN-BUF を kill する。
+REASON はユーザーに理由を伝えるための文字列。
+削除に失敗したらバッファは残す（再操作できるようにするため）。"
+  (zellij-send--zellij-async
+   (list "delete-session" "--force" session)
+   (lambda (exit)
+     (if (zerop exit)
+         (progn
+           (when (buffer-live-p main-buf)
+             (kill-buffer main-buf))
+           (message "セッション [%s] を削除しました（%s）" session reason))
+       (message "セッション [%s] の削除に失敗しました (exit: %d)" session exit)))))
+
+(defun zellij-send--parse-pane-exited (raw pane-id)
+  "`action list-panes --all' の出力 RAW から PANE-ID の EXITED 列を返す。
+終了していれば t、動いていれば nil、判定できなければ `:unknown'。
+
+列は 2 個以上の空白区切りだが、TITLE や COMMAND 自体に空白が入るため
+位置を決め打ちにせず、ヘッダ行から PANE_ID と EXITED の列位置を求める。"
+  (let* ((lines (split-string (or raw "") "\n" t))
+         (header (and lines (split-string (string-trim (car lines)) "[ \t]\\{2,\\}" t)))
+         (pane-col (and header (seq-position header "PANE_ID")))
+         (exited-col (and header (seq-position header "EXITED"))))
+    (if (not (and pane-col exited-col))
+        :unknown
+      (let ((result :unknown))
+        (dolist (line (cdr lines) result)
+          (let ((fields (split-string (string-trim (zellij-send--strip-ansi line))
+                                      "[ \t]\\{2,\\}" t)))
+            ;; 列がずれている行は読まない（TITLE に 2 連空白が入った等）
+            (when (and (= (length fields) (length header))
+                       (equal (nth pane-col fields) pane-id))
+              (setq result (string= (nth exited-col fields) "true")))))))))
+
+(defun zellij-send--await-agent-exit (session pane-id main-buf deadline)
+  "SESSION のエージェントが終了するのを待ち、確認できたらセッションを削除する。
+
+**エージェントが終了してもセッションは消えない**（実測: /exit で claude が
+落ちてもペインは EXITED=true のまま残り、セッションは list-sessions に居続ける）。
+そのため「セッションが消えるのを待つ」だけでは必ずタイムアウトする。
+PANE-ID が分かっていれば `list-panes --all' の EXITED 列で終了を検出し、
+分かっていなければセッションの消滅を見る（ターミナル側で閉じられた場合に効く）。
+
+DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切り替える。
+`list-sessions' の `:timeout' を「セッション 0 件」と解釈しないこと。"
+  (let ((timed-out (> (float-time) deadline)))
+    (cond
+     (timed-out
+      (zellij-send--force-delete-session
+       session main-buf
+       (format "%.0f 秒待っても終了しなかったので強制削除" zellij-send-quit-timeout)))
+     (pane-id
+      (zellij-send--zellij-output-async
+       session '("action" "list-panes" "--all")
+       (lambda (out)
+         (let ((exited (zellij-send--parse-pane-exited out pane-id)))
+           (if (eq exited t)
+               (zellij-send--force-delete-session
+                session main-buf "エージェントの終了を確認")
+             (message "セッション [%s] を終了中..." session)
+             (run-at-time zellij-send-quit-poll-interval nil
+                          #'zellij-send--await-agent-exit
+                          session pane-id main-buf deadline))))))
+     (t
+      (zellij-send--list-sessions-async
+       (lambda (sessions)
+         (if (and (listp sessions) (not (member session sessions)))
+             (progn
+               (when (buffer-live-p main-buf)
+                 (kill-buffer main-buf))
+               (message "セッション [%s] は終了しました" session))
+           (message "セッション [%s] を終了中..." session)
+           (run-at-time zellij-send-quit-poll-interval nil
+                        #'zellij-send--await-agent-exit
+                        session pane-id main-buf deadline))))))))
+
 (defun zellij-send-quit ()
-  "Claude Code に /exit を送り、zellij セッションとバッファを削除する。"
+  "Claude Code に /exit を送り、zellij セッションとバッファを削除する。
+エージェントが実際に終了するのを待ってから削除する。
+`zellij-send-quit-timeout' を超えたら待つのをやめて強制削除する。
+固定待ちにすると、ツール実行中で /exit が入力欄に入っただけのセッションを
+根拠のない待ち時間で強制削除してしまう。"
   (interactive)
   (zellij-send--assert-session)
   (let ((session zellij-send--session)
+        (pane-id zellij-send--pane-id)
         (main-buf (current-buffer)))
     (unless (yes-or-no-p
              (format "セッション [%s] を削除しますか? (zellij セッションも消えます) " session))
       (user-error "キャンセルしました"))
-    ;; Claude Code に /exit を送信（失敗しても続行）
-    (zellij-send--send session "/exit")
     (message "セッション [%s] を終了中..." session)
-    ;; 2秒後にセッションを強制削除してバッファを閉じる
-    (run-with-timer
-     2.0 nil
-     (lambda ()
-       (zellij-send--zellij-async
-        (list "delete-session" "--force" session)
-        (lambda (exit)
-          (if (zerop exit)
-              (progn
-                (when (buffer-live-p main-buf)
-                  (kill-buffer main-buf))
-                (message "セッション [%s] を削除しました" session))
-            ;; 削除に失敗したらバッファは残す（再操作できるようにするため）
-            (message "セッション [%s] の削除に失敗しました (exit: %d)"
-                     session exit))))))))
+    (zellij-send--send
+     session "/exit"
+     (lambda (ok)
+       (if ok
+           (zellij-send--await-agent-exit
+            session pane-id main-buf (+ (float-time) zellij-send-quit-timeout))
+         ;; /exit が送れないなら待っても終了しないので、すぐ強制削除する
+         (zellij-send--force-delete-session
+          session main-buf "/exit を送信できなかったため"))))))
 
 (defun zellij-send-open-log ()
   "Claude の出力ログ（markdown）を別ウィンドウで開く。
