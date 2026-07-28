@@ -288,6 +288,35 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 
 ログは `C-c C-a` → `l`（`zellij-send-open-log`）で開く。
 
+## スクリーン取得の限界（調査済み・再調査不要）
+
+2026-07-28 に zellij 0.44.3 + Claude Code v2.1.220 で実測した結果。
+**同じ調査を繰り返さないこと。**
+
+### `--full` は Claude Code に効かない
+
+`dump-screen --full` はスクロールバックまで取るオプションだが、
+**alt-screen の TUI には仕様上スクロールバックが無い**ため viewport と同じ内容しか返らない。
+
+対照実験（claude に 1〜40 を 1 行ずつ列挙させ、28 行のペインで比較）:
+
+| 対象 | viewport | `--full` |
+|---|---|---|
+| claude ペイン（alt-screen） | 28 行（22〜40 のみ） | **28 行。同一。1〜21 は取れない** |
+| 通常ペイン（`seq 1 200`） | 27 行 | 200 行（1 から全部） |
+
+`--full` 自体は正常。**流れて消えた Claude の出力は `zellij-send-log-file`
+（Stop フックが transcript から追記）で読む**。これが唯一の正しい経路。
+`zellij-send-show-response` に `--full` を付けてあるのは、alt-screen でない
+コマンドを `zellij-send-default-command' にした場合のためだけ。
+
+### alt-screen リサイズ由来の表示崩れ（zellij#5311）は再現しない
+
+<https://github.com/zellij-org/zellij/issues/5311> の「リサイズすると dump-screen が
+見えていない行まで返してステータス領域が二重に出る」現象は **0.44.3 では再現しなかった**。
+拡大（320×80）・縮小（100×24）・会話履歴あり・リサイズ 3 往復・`--full` 併用の
+いずれでも、ダンプ行数はペイン行数と一致しステータス行の重複も無し。
+
 ## セッションの終了（zellij-send-quit）
 
 **エージェントが終了してもセッションは消えない**（2026-07-28 実測）。`/exit` で claude が

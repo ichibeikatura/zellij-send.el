@@ -300,11 +300,18 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
    (zellij-send--strip-ansi
     (replace-regexp-in-string "\r" "" raw))))
 
-(defun zellij-send--dump-screen-async (session callback)
+(defun zellij-send--dump-screen-async (session callback &optional full)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。
 カレントバッファに `zellij-send--pane-id' があればそのペインをダンプする。
 取得できたら整形済み文字列を、失敗時は nil を引数にして CALLBACK を呼ぶ。
-CALLBACK は要求元バッファをカレントにした状態で呼ばれる。"
+CALLBACK は要求元バッファをカレントにした状態で呼ばれる。
+
+FULL が非 nil なら `--full' を付けてスクロールバックまで取る。
+**Claude Code には効かない**。alt-screen の TUI には仕様上スクロールバックが
+無いため、`--full' でも viewport と同じ内容しか返らない（2026-07-28 実測）。
+alt-screen でないコマンドを `zellij-send-default-command' に設定した場合の
+ためだけに付けている。流れて消えた Claude の出力は
+`zellij-send-log-file'（Stop フックが transcript から追記）で読む。"
   (let ((req-buffer (current-buffer))
         (out-buf (generate-new-buffer " *zellij-dump*"))
         (err-buf (generate-new-buffer " *zellij-dump-err*")))
@@ -316,6 +323,7 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
      :command (append (list zellij-send-executable
                             "--session" session
                             "action" "dump-screen")
+                      (when full (list "--full"))
                       (when zellij-send--pane-id
                         (list "--pane-id" zellij-send--pane-id)))
      :sentinel
@@ -644,7 +652,10 @@ pane-id が取れれば attach クライアント無しでも送信できる。
          (message "送信しました → [%s]" session))))))
 
 (defun zellij-send-show-response ()
-  "zellij スクリーンの内容をバッファに取得・表示する。"
+  "zellij スクリーンの内容をバッファに取得・表示する。
+手動取得なのでスクロールバックまで取る（`--full'）。ポーリングは
+viewport のみ。Claude Code では両者に差は出ない（alt-screen にスクロール
+バックが無いため）が、alt-screen でないコマンドを使う場合に効く。"
   (interactive)
   (zellij-send--assert-session)
   (zellij-send--dump-screen-async
@@ -654,7 +665,8 @@ pane-id が取れれば attach クライアント無しでも送信できる。
          (progn
            (zellij-send--update-buffer content)
            (message "スクリーン内容を取得しました"))
-       (message "スクリーン内容の取得に失敗しました")))))
+       (message "スクリーン内容の取得に失敗しました")))
+   t))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
