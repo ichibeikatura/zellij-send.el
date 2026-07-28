@@ -56,8 +56,22 @@ Emacs 側で好きなように折り返せる。
                  (cons (integer :tag "桁") (integer :tag "行")))
   :group 'zellij-send)
 
-(defcustom zellij-send-poll-interval 2.0
-  "ポーリング間隔（秒）。0 でポーリング無効。"
+(defcustom zellij-send-subscribe-initial-timeout 15.0
+  "subscribe 接続後、最初のイベントを待つ上限（秒）。
+これを過ぎても何も来なければ接続失敗とみなして再接続する。
+
+終了コードで失敗を判定できないため必要。存在しないセッションを指定すると
+`zellij subscribe' は**終了コード 0 のまま**何も流さずに終わる（実測）。"
+  :type 'number
+  :group 'zellij-send)
+
+(defcustom zellij-send-subscribe-max-retries 5
+  "subscribe の再接続を連続で何回失敗したらあきらめるか。"
+  :type 'integer
+  :group 'zellij-send)
+
+(defcustom zellij-send-subscribe-backoff-max 30.0
+  "subscribe 再接続の待ち時間の上限（秒）。1, 2, 4... と倍にしていく。"
   :type 'number
   :group 'zellij-send)
 
@@ -92,11 +106,36 @@ Emacs 側で好きなように折り返せる。
 このパッケージが `zellij run' で起動したペインのみ判明する。
 nil の場合は focused pane に送る（attach クライアントが必要）。")
 
-(defvar-local zellij-send--timer nil
-  "ポーリングタイマー。")
+(defvar-local zellij-send--subscribe-process nil
+  "このバッファに紐づく `zellij subscribe' の常駐プロセス。")
+
+(defvar-local zellij-send--subscribe-timer nil
+  "初回イベント待ちタイムアウト、または再接続待ちのタイマー。")
+
+(defvar-local zellij-send--subscribe-pending ""
+  "subscribe の受信途中データ。1 イベントが約 8 KB あり複数回に分かれて届くため、
+改行までを溜めてから 1 行ずつ JSON として解釈する。")
+
+(defvar-local zellij-send--subscribe-pane-id nil
+  "現在の subscribe 接続が使っている pane-id。
+`zellij-send--pane-id' と食い違ったら張り直す。")
+
+(defvar-local zellij-send--subscribe-retries 0
+  "subscribe の連続失敗回数。イベントを 1 つでも受け取ったら 0 に戻す。")
+
+(defvar-local zellij-send--last-event-time nil
+  "最後に subscribe イベントを受け取った時刻（`float-time'）。")
+
+(defvar-local zellij-send--last-change-time nil
+  "画面内容が最後に変化した時刻（`float-time'）。
+バッファ更新を抑止している間（編集中・クリア後）も記録し続ける。
+ダッシュボードの「作業中」判定はこれを見る。")
+
+(defvar-local zellij-send--last-content nil
+  "最後に受け取った画面内容。更新を抑止していても変化の検出には使う。")
 
 (defvar-local zellij-send--user-cleared nil
-  "ユーザーが意図してクリアした場合 non-nil。ポーリング・Stop フックの上書きを防ぐ。")
+  "ユーザーが意図してクリアした場合 non-nil。自動更新・Stop フックの上書きを防ぐ。")
 
 (defvar-local zellij-send--reply-main-buffer nil
   "返信バッファを開いた元の zellij-send バッファ。")
@@ -177,7 +216,9 @@ zellij の出力は 1 行 1 セッションで
     (with-current-buffer buf
       (unless (eq major-mode 'zellij-send-mode)
         (zellij-send-mode)
-        (setq zellij-send--session session)))
+        (setq zellij-send--session session))
+      ;; pane-id が未確定でも呼んでよい（ensure が特定してから張る）
+      (zellij-send--subscribe-ensure))
     buf))
 
 ;;; 送信
@@ -421,7 +462,8 @@ pane-id が取れれば attach クライアント無しでも送信できる。
         (lambda (pane-id)
           (when (and pane-id (buffer-live-p buf))
             (with-current-buffer buf
-              (setq-local zellij-send--pane-id pane-id)))
+              (setq-local zellij-send--pane-id pane-id)
+              (zellij-send--subscribe-ensure)))
           (when callback (funcall callback buf))))))))
 
 ;;; 送信履歴
@@ -549,40 +591,153 @@ pane-id が取れれば attach クライアント無しでも送信できる。
       (zellij-send--highlight-prompt)
     (zellij-send--clear-prompt-highlight)))
 
-;;; ポーリング
+;;; 自動受信（zellij subscribe）
 
-(defun zellij-send--poll ()
-  "タイマーコールバック。dump-screen を非同期で要求し、結果が来たらバッファを更新する。"
-  (when (and (buffer-live-p (current-buffer))
-             zellij-send--session
-             (not (buffer-modified-p))
-             (not zellij-send--user-cleared))
-    (zellij-send--dump-screen-async
-     zellij-send--session
-     (lambda (content)
-       (when (and content
-                  (not (buffer-modified-p))
-                  (not zellij-send--user-cleared)
-                  (not (string= content (buffer-string))))
-         (zellij-send--update-buffer content))))))
+;; セッションごとに `zellij subscribe' の常駐プロセスを 1 本持ち、ペインの
+;; 変化をイベントで受け取る。2 秒ごとに dump-screen のプロセスを起こす
+;; ポーリングは廃止した（アイドル 20 秒でイベント 1 件に対し、ポーリングは
+;; プロセス 10 個。実測）。
+;;
+;; 実測（zellij 0.44.3）で分かった注意点:
+;; - `subscribe' は `--pane-id' が必須。pane-id 不明なら先に特定する
+;; - イベントは NDJSON。viewport は差分ではなく毎回フルの行配列
+;; - 1 イベント約 8 KB で複数回に分かれて届くので行単位のバッファリングが要る
+;; - **セッションが消えても subscribe は終了しない**（force delete 後も
+;;   17 秒以上生き続けた）。プロセスの死を検知手段にできない。バッファが
+;;   kill されたときに `kill-buffer-hook' で確実に殺す
+;; - 存在しないセッションを指定すると**終了コード 0 のまま**何も流れない。
+;;   よって「初回イベントが来たか」で成否を判定する
 
-(defun zellij-send--start-polling ()
-  "ポーリングタイマーを開始する。"
-  (when (and (> zellij-send-poll-interval 0)
-             (null zellij-send--timer))
-    (let ((buf (current-buffer)))
-      (setq zellij-send--timer
-            (run-at-time zellij-send-poll-interval zellij-send-poll-interval
+(defun zellij-send--subscribe-stop ()
+  "このバッファの subscribe プロセスとタイマーを止める。
+意図的な停止なので sentinel を無効化してから殺す（再接続させないため）。"
+  (when zellij-send--subscribe-timer
+    (cancel-timer zellij-send--subscribe-timer)
+    (setq zellij-send--subscribe-timer nil))
+  (when zellij-send--subscribe-process
+    (let ((proc zellij-send--subscribe-process))
+      (setq zellij-send--subscribe-process nil)
+      (set-process-sentinel proc #'ignore)
+      (when (process-live-p proc)
+        (delete-process proc))))
+  (setq zellij-send--subscribe-pending ""))
+
+(defun zellij-send--subscribe-handle-line (line)
+  "subscribe から届いた 1 行 LINE を解釈してバッファに反映する。"
+  (let ((line (string-trim line)))
+    (unless (string-empty-p line)
+      (let* ((obj (ignore-errors
+                    (json-parse-string line :object-type 'alist
+                                       :array-type 'list :null-object nil)))
+             (viewport (alist-get 'viewport obj)))
+        (when (listp viewport)
+          (setq zellij-send--subscribe-retries 0
+                zellij-send--last-event-time (float-time))
+          (let ((content (zellij-send--process-dump
+                          (string-join viewport "\n"))))
+            ;; 変化の記録は更新抑止中も続ける（ダッシュボードが見るため）
+            (unless (equal content zellij-send--last-content)
+              (setq zellij-send--last-content content
+                    zellij-send--last-change-time (float-time)))
+            ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ
+            (when (and (not (buffer-modified-p))
+                       (not zellij-send--user-cleared)
+                       (not (string= content (buffer-string))))
+              (zellij-send--update-buffer content))))))))
+
+(defun zellij-send--subscribe-filter (buf out)
+  "subscribe プロセスの出力 OUT を BUF で行単位に解釈する。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq zellij-send--subscribe-pending
+            (concat zellij-send--subscribe-pending out))
+      (let ((lines (split-string zellij-send--subscribe-pending "\n")))
+        ;; 末尾は未完の行（改行で終わっていれば空文字）。次の出力に持ち越す
+        (setq zellij-send--subscribe-pending (car (last lines)))
+        (dolist (line (butlast lines))
+          (zellij-send--subscribe-handle-line line))))))
+
+(defun zellij-send--subscribe-schedule-retry ()
+  "subscribe を指数バックオフで張り直す。上限を超えたらあきらめる。"
+  (setq zellij-send--subscribe-retries (1+ zellij-send--subscribe-retries))
+  (if (> zellij-send--subscribe-retries zellij-send-subscribe-max-retries)
+      (message "セッション [%s] の自動更新に %d 回失敗しました（C-c C-a → a で手動取得）"
+               zellij-send--session zellij-send-subscribe-max-retries)
+    (let ((delay (min zellij-send-subscribe-backoff-max
+                      (expt 2.0 (1- zellij-send--subscribe-retries))))
+          (buf (current-buffer)))
+      (setq zellij-send--subscribe-timer
+            (run-at-time delay nil
                          (lambda ()
                            (when (buffer-live-p buf)
                              (with-current-buffer buf
-                               (zellij-send--poll)))))))))
+                               (setq zellij-send--subscribe-timer nil)
+                               (zellij-send--subscribe-ensure)))))))))
 
-(defun zellij-send--stop-polling ()
-  "ポーリングタイマーを停止する。"
-  (when zellij-send--timer
-    (cancel-timer zellij-send--timer)
-    (setq zellij-send--timer nil)))
+(defun zellij-send--subscribe-check-initial (buf)
+  "BUF の subscribe が初回イベントを受け取れたか確認し、駄目なら張り直す。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq zellij-send--subscribe-timer nil)
+      (unless zellij-send--last-event-time
+        (zellij-send--subscribe-stop)
+        (zellij-send--subscribe-schedule-retry)))))
+
+(defun zellij-send--subscribe-start ()
+  "このバッファの subscribe を開始する。pane-id が分かっていることが前提。"
+  (zellij-send--subscribe-stop)
+  (when (and zellij-send--session zellij-send--pane-id)
+    (let* ((buf (current-buffer))
+           (session zellij-send--session)
+           (process-environment (zellij-send--process-environment)))
+      (setq zellij-send--subscribe-pane-id zellij-send--pane-id
+            zellij-send--last-event-time nil)
+      (setq zellij-send--subscribe-process
+            (make-process
+             :name (format "zellij-subscribe-%s" session)
+             :buffer nil
+             :noquery t
+             :connection-type 'pipe
+             :command (list zellij-send-executable
+                            "--session" session
+                            "subscribe"
+                            "--pane-id" zellij-send--pane-id
+                            "--format" "json")
+             :filter (lambda (_proc out)
+                       (zellij-send--subscribe-filter buf out))
+             :sentinel
+             (lambda (proc _event)
+               (when (memq (process-status proc) '(exit signal))
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (when (eq zellij-send--subscribe-process proc)
+                       (setq zellij-send--subscribe-process nil)
+                       (zellij-send--subscribe-schedule-retry))))))))
+      ;; 終了コードが当てにならないので、初回イベントの有無で成否を見る
+      (setq zellij-send--subscribe-timer
+            (run-at-time zellij-send-subscribe-initial-timeout nil
+                         #'zellij-send--subscribe-check-initial buf)))))
+
+(defun zellij-send--subscribe-ensure ()
+  "必要なら subscribe を（再）開始する。
+既に生きていて pane-id も一致していれば何もしない。
+`subscribe' は `--pane-id' 必須なので、不明なら先に特定してから張る。"
+  (when (and zellij-send--session
+             (not (and zellij-send--subscribe-process
+                       (process-live-p zellij-send--subscribe-process)
+                       (equal zellij-send--subscribe-pane-id
+                              zellij-send--pane-id))))
+    (if zellij-send--pane-id
+        (zellij-send--subscribe-start)
+      (let ((buf (current-buffer))
+            (session zellij-send--session))
+        (zellij-send--detect-pane-async
+         session
+         (lambda (pane-id)
+           (when (and pane-id (buffer-live-p buf))
+             (with-current-buffer buf
+               (setq-local zellij-send--pane-id pane-id)
+               (zellij-send--subscribe-start)))))))))
 
 ;;; Claude Code コマンド
 
@@ -905,8 +1060,11 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
   (setq-local header-line-format
               '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
                               (or zellij-send--session "?"))))
-  (zellij-send--start-polling)
-  (add-hook 'kill-buffer-hook #'zellij-send--stop-polling nil t))
+  ;; subscribe はセッション名が入ってから張る（`--get-or-create-buffer' が呼ぶ）。
+  ;; ここで確実に止めておかないと、常駐プロセスがバッファより長生きする
+  ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の
+  ;; 確実な後始末になる。
+  (add-hook 'kill-buffer-hook #'zellij-send--subscribe-stop nil t))
 
 (if (require 'markdown-mode nil t)
     (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
@@ -1016,7 +1174,8 @@ KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
                               zellij-send-default-command)
                    (when (buffer-live-p buf)
                      (with-current-buffer buf
-                       (setq-local zellij-send--pane-id pane-id)))
+                       (setq-local zellij-send--pane-id pane-id)
+                       (zellij-send--subscribe-ensure)))
                    ;; `attach --create-background' が生むデフォルト shell ペイン
                    ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
                    ;; 致命的ではないので結果は無視する。

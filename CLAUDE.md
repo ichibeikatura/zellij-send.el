@@ -41,7 +41,7 @@ pane-id 不明の既存セッションに送る場合のみ使う（ターミナ
 Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
   ├─ 入力: C-c C-c → zellij-send--send → zellij action paste/write 13（--pane-id 指定）
   ├─ 表示: zellij action dump-screen → STDOUT 直読み → バッファ更新（非同期 / make-process + sentinel）
-  ├─ 自動受信: Stop フック (emacsclient) または ポーリング (run-at-time)
+  ├─ 自動受信: zellij subscribe の常駐プロセス（NDJSON）＋ Stop フック (emacsclient)
   ├─ ログ: Stop フックが transcript から assistant 出力を .zellij-send/claude-log.md に追記
   └─ UI: transient メニュー (C-c C-a)
 ```
@@ -173,7 +173,7 @@ zellij を叩く経路は使い捨てセッションを作って手で確認す�
 ;;; スクリーンダンプ
 ;;; プロンプト検出・ハイライト
 ;;; バッファ更新（共通処理）
-;;; ポーリング
+;;; 自動受信（zellij subscribe）
 ;;; Claude Code コマンド
 ;;; インタラクティブコマンド
 ;;; 返信バッファ
@@ -202,7 +202,8 @@ zellij を叩く経路は使い捨てセッションを作って手で確認す�
   - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
     ウィンドウに表示された時点で解除
   - 選択待ち: `zellij-send--detect-prompt`
-- **zellij を追加で呼ばない**: 表示は本体のポーリング結果（バッファ内容）を読むだけ
+- **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（バッファ内容と
+  `zellij-send--last-change-time`）を読むだけ
   （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）
 
 ### キーと更新（Emacs の作法）
@@ -273,11 +274,59 @@ am/pm と月名は `format-time-string` の `%p` / `%b` がロケール依存（
 `*ai-SESSION*` バッファは「黒板」として使う:
 - 固定ヘッダなし（バッファ全体がコンテンツ）
 - セッション情報は `header-line-format` に表示
-- ユーザーが編集中（`buffer-modified-p` = t）はポーリングで上書きしない
-- `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・ポーリングの上書きを防ぐ
-- 更新時は point と `window-start` を復元する（`zellij-send--update-buffer`）。毎回 `point-min` に飛ばすと 2 秒ごとに読んでいる位置が失われる
+- ユーザーが編集中（`buffer-modified-p` = t）は自動更新で上書きしない
+- `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・自動更新の上書きを防ぐ
+- 更新時は point と `window-start` を復元する（`zellij-send--update-buffer`）。毎回 `point-min` に飛ばすと更新のたびに読んでいる位置が失われる
 - **モードライン通知は持たない**（2026-07-27 撤去）。`global-mode-string` への `:eval` 登録は再描画のたびに全バッファを走査するうえ、状態表示は別途 `zellij-send-dashboard.el` で扱う。作業中/完了の検知（`zellij-send-ready-regexp` / `--is-ready` / `--notifying` / `--was-busy`）も併せて削除済み
 - 数字キー（`1`/`2`/`3`）の即送信も撤去。プロンプト表示後にバッファへ本文を書くと数字が誤送信されるため。選択肢の送信は `C-c C-a` → `n`（`zellij-send-reply-number`）。プロンプト行のハイライトは維持
+
+## 自動受信（zellij subscribe）
+
+セッションごとに `zellij subscribe` の常駐プロセスを 1 本持つ。**2 秒ポーリングは廃止**
+（`zellij-send-poll-interval` / `--poll` / `--start-polling` / `--stop-polling` を削除）。
+
+```sh
+zellij --session NAME subscribe --pane-id terminal_N --format json
+```
+
+イベントは NDJSON（1 行 1 オブジェクト）:
+
+```json
+{"event":"pane_update","is_initial":true,"pane_id":"terminal_1","scrollback":null,"viewport":["行1","行2"]}
+```
+
+### 実測で分かった注意点（2026-07-28 / zellij 0.44.3）
+
+- **`--pane-id` は必須**。pane-id 不明なら `--detect-pane-async` で先に特定してから張る
+  （`zellij-send--subscribe-ensure` がこれをやる）
+- **`viewport` は差分ではなく毎回フル**の行配列。`string-join` して既存の
+  `zellij-send--update-buffer` にそのまま渡せる。**再接続時に `dump-screen` で
+  取り直す必要はない**（初回配信がフルなので勝手に整合する）
+- **1 イベント約 8 KB**で複数回に分かれて届く。プロセスフィルタは**行単位の
+  バッファリングが必須**（`zellij-send--subscribe-pending`）
+- **セッションが消えても subscribe は終了しない**。`delete-session --force` の後も
+  17 秒以上生き続けた。**プロセスの死を検知手段にできない**。`kill-buffer-hook` で
+  確実に殺すのが唯一の後始末（`zellij-send--subscribe-stop`）
+- **存在しないセッションを指定すると終了コード 0** のまま何も流れない。終了コードで
+  成否を判定できないので、`zellij-send-subscribe-initial-timeout`（既定 15 秒）以内に
+  初回イベントが来なければ失敗とみなす（存在しない pane-id は exit 2）
+- 意図的に止めるときは **sentinel を `ignore` に差し替えてから** `delete-process` する。
+  そうしないと自前の再接続が走る
+
+### 性能（実測）
+
+| | subscribe | 旧ポーリング |
+|---|---|---|
+| アイドル 20 秒 | イベント 1 件（初回配信のみ） | dump-screen プロセス 10 個 |
+| 定常状態のプロセス数 | セッションあたり 1 本（3 セッションで 3 本を確認） | 2 秒ごとに生成 |
+| 画面変化 → バッファ反映 | **26〜40 ms** | 最大 2000 ms |
+| 応答ストリーミング中 | 2.1 events/sec | — |
+
+### 更新抑止と変化時刻
+
+`buffer-modified-p` が真、または `zellij-send--user-cleared` が真のときはバッファを
+書き換えない。ただし **`zellij-send--last-change-time` は抑止中も更新し続ける**。
+ダッシュボードの「作業中」判定はこれを見るので、編集中の変化を取りこぼさない。
 
 ## 自動受信・出力ログ（Stop フック）
 

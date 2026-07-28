@@ -434,7 +434,7 @@ With this in place, the `*ai-session-name*` buffer updates every time Claude Cod
 - **Reading response**: `zellij action dump-screen` prints the pane content to stdout (zellij 0.44+); ANSI escapes are stripped before displaying in the buffer
 - **All zellij calls are asynchronous** (`make-process` + sentinel) so Emacs never blocks
 - **Auto-receive (Stop hook)**: Claude Code Stop hook → appends the latest assistant message to the markdown log, then `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
-- **Polling**: Fetches screen content every `zellij-send-poll-interval` seconds (default: 2); skips update while the user is editing (`buffer-modified-p`)
+- **Live updates**: One long-running `zellij subscribe --pane-id ID --format json` process per session streams pane changes as NDJSON; the buffer is rewritten from the `viewport` field (which always carries the full pane, not a diff). Updates are skipped while the user is editing (`buffer-modified-p`) or after an explicit clear, but the last-change timestamp keeps being recorded so the dashboard still sees activity. An idle session produces one event (the initial delivery) rather than a `dump-screen` process every 2 seconds, and a change reaches the buffer in tens of milliseconds instead of up to 2 seconds. If the stream drops, it reconnects with exponential backoff (`zellij-send-subscribe-initial-timeout`, `zellij-send-subscribe-max-retries`, `zellij-send-subscribe-backoff-max`).
 - **Reply buffer**: Opens via `pop-to-buffer`; after sending, `set-window-configuration` restores the previous window layout
 
 ## License
