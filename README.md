@@ -305,13 +305,13 @@ The Claude output log location (relative to the session's working directory; kee
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
 
-The size of newly created sessions (default 320 columns x 80 lines):
+### Background sessions are 50 columns wide
 
-```elisp
-(setq zellij-send-session-size '(320 . 80))  ; nil leaves it to zellij
-```
+A session created by `zellij attach --create-background` is **50 columns by 48 lines**, and there is no way to change that from the command line. Claude Code hard-wraps its own output to the pane width, so paragraphs arrive shredded into short lines.
 
-With no tty attached, zellij reads the `COLUMNS` / `LINES` environment variables. Emacs passes neither to its subprocesses, so **without this setting a session created by `attach --create-background` is only 25 columns wide by 24 lines**. Claude Code hard-wraps its own output to the pane width, so a narrow pane shreds every paragraph into stubs. A wide pane delivers long lines intact and lets Emacs wrap them visually instead (as long as `truncate-lines` is `nil`).
+Setting `COLUMNS` / `LINES` does not help. Measured on zellij 0.44.3 against a freshly started, isolated server (`ZELLIJ_SOCKET_DIR`): `COLUMNS=320 LINES=80`, `COLUMNS=200 LINES=60` and no setting at all all produce the same 50x48 pane. A `zellij-send-session-size` option used to pass those variables; it was removed once this was measured. Floating panes with an explicit `--width` are clamped to the viewport too, and there is no config-file setting for it.
+
+Sessions you start yourself from a terminal take that terminal's width, so this only affects sessions zellij-send creates via `[New]`. Attaching a wide terminal client to a background session once and detaching does resize it permanently, if you want a workaround by hand.
 
 Attaching from a terminal shrinks the session to that client's size — that is how zellij works. Don't attach if you want to keep the full width.
 

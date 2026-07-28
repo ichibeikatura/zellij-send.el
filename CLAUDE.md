@@ -400,13 +400,37 @@ TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X
 3. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
    `zellij-send--pane-id` に保存
 
-**セッションの大きさは環境変数で決まる**。zellij は tty が無いとき `COLUMNS` /
-`LINES` を見て、無ければ **25 桁 × 24 行**という極端に狭いサイズになる。Emacs の
-サブプロセスには tty も `COLUMNS` も渡らないため、放っておくと必ずこれを踏む。
-Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、狭いペインでは
-本文が細切れに折り返されて読めない（実測: 25 桁）。`zellij-send-session-size`
-（既定 `(320 . 80)`）を `zellij-send--process-environment` で `COLUMNS` / `LINES`
-として渡して回避する。`TERM` と同じ経路なので、**両方ともここに集約する**こと。
+### 背景セッションの大きさ（調査済み・再調査不要）
+
+**`COLUMNS` / `LINES` を渡してもセッションの大きさは変わらない**（2026-07-28、
+zellij 0.44.3 で実測）。かつて `zellij-send-session-size`（既定 `(320 . 80)`）を
+`zellij-send--process-environment` から渡していたが、**効果が無いことを確認したので
+削除した**。復活させないこと。
+
+`ZELLIJ_SOCKET_DIR` で隔離したまっさらなサーバを立てて検証した結果:
+
+| 条件 | 実測（rows cols） |
+|---|---|
+| 新規サーバ + `COLUMNS=320 LINES=80` | 48 50 |
+| 新規サーバ + `COLUMNS=200 LINES=60` | 48 50 |
+| 新規サーバ + COLUMNS/LINES なし | 48 50 |
+| 稼働中サーバ + `COLUMNS=320 LINES=80` | 47 104 |
+
+サーバ起動時であっても環境変数は見られていない。旧ドキュメントの
+「未指定だと 25 桁 × 24 行」も誤り。実際は **50 桁 × 48 行**で、25 桁に見えたのは
+50 桁を 2 ペインで分割していたため。CLI にも設定ファイルにも背景セッションの
+既定サイズを決める項目は無く、浮動ペインの `--width` もビューポートに丸められる。
+
+**唯一効いた回避策**（実証済み・未実装）: 広い pty を持つクライアントで一瞬 attach し、
+detach する。サイズはそのまま残る（320×80 の pty で attach → detach 後に 78×320 を確認。
+後から `zellij run` で足したペインも継承する）。Emacs からは
+`make-process :connection-type 'pty` + `set-process-window-size` で実行できる
+（batch Emacs で両 API の利用可能を確認済み）。ただし CLAUDE.md 冒頭の経緯どおり
+attach クライアントはフリーズの原因になった経緯があるため、入れるなら全面非同期・
+出力を捨てるフィルタ・確実な detach/kill が前提。
+
+なお**ターミナルから作ったセッションはそのターミナルの幅になる**（実測 209 桁）ので、
+この問題は zellij-send が `[New]` で作った背景セッションに限る。
 既存セッションのサイズは後から変えられない（作り直しが必要）。
 
 ## 既存セッションへの接続（pane-id の復元）
