@@ -396,16 +396,19 @@ TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X
 
 `zellij-send--create-new-session` のフロー（すべて非同期）:
 1. `zellij attach --create-background NAME` — detached セッション作成（tty 不要）
-2. 0.5 秒待って `zellij --session NAME run --cwd DIR --name CMD -- CMD` — claude ペインを起動
-3. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
+2. `zellij-send--resize-session` — 一瞬 attach して 320×80 に広げる（下記）。
+   **ペインを作る前**に行うこと。後から作るペインが拡幅後のサイズを継承する
+3. 0.5 秒待って `zellij --session NAME run --cwd DIR --name CMD -- CMD` — claude ペインを起動
+4. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
    `zellij-send--pane-id` に保存
 
 ### 背景セッションの大きさ（調査済み・再調査不要）
 
 **`COLUMNS` / `LINES` を渡してもセッションの大きさは変わらない**（2026-07-28、
-zellij 0.44.3 で実測）。かつて `zellij-send-session-size`（既定 `(320 . 80)`）を
-`zellij-send--process-environment` から渡していたが、**効果が無いことを確認したので
-削除した**。復活させないこと。
+zellij 0.44.3 で実測）。かつて `zellij-send--process-environment` から
+これを渡していたが、効果が無いことを確認したので削除した。**環境変数の経路を
+復活させないこと**（`zellij-send-session-size` という名前は今も使っているが、
+意味が「拡幅用クライアントの pty サイズ」に変わっている。下記参照）。
 
 `ZELLIJ_SOCKET_DIR` で隔離したまっさらなサーバを立てて検証した結果:
 
@@ -421,13 +424,33 @@ zellij 0.44.3 で実測）。かつて `zellij-send-session-size`（既定 `(320
 50 桁を 2 ペインで分割していたため。CLI にも設定ファイルにも背景セッションの
 既定サイズを決める項目は無く、浮動ペインの `--width` もビューポートに丸められる。
 
-**唯一効いた回避策**（実証済み・未実装）: 広い pty を持つクライアントで一瞬 attach し、
-detach する。サイズはそのまま残る（320×80 の pty で attach → detach 後に 78×320 を確認。
-後から `zellij run` で足したペインも継承する）。Emacs からは
-`make-process :connection-type 'pty` + `set-process-window-size` で実行できる
-（batch Emacs で両 API の利用可能を確認済み）。ただし CLAUDE.md 冒頭の経緯どおり
-attach クライアントはフリーズの原因になった経緯があるため、入れるなら全面非同期・
-出力を捨てるフィルタ・確実な detach/kill が前提。
+### 回避策（実装済み）: 一瞬だけ attach して広げる
+
+唯一効くのが「目的の大きさの pty を持つクライアントで一瞬 attach して detach する」方法。
+サイズは detach 後も残り、後から `zellij run` で足したペインも継承する。
+`zellij-send--resize-session` がこれを行い、`[New]` の新規作成フローが
+**ペインを作る前に**呼ぶ（`zellij-send-session-size`、既定 `(320 . 80)`）。
+既存セッションは `M-x zellij-send-resize-session` で後から広げられる。
+
+**このパッケージは attach クライアント（eat）起因のフリーズが解消できず eat を
+全廃した経緯がある。** 触るときは以下を必ず守ること:
+
+1. **全面非同期**。同期呼び出しを一切挟まない
+2. **出力を捨てるフィルタ（`:filter #'ignore`）を必ず置く**。Emacs が pty を
+   読まないと zellij サーバがクライアントへの書き込みでブロックし、セッション
+   全体が入力不可になる。**旧デッドロックの原因はこれ**
+3. **detach に失敗しても必ず殺す**。`zellij-send-resize-timeout`（既定 8 秒）の
+   watchdog で `delete-process` する。キーバインドを変えている環境では
+   `Ctrl+o d` が効かない
+
+実測（2026-07-28）:
+
+| 経路 | 結果 |
+|---|---|
+| 正常系（detach が効く） | 2.0 秒で完了。48×50 → **78×320**。プロセス残留なし |
+| watchdog 経路（detach を送る前に強制 kill） | 4.0 秒で完了。**セッションは生存**し拡幅も有効（58×200）。残留なし |
+| 新規作成フル経路 | 拡幅 → claude 起動 → pane-id 取得 → subscribe 開始まで通し |
+| 拡幅後の送受信 | 送信 OK・subscribe に反映 OK・プロセス生存（デッドロックなし） |
 
 なお**ターミナルから作ったセッションはそのターミナルの幅になる**（実測 209 桁）ので、
 この問題は zellij-send が `[New]` で作った背景セッションに限る。
@@ -460,27 +483,3 @@ attach クライアント無しで送信できる）。`M-x zellij-send` の既�
 - **編集中（`buffer-modified-p`）のバッファは kill しない**。書きかけの入力を失う
 - `--scanning` フラグで多重起動を防ぐ（応答が 15 秒を超えても `zellij` を重ねない）
 - ダッシュボードを閉じたら `--stop-timers` で両方止める
-
-## 今後の課題
-
-### 背景セッションが 50 桁固定で Claude Code の出力が読みにくい
-
-`[New]` で作った背景セッションは 50 桁 × 48 行で固定される。Claude Code は
-自分でペイン幅に合わせて改行を入れるため、日本語だと 24 文字程度で折り返された
-本文が届く。「背景セッションの大きさ」の節に実測結果と経緯がある。
-
-**回避策は実証済み・未実装**: 広い pty を持つクライアントで一瞬 attach して
-detach するとサイズが残る（320×80 で attach → detach 後に 78×320 を確認。
-後から `zellij run` で足したペインも継承する）。Emacs からは
-`make-process :connection-type 'pty` + `set-process-window-size` で実行でき、
-両 API が batch Emacs で使えることも確認済み。
-
-**着手する前に決めること**: このパッケージは attach クライアント（eat）起因の
-フリーズが解消できず eat を全廃した経緯がある。一瞬とはいえ attach クライアントを
-復活させるので、最低限
-- 全面非同期（同期呼び出しを一切挟まない）
-- 出力を捨てるプロセスフィルタを必ず付ける（読まないと zellij サーバが書き込みで
-  ブロックする恐れがある。これが旧デッドロックの原因）
-- detach（`Ctrl+o d`）に失敗しても確実にプロセスを殺すフォールバック
-
-を満たすこと。満たせないなら入れない方がよい。

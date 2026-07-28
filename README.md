@@ -305,13 +305,23 @@ The Claude output log location (relative to the session's working directory; kee
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
 
-### Background sessions are 50 columns wide
+### Session width
 
-A session created by `zellij attach --create-background` is **50 columns by 48 lines**, and there is no way to change that from the command line. Claude Code hard-wraps its own output to the pane width, so paragraphs arrive shredded into short lines.
+A session created by `zellij attach --create-background` is only **50 columns by 48 lines**. Claude Code hard-wraps its own output to the pane width, so paragraphs would arrive shredded into short lines.
 
-Setting `COLUMNS` / `LINES` does not help. Measured on zellij 0.44.3 against a freshly started, isolated server (`ZELLIJ_SOCKET_DIR`): `COLUMNS=320 LINES=80`, `COLUMNS=200 LINES=60` and no setting at all all produce the same 50x48 pane. A `zellij-send-session-size` option used to pass those variables; it was removed once this was measured. Floating panes with an explicit `--width` are clamped to the viewport too, and there is no config-file setting for it.
+Setting `COLUMNS` / `LINES` does not help — measured on zellij 0.44.3 against a freshly started, isolated server (`ZELLIJ_SOCKET_DIR`), `COLUMNS=320 LINES=80`, `COLUMNS=200 LINES=60` and no setting at all all produce the same 50x48 pane. Floating panes with an explicit `--width` get clamped to the viewport, and there is no config-file setting for it.
 
-Sessions you start yourself from a terminal take that terminal's width, so this only affects sessions zellij-send creates via `[New]`. Attaching a wide terminal client to a background session once and detaching does resize it permanently, if you want a workaround by hand.
+What does work is attaching a client whose pty has the size you want and detaching again: the size sticks, and panes created afterwards inherit it. zellij-send does this automatically when it creates a session, before starting the agent pane:
+
+```elisp
+(setq zellij-send-session-size '(320 . 80))   ; nil disables the resize
+(setq zellij-send-resize-detach-delay 2.0)    ; wait before sending Ctrl+o d
+(setq zellij-send-resize-timeout 8.0)         ; kill the client no matter what
+```
+
+The attach client is short-lived (about 2 seconds), fully asynchronous, and its output is discarded by a filter — Emacs must keep reading the pty, otherwise the zellij server blocks writing to the client and the whole session stops accepting input. If the detach keystroke does not work (for example because you rebound it), the watchdog kills the client after `zellij-send-resize-timeout`; the session survives that and keeps the new size.
+
+To widen a session that already exists, run `M-x zellij-send-resize-session` from its buffer. Sessions you start yourself from a terminal already take that terminal's width, so this only matters for sessions zellij-send creates via `[New]`.
 
 Attaching from a terminal shrinks the session to that client's size — that is how zellij works. Don't attach if you want to keep the full width.
 

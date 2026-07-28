@@ -41,6 +41,33 @@ zellij サーバ・ペインに継承され、ペイン内のシェルでも TER
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-session-size '(320 . 80)
+  "新規セッションを広げる大きさ (COLUMNS . LINES)。nil なら広げない。
+
+`attach --create-background' で作った背景セッションは 50 桁 × 48 行に固定され、
+**環境変数 COLUMNS / LINES では変えられない**（実測。CLAUDE.md 参照）。
+唯一効くのが「この大きさの pty を持つクライアントで一瞬 attach して detach する」
+方法で、`zellij-send--resize-session' がそれを行う。
+
+Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、50 桁のままだと
+日本語が 24 文字程度で折り返されて読みにくい。広げておくと長い行のまま届き、
+Emacs 側で好きなように折り返せる。"
+  :type '(choice (const :tag "広げない" nil)
+                 (cons (integer :tag "桁") (integer :tag "行")))
+  :group 'zellij-send)
+
+(defcustom zellij-send-resize-detach-delay 2.0
+  "拡幅用の attach クライアントを detach するまでの待ち時間（秒）。
+クライアントが繋がって pty の大きさがセッションに伝わるのを待つ。"
+  :type 'number
+  :group 'zellij-send)
+
+(defcustom zellij-send-resize-timeout 8.0
+  "拡幅用の attach クライアントを生かしておく上限（秒）。
+detach が効かなくてもこの時間で必ずプロセスを殺す。"
+  :type 'number
+  :group 'zellij-send)
+
 (defcustom zellij-send-subscribe-initial-timeout 15.0
   "subscribe 接続後、最初のイベントを待つ上限（秒）。
 これを過ぎても何も来なければ接続失敗とみなして再接続する。
@@ -1130,6 +1157,91 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
                          (string-match "terminal_[0-9]+" out)
                          (match-string 0 out)))))))))
 
+;;; セッションの拡幅（一瞬だけ attach する）
+
+;; 背景セッションは 50 桁 × 48 行に固定され、COLUMNS / LINES では変えられない
+;; （実測。CLAUDE.md「背景セッションの大きさ」参照）。唯一効くのが、目的の
+;; 大きさの pty を持つクライアントで一瞬 attach して detach する方法。
+;; サイズは detach 後も残り、あとから `zellij run' で足したペインも継承する。
+;;
+;; **このパッケージは attach クライアント（eat）起因のフリーズが解消できず
+;; eat を全廃した経緯がある。** 復活させるにあたって以下を必ず守ること:
+;; 1. 全面非同期。同期呼び出しを一切挟まない
+;; 2. 出力を捨てるフィルタを必ず置く。Emacs が pty を読まないと zellij サーバが
+;;    クライアントへの書き込みでブロックし、セッション全体が入力不可になる
+;;    （旧デッドロックの原因はこれ）
+;; 3. detach に失敗しても必ずプロセスを殺す。キーバインドを変更している環境では
+;;    Ctrl+o d が効かない
+
+(defun zellij-send--resize-session (session &optional callback)
+  "SESSION を `zellij-send-session-size' の大きさに広げる。
+その大きさの pty を持つクライアントで一瞬 attach し、detach して返る。
+終わったら CALLBACK を呼ぶ（拡幅した場合 t、無効なら nil）。
+
+`zellij-send-session-size' が nil なら何もせず CALLBACK を呼ぶ。"
+  (let ((size zellij-send-session-size))
+    (if (not size)
+        (when callback (funcall callback nil))
+      (let* ((cols (car size))
+             (rows (cdr size))
+             (process-environment
+              (append (list (format "COLUMNS=%d" cols)
+                            (format "LINES=%d" rows))
+                      (zellij-send--process-environment)))
+             (finished nil)
+             detach-timer watchdog proc)
+        (setq proc
+              (make-process
+               :name (format "zellij-resize-%s" session)
+               :buffer nil
+               :noquery t
+               :connection-type 'pty
+               :command (list zellij-send-executable "attach" session)
+               ;; 出力は捨てるが、フィルタは必ず置く（上記 2）
+               :filter #'ignore
+               :sentinel
+               (lambda (p _event)
+                 (when (and (not finished)
+                            (memq (process-status p) '(exit signal)))
+                   (setq finished t)
+                   (when (timerp detach-timer) (cancel-timer detach-timer))
+                   (when (timerp watchdog) (cancel-timer watchdog))
+                   (when callback (funcall callback t))))))
+        ;; pty の大きさを与える。zellij は接続時にこれを読み、
+        ;; 後から変わっても SIGWINCH で拾う
+        (ignore-errors (set-process-window-size proc rows cols))
+        ;; 繋がってサイズが伝わるのを待ってから detach（Ctrl+o d）
+        (setq detach-timer
+              (run-at-time zellij-send-resize-detach-delay nil
+                           (lambda ()
+                             (when (process-live-p proc)
+                               (ignore-errors
+                                 (process-send-string proc "\C-od"))))))
+        ;; detach が効かなくても必ず落とす（上記 3）
+        (setq watchdog
+              (run-at-time zellij-send-resize-timeout nil
+                           (lambda ()
+                             (when (process-live-p proc)
+                               (delete-process proc)))))))))
+
+(defun zellij-send-resize-session ()
+  "このバッファのセッションを `zellij-send-session-size' の大きさに広げる。
+背景セッション（`[New]' で作ったもの）は 50 桁しかないため、既に作って
+しまったセッションを後から広げるのに使う。
+ターミナルから作ったセッションはそのターミナルの幅なので通常は不要。"
+  (interactive)
+  (zellij-send--assert-session)
+  (unless zellij-send-session-size
+    (user-error "zellij-send-session-size が nil です"))
+  (let ((session zellij-send--session))
+    (message "セッション [%s] を %d 桁 × %d 行に広げています..."
+             session (car zellij-send-session-size) (cdr zellij-send-session-size))
+    (zellij-send--resize-session
+     session
+     (lambda (resized)
+       (message "セッション [%s] の拡幅%s" session
+                (if resized "が完了しました" "は行いませんでした"))))))
+
 (defun zellij-send--create-new-session (known-sessions)
   "新規 detached zellij セッションを作成し claude ペインを起動する。
 attach クライアント（eat）は使わない: `zellij attach --create-background' で
@@ -1145,11 +1257,16 @@ KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
        (lambda (exit)
          (if (not (zerop exit))
              (message "zellij セッション作成に失敗しました (exit: %d)" exit)
-           ;; セッション初期化を待ってから claude ペインを起動
-           (run-with-timer
-            0.5 nil
-            (lambda ()
-              (zellij-send--run-in-session-async
+           ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
+           ;; あとから作るペインは拡幅後のサイズを継承する
+           (zellij-send--resize-session
+            session
+            (lambda (_resized)
+             ;; セッション初期化を待ってから claude ペインを起動
+             (run-with-timer
+              0.5 nil
+              (lambda ()
+                (zellij-send--run-in-session-async
                session dir zellij-send-default-command
                (lambda (pane-id)
                  (if (not pane-id)
@@ -1167,7 +1284,7 @@ KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
                           "--pane-id" "terminal_0")
                     #'ignore)
                    (message "セッション [%s] を作成しました (%s)"
-                            session pane-id))))))))))))
+                            session pane-id))))))))))))))
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。
