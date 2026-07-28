@@ -30,6 +30,7 @@ pane-id 不明の既存セッションに送る場合のみ使う（ターミナ
 |---|---|
 | `zellij-send.el` | パッケージ本体（全機能） |
 | `zellij-send-dashboard.el` | セッション一覧ダッシュボード（本体に依存。逆依存は禁止） |
+| `test/zellij-send-test.el` | ert テスト（zellij を必要としない純粋な関数のみ） |
 | `CLAUDE.md` | 本ドキュメント |
 | `README.md` | ユーザー向けドキュメント |
 | `LICENSE` | GPL v3 |
@@ -88,11 +89,34 @@ zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
 
 ### ANSI エスケープの除去
 
-`list-sessions` / `dump-screen` の出力にはカラーコードが含まれる。`zellij-send--strip-ansi` で 2 段階除去:
+`zellij-send--strip-ansi` で 4 段階除去する。**順序が意味を持つ**ので入れ替えないこと:
+
 ```elisp
-(replace-regexp-in-string "\033\\[[0-9;?]*[A-Za-z]" "" result)  ; CSI
-(replace-regexp-in-string "\033." "" result)                      ; その他 ESC
+"\033\\][^\a\033]*\\(?:\a\\|\033\\\\\\)"  ; 1. OSC（BEL または ST 終端）
+"\033[PX^_][^\033]*\033\\\\"              ; 2. DCS / SOS / PM / APC（ST 終端）
+"\033\\[[0-9;?]*[A-Za-z]"                 ; 3. CSI
+"\033[ -/]+[0-~]"                         ; 4a. nF エスケープ（ESC ( B など）
+"\033."                                   ; 4b. その他の 2 文字（ESC =、ESC 7）
 ```
+
+最後の 2 文字規則を先に走らせてはいけない。`ESC ]` の 2 文字だけを食って
+`0;title` とベル文字が本文に残る。同じ理由で `ESC ( B` は 3 バイトなので
+nF 規則が必要（2 文字規則だけだと `B` が残る。テストで検出した実バグ）。
+
+**どこで効いているか**（2026-07-28 実測）:
+
+- `list-sessions` の出力には**今もカラーコードが入る**（`ESC[32;1m...`）。ここは現役
+- `dump-screen` は `--ansi` を付けない限り**平文を返す**（実測: ESC を含む行が 0）。
+  こちらは保険として通しているだけ
+
+### テスト
+
+```sh
+emacs -Q -batch -L . -l ert -l test/zellij-send-test.el -f ert-run-tests-batch-and-exit
+```
+
+zellij を必要としない純粋な関数だけを対象にする（`--strip-ansi` / `--parse-sessions`）。
+zellij を叩く経路は使い捨てセッションを作って手で確認する。
 
 ## コーディング規約
 

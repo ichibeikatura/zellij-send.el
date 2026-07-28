@@ -255,14 +255,36 @@ pane-id 不明なら nil（focused pane への送信になる）。"
 ;;; スクリーンダンプ
 
 (defun zellij-send--strip-ansi (str)
-  "STR から ANSI エスケープシーケンスを除去して返す。"
+  "STR から ANSI エスケープシーケンスを除去して返す。
+
+`list-sessions' の出力には今もカラーコードが入るので、この関数は現役。
+`dump-screen' の方は zellij が既に平文で返すため保険（`--ansi' 指定時のみ
+エスケープが残る）。
+
+除去の順序が重要。文字列終端まで舐める OSC / DCS を先に処理しないと、
+最後の 2 文字エスケープ規則が `ESC ]' の 2 文字だけを食って
+`0;title' とベル文字が本文に残る。同じ理由で、3 バイト以上になる
+nF エスケープ（`ESC ( B' など）も 2 文字規則より前に処理する。"
   (let ((result str))
+    ;; OSC: ESC ] ... BEL または ESC ] ... ST(ESC \)
+    (setq result (replace-regexp-in-string
+                  "\033\\][^\a\033]*\\(?:\a\\|\033\\\\\\)" "" result))
+    ;; DCS / SOS / PM / APC: ESC P|X|^|_ ... ST(ESC \)
+    (setq result (replace-regexp-in-string
+                  "\033[PX^_][^\033]*\033\\\\" "" result))
+    ;; CSI: ESC [ ... 英字
     (setq result (replace-regexp-in-string "\033\\[[0-9;?]*[A-Za-z]" "" result))
+    ;; nF エスケープ: ESC + 中間バイト(0x20-0x2F)+ + 最終バイト(0x30-0x7E)。
+    ;; ESC ( B は 3 バイトなので、下の 2 文字規則だけだと `B' が本文に残る
+    (setq result (replace-regexp-in-string "\033[ -/]+[0-~]" "" result))
+    ;; その他の 2 文字エスケープ（ESC =、ESC 7、ESC M など）
     (setq result (replace-regexp-in-string "\033." "" result))
     result))
 
 (defun zellij-send--process-dump (raw)
-  "dump-screen の生テキスト RAW を整形して返す。"
+  "dump-screen の生テキスト RAW を整形して返す。
+zellij は `--ansi' を付けない限りエスケープを除去済みの平文を返すので、
+`zellij-send--strip-ansi' はここでは保険として通しているだけ。"
   (replace-regexp-in-string "^─+" ""
    (zellij-send--strip-ansi
     (replace-regexp-in-string "\r" "" raw))))
