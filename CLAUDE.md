@@ -24,17 +24,6 @@ pane-id 不明の既存セッションに送る場合のみ使う（ターミナ
 - zellij **0.44 以上**（dump-screen の STDOUT 出力・`--pane-id` 指定に依存）
 - パッケージ管理: elpaca 想定
 
-## ファイル構造
-
-| ファイル | 役割 |
-|---|---|
-| `zellij-send.el` | パッケージ本体（全機能） |
-| `zellij-send-dashboard.el` | セッション一覧ダッシュボード（本体に依存。逆依存は禁止） |
-| `test/zellij-send-test.el` | ert テスト（zellij を必要としない純粋な関数のみ） |
-| `CLAUDE.md` | 本ドキュメント |
-| `README.md` | ユーザー向けドキュメント |
-| `LICENSE` | GPL v3 |
-
 ## アーキテクチャ
 
 ```
