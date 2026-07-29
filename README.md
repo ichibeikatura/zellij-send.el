@@ -8,24 +8,11 @@ An Emacs package for sending text to [zellij](https://zellij.dev/) session panes
 
 Use the `*ai-session-name*` buffer as a shared blackboard: write your message, send it, read the AI's response, and repeat.
 
-![Screen](Screen.png)
+![The blackboard buffer](Screen01.png)
 
-```
-┌──────────────────────────────────────┐
-│  Emacs: *ai-mysession*               │
-│  ──────────────────────────────────  │
-│  Explain the intent of this code     │
-│                                      │
-│  C-c C-c → send → buffer cleared    │
-│  C-c C-a → menu                     │
-└──────────────────────────────────────┘
-         │ zellij action paste
-         ▼
-┌──────────────────────────────────────┐
-│  zellij: mysession                   │
-│  Claude Code is replying...          │
-└──────────────────────────────────────┘
-```
+You type in the buffer and press `C-c C-c`; the text goes to the pane with
+`zellij action paste`, and the pane's screen comes back into the same buffer.
+The header line carries the session name and the keys you need.
 
 ## Why this tool?
 
@@ -172,6 +159,8 @@ By default the minibuffer opens on its own the moment a question appears (`zelli
 
 ### Slash commands (`C-c C-s`)
 
+![Picking a slash command](Screen03.png)
+
 Every Claude Code slash command. This replaces the old `/compact` and `/clear` menu
 entries — `M-x zellij-send-compact` and `M-x zellij-send-cc-clear` still exist, and the
 dashboard keeps its one-key `c` for `/compact`. The list is read
@@ -200,13 +189,7 @@ Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij
 
 `M-x zellij-send-dashboard` (or `C-c C-a` → `d`) lists every open session in one table, sorted so the ones needing your attention come first.
 
-```
-   状態        セッション      経過   無変化  状況
- ❓ 選択待ち   proj-a          12s    3s     ❯ 1. Yes
- ☝ 完了       proj-b          1m04   1m04   Done — 3 files changed
- ✍ 作業中     proj-c          8s     0s     ✳ Frobnicating… (12s · esc to interrupt)
- · 待機       proj-d          5m21   5m21   ❯
-```
+![The dashboard under the blackboard](Screen02.png)
 
 | Column   | Meaning                                                            |
 |----------|--------------------------------------------------------------------|
@@ -276,13 +259,8 @@ The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zell
 
 The dashboard can show the same session/weekly limits that `/usage` prints inside Claude Code:
 
-```
-── 使用状況 ─ 12s前の記録 ─────────────
-Current session:███████▌               30% used Resets 6:40pm (Asia/Tokyo)
-Current week   :███████▎               29% used Resets Jul 29 at 9pm (Asia/Tokyo)
-```
-
-It sits under the table, one line per limit, so it costs three lines of height.
+It sits under the table (see the screenshot above), one line per limit, so it costs
+three lines of height.
 
 The bar is drawn as spaces with a background colour rather than block glyphs (`█`), because in some fonts (M PLUS, for one) the block glyph is taller than the line box and the bar breaks up. Set `zellij-send-dashboard-usage-bar-style` to `block` or `ascii` if you prefer.
 
