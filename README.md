@@ -102,6 +102,7 @@ Inside the `*ai-session-name*` buffer:
 | `C-c C-k` | Interrupt what the AI is doing (sends Esc) |
 | `C-c C-q` | Answer the on-screen question (AskUserQuestion) |
 | `C-c C-t` | Toggle key passthrough mode (keys go to the pane) |
+| `C-c C-s` | Pick and send a slash command (`C-u` re-reads the list) |
 | `M-p` / `M-n` | Recall a previously sent message    |
 
 ### Menu (`C-c C-a`)
@@ -130,8 +131,7 @@ Inside the `*ai-session-name*` buffer:
 | Key | Action                                                    |
 |-----|-----------------------------------------------------------|
 | `i` | Interrupt what the AI is doing (sends Esc)                                     |
-| `c` | Compress context (`/compact`)                                                  |
-| `C` | Reset context (`/clear`)                                                       |
+| `/` | Pick a slash command from the minibuffer and send it (`/compact`, `/clear`, …) |
 | `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
 | `q` | Delete session: remove the zellij session and close buffer (asks confirmation) |
 
@@ -169,6 +169,22 @@ The blackboard buffer already mirrors the pane, so zellij-send reads the questio
 - **Review screen** — you get a `y/n` prompt before anything is submitted; answering `n` cancels.
 
 By default the minibuffer opens on its own the moment a question appears (`zellij-send-askq-auto`). Set it to `nil` if you would rather trigger it yourself with `C-c C-q` (or `C-c C-a` → `u`). `C-g` backs out at any point and leaves the question untouched in the pane.
+
+### Slash commands (`C-c C-s`)
+
+Every Claude Code slash command. This replaces the old `/compact` and `/clear` menu
+entries — `M-x zellij-send-compact` and `M-x zellij-send-cc-clear` still exist, and the
+dashboard keeps its one-key `c` for `/compact`. The list is read
+from the pane's own completion menu — type `/` in the minibuffer, keep typing to narrow
+it down, `RET` to pick. Commands that take an argument (`/effort`, `/model`, `/add-dir`)
+ask for it right after: a fixed set of choices becomes completion candidates, anything
+else is free text. Commands that take none are sent as they are.
+
+Reading the list takes a few seconds (102 commands here), so it is cached per session;
+`C-u C-c C-s` reads it again after you add a skill or a project command. The list is
+gathered by typing into the pane, so nothing happens while the pane's input box has
+text in it — your draft is never wiped. Commands that open a dialog (`/model`,
+`/config`) are simply sent; drive the dialog with key passthrough mode below.
 
 ### Key passthrough mode (`C-c C-t`)
 

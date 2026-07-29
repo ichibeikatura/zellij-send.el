@@ -282,6 +282,89 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     (should-not (equal (zellij-send--askq-signature a)
                        (zellij-send--askq-signature b)))))
 
+;;; スラッシュコマンド（補完メニューの読み取り）
+
+;; 画面は `zellij-send--process-dump' を通した後の形にしてある。
+;; 罫線の行頭の ─ は削られて " ↯ ─" のような残骸になり、行末の空白は消える
+;; （2026-07-29 に zellij 0.44.3 + Claude Code v2.1.220 で実測した画面が元）。
+
+(defconst zellij-send-test--slash-menu "\
+  ⏺ 準備できました。
+  /doctor                       Health-check the user's Claude Code setup and fix issues: diagnose installation health
+                                MCP servers, and plugins versus their context cost and disable dead weight
+  /ndl                          国立国会図書館(NDL)のデジタルコレクション・NDLサーチを使う作業。
+                                「デジタルコレクション」「このメモの本のURL」 (user)
+ ↯ ─
+❯ /
+
+  ⏵⏵ auto mode on (shift+tab to cycle)
+")
+
+(defconst zellij-send-test--slash-menu-filtered "\
+  /cd                           Move this session to a new working directory
+  /copy                         Copy Claude's last response to clipboard
+  /clear                        Start a new session with empty context
+  /color                        Set the prompt bar color for this session
+  /chrome                       Open Claude in Chrome settings
+ ↯ ─
+❯ /c
+")
+
+(defconst zellij-send-test--slash-idle "\
+⏺ 終わりました。
+ ↯ ─
+❯ Try \"fix lint errors\"
+
+  ⏵⏵ auto mode on (shift+tab to cycle)
+")
+
+(ert-deftest zellij-send-test-slash-menu-entries ()
+  "説明が折り返しても、続き行を選択肢として拾わない。"
+  (let ((entries (zellij-send--slash-menu-entries zellij-send-test--slash-menu)))
+    (should (equal (mapcar #'car entries) '("/doctor" "/ndl")))
+    (should (string-prefix-p "Health-check" (cdr (car entries))))))
+
+(ert-deftest zellij-send-test-slash-menu-entries-order ()
+  "メニューは画面と同じ上から下の順で返す。"
+  (should (equal (mapcar #'car (zellij-send--slash-menu-entries
+                                zellij-send-test--slash-menu-filtered))
+                 '("/cd" "/copy" "/clear" "/color" "/chrome"))))
+
+(ert-deftest zellij-send-test-slash-menu-entries-none ()
+  "メニューが出ていない画面からは何も拾わない。
+本文に紛れた似た行を候補にしてしまわないこと。"
+  (should-not (zellij-send--slash-menu-entries zellij-send-test--slash-idle)))
+
+(ert-deftest zellij-send-test-slash-input-text ()
+  "入力欄は一番下の ❯ 行。プレースホルダも中身として読む。"
+  (should (equal (zellij-send--slash-input-text zellij-send-test--slash-menu) "/"))
+  (should (equal (zellij-send--slash-input-text zellij-send-test--slash-idle)
+                 "Try \"fix lint errors\"")))
+
+(ert-deftest zellij-send-test-slash-idle-p ()
+  "入力欄が空（またはプレースホルダ）のときだけ操作してよい。
+書きかけのテキストを Ctrl+U で消してしまわないための判定。"
+  (should (zellij-send--slash-idle-p zellij-send-test--slash-idle))
+  (should-not (zellij-send--slash-idle-p zellij-send-test--slash-menu))
+  ;; 選択肢プロンプトが出ている間は矢印キーがそちらに効くので触らない
+  (should-not (zellij-send--slash-idle-p
+               (concat zellij-send-test--askq-single "\n ↯ ─\n❯\n"))))
+
+(ert-deftest zellij-send-test-slash-arg-hint ()
+  "`/name ' まで打つと引数ヒントが出る。出ないコマンドは引数なし。"
+  (should (equal (zellij-send--slash-arg-hint
+                  " ↯ ─\n❯ /effort  [low|medium|high|xhigh|max|ultracode|auto]\n"
+                  "/effort")
+                 "low|medium|high|xhigh|max|ultracode|auto"))
+  (should (equal (zellij-send--slash-arg-hint " ↯ ─\n❯ /model  [model]\n" "/model")
+                 "model"))
+  ;; 山括弧の形もある。角括弧だけを見ると「引数なし」と誤判定する
+  (should (equal (zellij-send--slash-arg-hint " ↯ ─\n❯ /add-dir  <path>\n" "/add-dir")
+                 "path"))
+  (should-not (zellij-send--slash-arg-hint " ↯ ─\n❯ /agents\n" "/agents"))
+  ;; 別のコマンドのヒントを読み違えない（画面がまだ前の状態のとき）
+  (should-not (zellij-send--slash-arg-hint " ↯ ─\n❯ /effort  [low|high]\n" "/model")))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
