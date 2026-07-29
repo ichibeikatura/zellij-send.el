@@ -100,6 +100,8 @@ Inside the `*ai-session-name*` buffer:
 | `C-c C-c` | Send text (buffer is cleared)           |
 | `C-c C-a` | Open menu                               |
 | `C-c C-k` | Interrupt what the AI is doing (sends Esc) |
+| `C-c C-q` | Answer the on-screen question (AskUserQuestion) |
+| `C-c C-t` | Toggle key passthrough mode (keys go to the pane) |
 | `M-p` / `M-n` | Recall a previously sent message    |
 
 ### Menu (`C-c C-a`)
@@ -120,6 +122,8 @@ Inside the `*ai-session-name*` buffer:
 | `e` | Open reply buffer (write a reply while reading the response) |
 | `n` | Send a number (prompts for input)                            |
 | `h` | Pick from the send history                                   |
+| `u` | Answer the on-screen question (AskUserQuestion)               |
+| `k` | Key passthrough mode (arrows / RET / SPC go to the pane)      |
 
 **Claude Code commands**
 
@@ -152,6 +156,23 @@ After sending, the original window layout is restored automatically.
 ### Numbered prompts
 
 When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted. Send your choice with `C-c C-a` → `n`.
+
+### Answering questions (AskUserQuestion)
+
+When Claude Code asks you a question — the boxed UI with `❯ 1.` options, tabs across the top and a final *Review your answers* screen — you no longer have to switch to the terminal to work the arrow keys.
+
+The blackboard buffer already mirrors the pane, so zellij-send reads the question straight out of it, asks you in the minibuffer, and presses the matching keys in the pane for you:
+
+- **Single choice** — pick with completion; one keypress answers it and Claude Code moves to the next question by itself.
+- **Multiple choice** (`multiSelect`) — pick several with `completing-read-multiple` (comma separated). zellij-send toggles exactly the options whose state needs to change, then walks to the confirmation screen.
+- **Other / free text** — choose `Type something`, type your answer in the minibuffer, and it is pasted into the field.
+- **Review screen** — you get a `y/n` prompt before anything is submitted; answering `n` cancels.
+
+By default the minibuffer opens on its own the moment a question appears (`zellij-send-askq-auto`). Set it to `nil` if you would rather trigger it yourself with `C-c C-q` (or `C-c C-a` → `u`). `C-g` backs out at any point and leaves the question untouched in the pane.
+
+### Key passthrough mode (`C-c C-t`)
+
+Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij-send does not parse. Toggle key passthrough mode and the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary characters are sent to the pane instead of editing the buffer. The header line and the mode line (` →zellij`) tell you it is on; `C-c C-t` or `C-g` turns it off. The buffer is read-only while it is on, so a stray keystroke cannot stall the automatic screen updates.
 
 ## Dashboard (`zellij-send-dashboard.el`)
 
@@ -304,6 +325,14 @@ The Claude output log location (relative to the session's working directory; kee
 ```elisp
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
+
+Question answering (see [Answering questions](#answering-questions-askuserquestion)):
+
+| Option                            | Meaning                                                                    |
+|-----------------------------------|----------------------------------------------------------------------------|
+| `zellij-send-askq-auto`           | Open the minibuffer as soon as a question appears (default `t`)            |
+| `zellij-send-askq-settle-delay`   | Seconds to wait after a keypress before reading the screen (default `0.8`) |
+| `zellij-send-askq-max-rounds`     | Give up after this many questions in one run (default 12)                  |
 
 ### Session width
 

@@ -162,112 +162,86 @@ zellij を叩く経路は使い捨てセッションを作って手で確認す�
 
 日本語で書く。`user-error` はユーザー操作ミス、`error` はプログラムエラー。
 
-### セクション構成（zellij-send.el の順序）
+### セクション構成
+
+`zellij-send.el` は `;;;` 見出しで区切る。現在の並びは
+`grep "^;;; " zellij-send.el` で確認し、**新しい関数は既存の見出しの下に置く**
+（末尾に足さない）。
+
+## AskUserQuestion への回答（調査済み・再調査不要）
+
+2026-07-29 に Claude Code v2.1.220 + zellij 0.44.3（320 桁の背景セッション）で
+実測した画面仕様。**同じ調査を繰り返さないこと。**
 
 ```
-;;; defgroup / defcustom
-;;; defvar-local
-;;; セッション一覧の取得
-;;; バッファ管理
-;;; 送信
-;;; スクリーンダンプ
-;;; プロンプト検出・ハイライト
-;;; バッファ更新（共通処理）
-;;; 自動受信（zellij subscribe）
-;;; Claude Code コマンド
-;;; インタラクティブコマンド
-;;; 返信バッファ
-;;; Transient メニュー
-;;; メジャーモード
-;;; Stop フックハンドラ
-;;; エントリポイント
+←  ☐ 好きな色  ☒ 好きな果物  ✔ Submit  →   ← 質問タブ（☒ = 回答済み）
+
+好きな果物はどれですか（複数選択可）？      ← 質問文
+
+❯ 1. [ ] りんご                            ← ❯ = カーソル、[ ] = 複数選択
+  定番。シャキシャキした食感。              ← 説明（折り返すことがある）
+  2. [✔] みかん
+  5. [ ] Type something                    ← 自由入力
+     Submit
+────────────────────────────
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 ```
+
+- **数字キーが直接効く**。単一選択なら数字 1 つで即確定して次の質問へ自動で進み、
+  複数選択なら数字がその選択肢のトグルになる（**カーソルは動かない**）。
+  したがってカーソル移動量を数える必要が無い（折り返しで必ずずれる）。
+  折り返しに強いので、**移動量を数える実装に書き換えないこと**
+- ←/→ が質問タブの移動。Tab は前進のみでラップしない
+- 複数選択の質問からは → で「Review your answers」へ直行できる
+- **自由入力（Type something）にカーソルがある間は ←/→ が入力欄内のカーソル移動になり、
+  タブ移動にならない**。この状態から確定するには ↓（直下は必ず `Submit` 行）→ Enter。
+  ここを → で済ませようとして無限ループを踏んだ（数字キーが入力欄に打ち込まれ、
+  ラベルが `自由入力テスト4444…` に育った）
+- 本文は `paste` で入れる。単一選択ならそのまま Enter で確定、複数選択では Enter 不要
+- 最終確認は `❯ 1. Submit answers / 2. Cancel`。数字で選べる。
+  **この画面にはヒント行（`Enter to select · …`）が出ない**ので、ヒント行だけを
+  検出条件にすると確認画面で止まる（実機の通し確認で踏んだ）
+- 質問が 1 つだけの単一選択にはタブ行も確認画面も無く、選んだ時点で確定する。
+  ヒント行の文言も `Enter to select · ↑/↓ to navigate · Esc to cancel` に変わるので、
+  `Tab/Arrow` を検出条件にしてはいけない
+
+### 実装（`zellij-send-answer-question` / `C-c C-q` / メニュー `u`）
+
+`zellij-send--askq-parse` が黒板バッファの内容（subscribe で 26〜40 ms 遅れの生画面）を
+そのまま読んで質問・選択肢・チェック状態を取り出し、ミニバッファで選ばせて数字キーを送る。
+`zellij` を追加で呼ばない（画面は既に手元にある）。
+
+- **自動起動は `run-at-time 0` 経由**（`zellij-send--askq-maybe-auto` →
+  `--askq-auto-open`）。`zellij-send--update-buffer` は subscribe のプロセスフィルタから
+  呼ばれるので、そこで直接 `completing-read` を開くと C-g が効かない
+- カーソル合わせ（`--askq-focus`、自由入力のときだけ必要）は 1 つずつ動かして
+  毎回画面で確認する。移動量の一括計算は折り返しでずれる
+- 歯止めは 2 段階: 同じ署名の画面が 3 回続いたら中止、加えて
+  `zellij-send-askq-max-rounds`（既定 12）を超えたら無条件で中止。
+  画面が毎回変わりながら空回りする不具合が実在したので、署名だけでは足りない
+
+## キー透過モード（`zellij-send-keys-mode` / `C-c C-t`）
+
+黒板バッファは既にペインの生画面を映しているので、足りないのは打つ側だけ、という発想。
+有効な間、↑↓←→ / RET / TAB / ESC / DEL / 印字文字を
+`zellij-send--send-keys` でペインへ流す（印字文字は `self-insert-command` の remap で拾い、
+UTF-8 バイト列に分解して送る）。画面を解釈しないので、AskUserQuestion に限らず
+権限ダイアログや `/model` の選択にも効く。
+
+有効中はバッファを read-only にする。誤って編集すると `buffer-modified-p` が真になり、
+自動更新が止まって画面が固まったように見えるため。
 
 ## ダッシュボード（zellij-send-dashboard.el）
 
-`M-x zellij-send-dashboard` / メニュー `d`。全セッションを tabulated-list で一覧し、
-要対応順（選択待ち → 完了 → 作業中 → 待機）に並べる。
+`M-x zellij-send-dashboard` / メニュー `d`。全セッションを tabulated-list で一覧する。
+**依存は一方向**: dashboard → 本体。本体から `zellij-send-dashboard` を require せず、
+メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
+遅延ロードする。本体からダッシュボードのシンボルを参照しないこと。
 
-- **依存は一方向**: dashboard → 本体。本体は `zellij-send-dashboard` を require せず、
-  メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
-  遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
-- **状態は本体に持たせない**: 各セッションバッファの内容から毎回算出する
-  （本体の状態フラグはモードライン撤去時に削除済み）
-  - 作業中: スピナー行（`zellij-send-dashboard-working-regexp`、既定
-    `esc to interrupt`）がある **か**、画面が
-    `zellij-send-dashboard-active-window` 秒以内に変化した。
-    **Claude Code は本文を流している間スピナー行を出さない**（実機で確認）ため、
-    スピナーだけで判定すると回答中を「待機」と誤表示する。画面が動いていること
-    自体を処理中の証拠として使う
-  - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
-    ウィンドウに表示された時点で解除
-  - 選択待ち: `zellij-send--detect-prompt`
-- **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（バッファ内容と
-  `zellij-send--last-change-time`）を読むだけ
-  （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）
-
-### キーと更新（Emacs の作法）
-
-- `g` が更新。`revert-buffer-function` も `zellij-send-dashboard-refresh` に
-  差し替える。既定の `tabulated-list-revert` は `tabulated-list-entries` を
-  作り直さないため、`M-x revert-buffer` やマウス経由だと使用状況の再取得を
-  含む更新が走らない
-- `?` が `zellij-send-dashboard-help`（`*zellij-dashboard-help*` を
-  `with-help-window` で出す。`q` で閉じる）。**キー一覧は
-  `zellij-send-dashboard--keys` に書き、ヘルプはそこから描く**。
-  ヘルプは各行を実際のキーマップと突き合わせ、食い違えば「← 未割り当て」と
-  印を付けるので、キーを足したらこの表にも足すこと
-- **`header-line-format` にキーヒントを置いても無駄**。直後の
-  `tabulated-list-init-header` が列見出しで上書きする（かつてこれで
-  ヒントが表示されていなかった）
-### Remote Control の QR（ダッシュボードの `r`）
-
-`/remote-control` をペインに送り、Claude Code が描く QR を dump-screen で取り込む
-（QR 生成器は不要）。実機検証で判明した注意点:
-
-- **メニューはカーソル移動量を「行数」で数えてはいけない**。項目の説明文が折り返して
-  複数行になるため、行数で数えると `Show QR code` を通り越して
-  `Disconnect this session` を選んでしまう（実際に踏んだ）。項目ラベルの並びで数え、
-  さらに **Enter の前に `❯` が `Show QR code` にあることを確認する**
-  （`zellij-send-dashboard--qr-confirm-and-enter`）
-- **接続に 10 秒以上かかる**。固定待ちではなくタイムアウト付きポーリングにする
-  （`zellij-send-dashboard--wait-for-screen`）
-- 取り込み後は必ず `Esc`（バイト 27）を送ってペインをプロンプトに戻す。
-  メニューに留まると以後の送信が壊れる
-- **QR は文字ではなく SVG 画像で描く**。半角ブロック（█=上下 / ▀=上 / ▄=下）から
-  モジュール行列を復元し、白地に黒＋静穏帯 4 モジュールで描画する
-  （`zellij-send-dashboard--qr-matrix` / `--qr-image`）。文字のまま貼るとフォントの
-  字形に左右されて読み取れない（M PLUS 等でブロック字形が行高を超える）。
-  SVG が使えない環境向けにテキスト版も残し、その場合は `char-width-table` を
-  バッファローカルに差し替えてブロック文字を 1 桁にする（既定は 2 桁＝
-  East Asian Ambiguous で、そのままだと横に伸びる）
-
-**フォント依存の描画は避ける**: 使用状況バーも同じ理由でブロック文字をやめ、
-空白に `:background` を付けて描くのが既定（`zellij-send-dashboard-usage-bar-style`
-の `face`）。グリフに頼らないのでフォントの字形に影響されない。
-- ローカルセッションを claude.ai に露出させる操作なので `yes-or-no-p` で必ず確認し、
-  待機中のセッションに限る（作業中のペインに文字を打ち込まない）
-
-### 使用状況（/usage 相当）
-
-`/usage` は Claude Code の TUI 内でしか実行できず、`claude` CLI にも `usage`
-サブコマンドは無い（transcript にもレート制限は残らない）。取得できる公式ルートは
-**statusLine コマンドの stdin JSON だけ**:
-
-```
-rate_limits.five_hour.{used_percentage, resets_at}   ; resets_at は Unix 秒
-rate_limits.seven_day.{used_percentage, resets_at}
-context_window.used_percentage
-```
-
-そのため statusLine フック側で JSON をキャッシュに保存し（README 参照）、
-`zellij-send-dashboard--read-usage` はそれを読むだけにする。**ダッシュボードから
-claude を起動したりペインに `/usage` を打ち込んだりしないこと**（セッションに割り込む）。
-キャッシュは動作中の Claude Code セッションだけが更新するため、表示には
-mtime からの経過時間を必ず添える（古い数字を最新に見せない）。
-
-am/pm と月名は `format-time-string` の `%p` / `%b` がロケール依存（日本語環境では
-「午後」「 7」になる）ため自前で組み立てる。
+状態判定・キー・Remote Control の QR・使用状況（`/usage` 相当）の実測仕様は
+`.claude/skills/zellij-send-dashboard/SKILL.md` に分けてある（触るときに読み込まれる）。
 
 ## バッファの設計思想
 

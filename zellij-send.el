@@ -14,6 +14,8 @@
 ;;; Code:
 
 (require 'transient)
+(require 'seq)
+(require 'cl-lib)
 
 (declare-function markdown-mode "markdown-mode")
 (declare-function zellij-send-mode "zellij-send")
@@ -609,7 +611,8 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   (set-buffer-modified-p nil)
   (if (zellij-send--detect-prompt)
       (zellij-send--highlight-prompt)
-    (zellij-send--clear-prompt-highlight)))
+    (zellij-send--clear-prompt-highlight))
+  (zellij-send--askq-maybe-auto))
 
 ;;; 自動受信（zellij subscribe）
 
@@ -1033,6 +1036,560 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
                   (format " Reply → [%s]  |  C-c C-c: 送信して閉じる" session)))
     (pop-to-buffer reply-buf)))
 
+;;; AskUserQuestion（選択肢プロンプト）への回答
+
+;; Claude Code の AskUserQuestion は次の形で描かれる（2026-07-29 実測、
+;; Claude Code v2.1.220 / zellij 0.44.3。詳細は CLAUDE.md 参照）:
+;;
+;;   ←  ☐ 好きな色  ☒ 好きな果物  ✔ Submit  →   ← 質問タブ（☒ = 回答済み）
+;;
+;;   好きな果物はどれですか（複数選択可）？      ← 質問文
+;;
+;;   ❯ 1. [ ] りんご                            ← ❯ = カーソル、[ ] = 複数選択
+;;     定番。シャキシャキした食感。              ← 説明（折り返すこともある）
+;;     2. [✔] みかん
+;;     5. [ ] Type something                    ← 自由入力
+;;        Submit
+;;   ────────────────────────────
+;;     6. Chat about this
+;;
+;;   Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+;;
+;; **数字キーが直接効く**のがこの実装の土台。単一選択なら数字 1 つで即回答して
+;; 次の質問へ自動で進み、複数選択なら数字がその選択肢のトグルになる（カーソルは
+;; 動かない）。したがって QR メニューのようにカーソル移動量を数える必要が無い。
+;; 移動量を数えずに済むこと自体が堅牢性で、説明文の折り返しに影響されない。
+;;
+;; そのほか実測で確定した挙動:
+;; - ←/→ が質問タブの移動。Tab は前進のみでラップしない
+;; - 複数選択の質問からは → で「Review your answers」へ直行できる
+;; - 自由入力（Type something）はカーソルを合わせると入力欄になる。
+;;   本文は `paste' で入れる。単一選択ならそのまま Enter で確定、
+;;   複数選択なら Enter は不要（→ で Review へ）
+;; - 最終確認は `❯ 1. Submit answers / 2. Cancel`。ここも数字で選べる。
+;;   **この画面にはヒント行が出ない**ので、ヒント行だけを検出条件にすると
+;;   確認画面で止まってしまう（実機の通し確認で踏んだ）
+;; - 質問が 1 つだけの単一選択にはタブ行も Review も無く、選んだ時点で確定する
+
+(defcustom zellij-send-askq-hint-regexp "^Enter to select · .*Esc to cancel"
+  "AskUserQuestion の画面を見分けるための正規表現。
+Claude Code が選択肢プロンプトの最下部に必ず出すヒント行に一致する。"
+  :type 'regexp
+  :group 'zellij-send)
+
+(defcustom zellij-send-askq-other-regexp "\\`Type something\\.?\\'"
+  "自由入力（その他）の選択肢ラベルに一致する正規表現。"
+  :type 'regexp
+  :group 'zellij-send)
+
+(defcustom zellij-send-askq-auto t
+  "non-nil なら質問を検出した時点で回答 UI を自動で開く。
+nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(defcustom zellij-send-askq-settle-delay 0.8
+  "キーを送ってから画面を読み直すまでの待ち時間（秒）。"
+  :type 'number
+  :group 'zellij-send)
+
+(defconst zellij-send--askq-option-regexp
+  "^\\(❯\\)?[[:space:]]*\\([0-9]+\\)\\.[[:space:]]+\\(\\[\\(.\\)\\][[:space:]]+\\)?\\(.*?\\)[[:space:]]*$"
+  "選択肢の行に一致する正規表現。
+1=カーソル 2=番号 3=チェックボックス全体 4=チェック文字 5=ラベル。")
+
+(defvar-local zellij-send--askq-active nil
+  "直前の画面更新で質問が出ていたか。自動起動の立ち上がり検出に使う。")
+
+(defvar-local zellij-send--askq-answering nil
+  "回答フローの実行中なら non-nil。多重起動と自動起動の割り込みを防ぐ。")
+
+(defvar-local zellij-send--askq-signature nil
+  "直前に回答した画面の署名。同じ画面を繰り返し処理していないかの検査用。")
+
+(defvar-local zellij-send--askq-repeat 0
+  "同じ署名の画面を続けて処理した回数。無限ループの歯止め。")
+
+(defvar-local zellij-send--askq-rounds 0
+  "1 回の回答フローで質問を処理した回数。")
+
+(defcustom zellij-send-askq-max-rounds 12
+  "1 回の回答フローで処理する質問の上限。
+これを超えたら打ち切る。署名（画面の内容）が毎回変わる形で空回りしても
+必ず止まるようにするための最後の歯止め——実際、自由入力の欄に数字キーを
+打ち込み続けて画面が毎回変わる不具合を踏んだことがある。"
+  :type 'integer
+  :group 'zellij-send)
+
+(defconst zellij-send--askq-review-regexp "Ready to submit your answers"
+  "最終確認画面を見分けるための正規表現。
+確認画面にはヒント行（`zellij-send-askq-hint-regexp'）が出ない（実測）ため、
+この行が確認画面を見つける唯一の目印になる。")
+
+(defun zellij-send--askq-last-index (lines regexp)
+  "LINES で REGEXP に一致する最後の行番号を返す。無ければ nil。"
+  (let ((i (1- (length lines))) found)
+    (while (and (>= i 0) (not found))
+      (when (string-match-p regexp (nth i lines))
+        (setq found i))
+      (setq i (1- i)))
+    found))
+
+(defun zellij-send--askq-region-start (lines hint)
+  "LINES の HINT 行より上で、質問ブロックの開始行番号を返す。
+タブ行（☐ / ☒）か「Review your answers」を目印にする。
+見つからなければ HINT の 25 行上で打ち切る（画面全体を舐めないため）。"
+  (let ((i (1- hint))
+        (floor-idx (max 0 (- hint 25)))
+        (found nil))
+    (while (and (>= i floor-idx) (not found))
+      (when (string-match-p "[☐☒]\\|^Review your answers" (nth i lines))
+        (setq found i))
+      (setq i (1- i)))
+    (or found floor-idx)))
+
+(defun zellij-send--askq-separator-p (line)
+  "LINE が罫線だけの行なら non-nil。"
+  (string-match-p "\\`[[:space:]─━-]*\\'" line))
+
+(defun zellij-send--askq-parse (screen)
+  "SCREEN に AskUserQuestion があれば plist を返す。無ければ nil。
+
+返す plist:
+  :kind      `question' か `review'
+  :question  質問文
+  :multi     複数選択なら t
+  :options   選択肢のリスト。各要素は
+             (:num N :label \"...\" :desc \"...\" :checked BOOL
+              :box BOOL :focused BOOL)"
+  (when (and screen
+             (or (string-match-p zellij-send-askq-hint-regexp screen)
+                 (string-match-p zellij-send--askq-review-regexp screen)))
+    (let* ((lines (split-string screen "\n"))
+           (n (length lines))
+           (hint (zellij-send--askq-last-index lines zellij-send-askq-hint-regexp))
+           (rev (zellij-send--askq-last-index lines zellij-send--askq-review-regexp))
+           ;; 確認画面にはヒント行が無い（実測）。どちらの目印が下にあるかで
+           ;; 読む範囲を決める。ヒントだけを頼りにすると確認画面を取り逃がす
+           (use-review (and rev (or (null hint) (> rev hint))))
+           (region (if use-review
+                       (seq-subseq lines rev (min n (+ rev 10)))
+                     (seq-subseq lines
+                                 (zellij-send--askq-region-start lines hint)
+                                 hint)))
+           (options nil)
+           (question nil)
+           (review nil))
+      (dolist (line region)
+        (cond
+         ((string-match-p "Ready to submit your answers" line)
+          (setq review t))
+         ((string-match zellij-send--askq-option-regexp line)
+          (push (list :num (string-to-number (match-string 2 line))
+                      :label (match-string 5 line)
+                      :desc nil
+                      :checked (equal (match-string 4 line) "✔")
+                      :box (and (match-string 3 line) t)
+                      :focused (and (match-string 1 line) t))
+                options))
+         ((or (string-empty-p (string-trim line))
+              (zellij-send--askq-separator-p line)
+              (string-match-p "[☐☒]" line))
+          nil)
+         (options
+          ;; 選択肢の直後の非空行は説明。折り返した 2 行目以降は捨てる
+          (unless (plist-get (car options) :desc)
+            (setcar options (plist-put (car options) :desc (string-trim line)))))
+         (t
+          ;; 選択肢より前の非空行が質問文。複数行なら最後の 1 行を採る
+          (setq question (string-trim line)))))
+      (when options
+        (setq options (nreverse options))
+        (list :kind (if review 'review 'question)
+              :question (or question "質問")
+              :multi (and (seq-some (lambda (o) (plist-get o :box)) options) t)
+              :options options)))))
+
+(defun zellij-send--askq-signature (q)
+  "Q の同一性を判定するための文字列を返す。"
+  (format "%s|%s" (plist-get q :question)
+          (mapconcat (lambda (o) (format "%s%s%s"
+                                         (plist-get o :num)
+                                         (plist-get o :label)
+                                         (if (plist-get o :checked) "*" "")))
+                     (plist-get q :options) ",")))
+
+(defun zellij-send--askq-other-p (opt)
+  "OPT が自由入力（その他）の選択肢なら non-nil。"
+  (string-match-p zellij-send-askq-other-regexp (plist-get opt :label)))
+
+(defun zellij-send--askq-digits (opt)
+  "OPT の番号を打つためのバイト列を返す。"
+  (string-to-list (number-to-string (plist-get opt :num))))
+
+(defun zellij-send--askq-candidate (opt)
+  "OPT を completing-read の候補文字列にする。"
+  (format "%d. %s%s%s"
+          (plist-get opt :num)
+          (if (plist-get opt :box)
+              (if (plist-get opt :checked) "[✔] " "[ ] ")
+            "")
+          (plist-get opt :label)
+          (if (plist-get opt :desc)
+              (format "  — %s" (plist-get opt :desc))
+            "")))
+
+(defun zellij-send--askq-read (prompt opts &optional multi)
+  "OPTS から選ばせて、選ばれた選択肢のリストを返す。
+MULTI が non-nil なら複数選べる。"
+  (let* ((cands (mapcar #'zellij-send--askq-candidate opts))
+         (table (cl-mapcar #'cons cands opts)))
+    (if multi
+        (delq nil (mapcar (lambda (c) (cdr (assoc c table)))
+                          (completing-read-multiple prompt cands nil t)))
+      (let ((c (completing-read prompt cands nil t)))
+        (list (cdr (assoc c table)))))))
+
+;;;; 送信の下請け
+
+(defun zellij-send--askq-send-keys (buf seq &optional callback)
+  "BUF のペインへ SEQ（バイト列のリスト）を順に送る。
+BUF を常にカレントにしてから送るので、pane-id を取り違えない。
+最後に CALLBACK へ成功 t / 失敗 nil を渡す。"
+  (if (null seq)
+      (when callback (funcall callback t))
+    (if (not (buffer-live-p buf))
+        (when callback (funcall callback nil))
+      (with-current-buffer buf
+        (zellij-send--send-keys
+         zellij-send--session (car seq)
+         (lambda (exit)
+           (if (zerop exit)
+               (zellij-send--askq-send-keys buf (cdr seq) callback)
+             (message "キー送信に失敗しました (exit: %d)" exit)
+             (when callback (funcall callback nil)))))))))
+
+(defun zellij-send--askq-focus (buf num callback &optional tries)
+  "BUF の画面でカーソル (❯) を選択肢 NUM に合わせてから CALLBACK を呼ぶ。
+移動量を一度に計算せず 1 つずつ動かして毎回確認する。説明文の折り返しで
+行数がずれても壊れないようにするため（QR メニューで踏んだ失敗と同じ轍）。
+CALLBACK には成功 t / 失敗 nil を渡す。"
+  (let ((tries (or tries 0)))
+    (if (or (not (buffer-live-p buf)) (> tries 12))
+        (progn (message "カーソルを選択肢 %d に合わせられませんでした" num)
+               (funcall callback nil))
+      (let* ((q (with-current-buffer buf (zellij-send--askq-parse (buffer-string))))
+             (opts (plist-get q :options))
+             (cur (seq-position opts nil (lambda (o _) (plist-get o :focused))))
+             (target (seq-position opts nil (lambda (o _) (= (plist-get o :num) num)))))
+        (cond
+         ((or (null cur) (null target))
+          (message "画面から選択肢を読み取れませんでした")
+          (funcall callback nil))
+         ((= cur target) (funcall callback t))
+         (t
+          (zellij-send--askq-send-keys
+           buf (list (if (< cur target) '(27 91 66) '(27 91 65)))
+           (lambda (ok)
+             (if (not ok)
+                 (funcall callback nil)
+               (run-at-time zellij-send-askq-settle-delay nil
+                            #'zellij-send--askq-focus
+                            buf num callback (1+ tries)))))))))))
+
+;;;; 回答フロー
+
+(defun zellij-send--askq-finish (buf)
+  "回答フローを終了して BUF のフラグを戻す。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq zellij-send--askq-answering nil))))
+
+(defun zellij-send--askq-after (buf ok)
+  "キー送信の後始末。OK なら画面が落ち着いてから次の質問を探す。"
+  (if (not ok)
+      (zellij-send--askq-finish buf)
+    (run-at-time zellij-send-askq-settle-delay nil
+                 #'zellij-send--askq-continue buf)))
+
+(defun zellij-send--askq-continue (buf)
+  "BUF の画面を読み直し、まだ質問があれば続けて答える。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq zellij-send--askq-answering nil)
+      (let ((q (zellij-send--askq-parse (buffer-string))))
+        (cond
+         ((null q)
+          (setq zellij-send--askq-signature nil
+                zellij-send--askq-repeat 0)
+          (message "回答しました → [%s]" zellij-send--session))
+         ;; 同じ画面が続くのは、キーが効いていないか読み違えている合図。
+         ;; 黙って聞き続けるとミニバッファが無限に開くので必ず打ち切る
+         ((and (equal zellij-send--askq-signature (zellij-send--askq-signature q))
+               (>= zellij-send--askq-repeat 2))
+          (setq zellij-send--askq-signature nil
+                zellij-send--askq-repeat 0)
+          (message "画面が変わりません。ペインを直接確認してください"))
+         (t
+          (if (equal zellij-send--askq-signature (zellij-send--askq-signature q))
+              (setq zellij-send--askq-repeat (1+ zellij-send--askq-repeat))
+            (setq zellij-send--askq-signature (zellij-send--askq-signature q)
+                  zellij-send--askq-repeat 0))
+          (zellij-send--askq-answer buf q)))))))
+
+(defun zellij-send--askq-answer (buf q)
+  "BUF の質問 Q に対する回答を尋ねてキーを送る。"
+  (with-current-buffer buf
+    (setq zellij-send--askq-answering t
+          zellij-send--askq-rounds (1+ zellij-send--askq-rounds)))
+  (if (> (buffer-local-value 'zellij-send--askq-rounds buf)
+         zellij-send-askq-max-rounds)
+      (progn
+        (zellij-send--askq-finish buf)
+        (message "質問を %d 回処理しても終わらないので打ち切りました。ペインを直接確認してください"
+                 zellij-send-askq-max-rounds))
+    (zellij-send--askq-dispatch buf q)))
+
+(defun zellij-send--askq-dispatch (buf q)
+  "Q の種類に応じた回答フローを呼ぶ。C-g は途中で抜けても後始末する。"
+  (condition-case _err
+      (pcase (plist-get q :kind)
+        ('review (zellij-send--askq-answer-review buf q))
+        (_ (if (plist-get q :multi)
+               (zellij-send--askq-answer-multi buf q)
+             (zellij-send--askq-answer-single buf q))))
+    (quit (zellij-send--askq-finish buf)
+          (message "回答を中止しました（ペインは質問のままです。Esc は C-c C-k）"))))
+
+(defun zellij-send--askq-answer-single (buf q)
+  "単一選択の質問 Q に答える。数字キー 1 つで確定し、次の質問へ自動で進む。"
+  (let* ((opts (plist-get q :options))
+         (opt (car (zellij-send--askq-read
+                    (format "%s: " (plist-get q :question)) opts))))
+    (if (zellij-send--askq-other-p opt)
+        ;; 自由入力はカーソルを合わせると入力欄になる。paste して Enter で確定
+        (let ((text (read-string "自由入力: ")))
+          (zellij-send--askq-focus
+           buf (plist-get opt :num)
+           (lambda (ok)
+             (if (not ok)
+                 (zellij-send--askq-finish buf)
+               (with-current-buffer buf
+                 (zellij-send--send
+                  zellij-send--session text
+                  (lambda (ok2) (zellij-send--askq-after buf ok2))))))))
+      (zellij-send--askq-send-keys
+       buf (list (zellij-send--askq-digits opt))
+       (lambda (ok) (zellij-send--askq-after buf ok))))))
+
+(defun zellij-send--askq-answer-multi (buf q)
+  "複数選択の質問 Q に答える。数字キーでトグルし、→ で確認画面へ進む。"
+  (let* ((opts (plist-get q :options))
+         (chosen (zellij-send--askq-read
+                  (format "%s（複数可・カンマ区切り）: " (plist-get q :question))
+                  opts t))
+         (plain (seq-find (lambda (o) (not (plist-get o :box))) chosen)))
+    (if plain
+        ;; チェックボックスでない選択肢（Chat about this など）は単独で決定
+        (zellij-send--askq-send-keys
+         buf (list (zellij-send--askq-digits plain))
+         (lambda (ok) (zellij-send--askq-after buf ok)))
+      (let* ((other (seq-find #'zellij-send--askq-other-p chosen))
+             (text (when other (read-string "自由入力: ")))
+             (toggles (seq-filter
+                       (lambda (o)
+                         (and (plist-get o :box)
+                              (not (eq (and (memq o chosen) t)
+                                       (plist-get o :checked)))))
+                       opts))
+             (keys (mapcar #'zellij-send--askq-digits toggles)))
+        (zellij-send--askq-send-keys
+         buf keys
+         (lambda (ok)
+           (cond
+            ((not ok) (zellij-send--askq-finish buf))
+            (other
+             (run-at-time zellij-send-askq-settle-delay nil
+                          #'zellij-send--askq-fill-other buf other text))
+            (t (zellij-send--askq-submit-multi buf nil)))))))))
+
+(defun zellij-send--askq-fill-other (buf other text)
+  "複数選択の自由入力 OTHER に TEXT を書き込んでから確認画面へ進む。
+数字キーでトグルしただけではラベルは Type something のままなので、
+カーソルを合わせてから `paste' する（Enter は不要）。"
+  (zellij-send--askq-focus
+   buf (plist-get other :num)
+   (lambda (ok)
+     (if (not ok)
+         (zellij-send--askq-finish buf)
+       (with-current-buffer buf
+         (zellij-send--zellij-async
+          (append (list "--session" zellij-send--session "action" "paste")
+                  (zellij-send--pane-args)
+                  (list "--" text))
+          (lambda (exit)
+            (if (zerop exit)
+                (zellij-send--askq-submit-multi buf t)
+              (message "自由入力の送信に失敗しました (exit: %d)" exit)
+              (zellij-send--askq-finish buf)))))))))
+
+(defun zellij-send--askq-submit-multi (buf from-text)
+  "複数選択の質問を確定して次のタブ（確認画面）へ進む。
+
+FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
+**その状態では ←/→ はタブ移動ではなく入力欄内のカーソル移動になる**
+（実機で踏んだ。→ を送っても質問画面から出られず、次の周回で数字キーが
+入力欄に打ち込まれて `自由入力テスト4444…' になった）。
+入力欄の直下は必ず `Submit' 行なので、↓ と Enter で確定する。
+それ以外は → でタブを進める（どちらも実測で確認済み）。"
+  (run-at-time
+   zellij-send-askq-settle-delay nil
+   (lambda ()
+     (zellij-send--askq-send-keys
+      buf (if from-text '((27 91 66) (13)) '((27 91 67)))
+      (lambda (ok) (zellij-send--askq-after buf ok))))))
+
+(defun zellij-send--askq-answer-review (buf q)
+  "確認画面 Q で送信するかを尋ねる。"
+  (let* ((opts (plist-get q :options))
+         (submit (seq-find (lambda (o) (string-match-p "Submit" (plist-get o :label))) opts))
+         (cancel (seq-find (lambda (o) (string-match-p "Cancel" (plist-get o :label))) opts))
+         (opt (if (y-or-n-p "この内容で回答を送信しますか? ") submit cancel)))
+    (if (null opt)
+        (progn (message "確認画面の選択肢を読み取れませんでした")
+               (zellij-send--askq-finish buf))
+      (zellij-send--askq-send-keys
+       buf (list (zellij-send--askq-digits opt))
+       (lambda (ok) (zellij-send--askq-after buf ok))))))
+
+;;;; 入口と自動起動
+
+(defun zellij-send-answer-question ()
+  "画面に出ている AskUserQuestion に Emacs 側で答える。
+選択肢をミニバッファで選ぶと、対応する数字キーをペインへ送る。
+質問が複数ある場合は最後の確認画面まで続けて尋ねる。"
+  (interactive)
+  (zellij-send--assert-session)
+  (let ((q (zellij-send--askq-parse (buffer-string))))
+    (unless q
+      (user-error "画面に選択肢プロンプトが見つかりません"))
+    (setq zellij-send--askq-signature (zellij-send--askq-signature q)
+          zellij-send--askq-repeat 0
+          zellij-send--askq-rounds 0)
+    (zellij-send--askq-answer (current-buffer) q)))
+
+(defun zellij-send--askq-auto-open (buf)
+  "BUF に質問が出たので回答 UI を開く。
+`zellij-send--update-buffer' から `run-at-time' 経由で呼ばれる。
+プロセスフィルタの中でミニバッファを開かないための遠回りなので、
+ここを直接呼び出しに変えないこと。"
+  (when (and (buffer-live-p buf)
+             (not (minibufferp))
+             (not (active-minibuffer-window)))
+    (with-current-buffer buf
+      (unless zellij-send--askq-answering
+        (when (zellij-send--askq-parse (buffer-string))
+          (display-buffer buf)
+          (call-interactively #'zellij-send-answer-question))))))
+
+(defun zellij-send--askq-maybe-auto ()
+  "画面更新のたびに呼ばれ、質問が出た瞬間だけ回答 UI を開く。"
+  (let ((now (and (zellij-send--askq-parse (buffer-string)) t)))
+    (when (and now
+               (not zellij-send--askq-active)
+               zellij-send-askq-auto
+               (not zellij-send--askq-answering))
+      (run-at-time 0 nil #'zellij-send--askq-auto-open (current-buffer)))
+    (setq zellij-send--askq-active now)))
+
+;;; キー透過モード
+
+;; `*ai-SESSION*' バッファには subscribe 経由でペインの生画面が 26〜40 ms 遅れで
+;; 映っている。つまり「見る」側は既に完成しているので、足りないのは「打つ」側だけ。
+;; このモードを有効にすると、矢印・Enter・Space・Tab・Esc・印字文字を
+;; バッファ編集ではなく `zellij-send--send-keys' でペインへ流す。
+;; AskUserQuestion の選択肢・権限ダイアログ・`/model' の選択など、
+;; **画面の中身を解釈せずに**あらゆる TUI を Emacs から操作できる。
+;;
+;; 有効中はバッファを read-only にする。誤ってバッファを編集すると
+;; `buffer-modified-p' が真になり、自動更新が抑止されて画面が固まったように
+;; 見えるため（`zellij-send--update-buffer' の抑止条件）。
+
+(defvar-local zellij-send--keys-saved-read-only nil
+  "キー透過モードに入る前の `buffer-read-only' の値。")
+
+(defun zellij-send--keys-send (bytes)
+  "BYTES をペインへ送る。キー透過モード用の薄いラッパ。"
+  (zellij-send--assert-session)
+  (zellij-send--send-keys
+   zellij-send--session bytes
+   (lambda (exit)
+     (unless (zerop exit)
+       (message "キー送信に失敗しました (exit: %d)" exit)))))
+
+(defun zellij-send--keys-define (map key bytes)
+  "MAP の KEY に BYTES を送るコマンドを割り当てる。"
+  (define-key map (kbd key)
+              (lambda ()
+                (interactive)
+                (zellij-send--keys-send bytes))))
+
+(defun zellij-send-keys-self-insert ()
+  "押した印字文字をそのままペインへ送る。
+`self-insert-command' の差し替え先。マルチバイト文字も送れるよう
+UTF-8 のバイト列に分解してから送る。"
+  (interactive)
+  (let ((bytes (string-to-list (encode-coding-string (string last-command-event)
+                                                     'utf-8))))
+    (zellij-send--keys-send bytes)))
+
+(defvar zellij-send-keys-mode-map
+  (let ((map (make-sparse-keymap)))
+    ;; 矢印は CSI シーケンス（↑ = ESC [ A）。1 回の write にまとめて送る
+    (zellij-send--keys-define map "<up>"    '(27 91 65))
+    (zellij-send--keys-define map "<down>"  '(27 91 66))
+    (zellij-send--keys-define map "<right>" '(27 91 67))
+    (zellij-send--keys-define map "<left>"  '(27 91 68))
+    (zellij-send--keys-define map "C-p"     '(27 91 65))
+    (zellij-send--keys-define map "C-n"     '(27 91 66))
+    (zellij-send--keys-define map "C-f"     '(27 91 67))
+    (zellij-send--keys-define map "C-b"     '(27 91 68))
+    (zellij-send--keys-define map "RET"     '(13))
+    (zellij-send--keys-define map "TAB"     '(9))
+    (zellij-send--keys-define map "<backtab>" '(27 91 90))
+    (zellij-send--keys-define map "<escape>" '(27))
+    (zellij-send--keys-define map "DEL"     '(127))
+    (define-key map [remap self-insert-command] #'zellij-send-keys-self-insert)
+    (define-key map (kbd "C-c C-t") #'zellij-send-keys-mode)
+    (define-key map (kbd "C-g")     #'zellij-send-keys-quit)
+    map)
+  "キー透過モードのキーマップ。ここにあるキーはペインへ送られる。")
+
+(define-minor-mode zellij-send-keys-mode
+  "有効な間、キー入力を zellij ペインへそのまま送る。
+選択肢の上下移動 (↑↓)、決定 (RET)、複数選択のトグル (SPC)、
+中止 (ESC)、数字キーなどが Emacs バッファではなくペインに届く。
+`C-c C-t' か `C-g' で抜ける。"
+  :lighter " →zellij"
+  :keymap zellij-send-keys-mode-map
+  (if zellij-send-keys-mode
+      (progn
+        ;; `define-minor-mode' はこの本体より先に変数を t にするため、
+        ;; セッションが無いときは自分で false に戻してから抜ける
+        (unless zellij-send--session
+          (setq zellij-send-keys-mode nil)
+          (user-error "zellij-send バッファ外では使えません"))
+        (setq zellij-send--keys-saved-read-only buffer-read-only)
+        (setq buffer-read-only t)
+        (message "キー透過モード ON（↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t で解除）"))
+    (setq buffer-read-only zellij-send--keys-saved-read-only)
+    (message "キー透過モード OFF")))
+
+(defun zellij-send-keys-quit ()
+  "キー透過モードを抜ける。"
+  (interactive)
+  (zellij-send-keys-mode -1))
+
 ;;; Transient メニュー
 
 (defun zellij-send-open-dashboard ()
@@ -1055,7 +1612,9 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
     ("n" "答える（数字を送る）"         zellij-send-reply-number)
-    ("h" "送信履歴から選ぶ"             zellij-send-history-select)]
+    ("h" "送信履歴から選ぶ"             zellij-send-history-select)
+    ("u" "質問に答える (AskUserQuestion)" zellij-send-answer-question)
+    ("k" "キー透過モード（↑↓ RET SPC）" zellij-send-keys-mode)]
    ["命令"
     ("i" "中断 (Esc)"              zellij-send-interrupt)
     ("c" "圧縮 (/compact)"         zellij-send-compact)
@@ -1070,6 +1629,8 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
     (define-key map (kbd "C-c C-c") #'zellij-send-send)
     (define-key map (kbd "C-c C-a") #'zellij-send-menu)
     (define-key map (kbd "C-c C-k") #'zellij-send-interrupt)
+    (define-key map (kbd "C-c C-t") #'zellij-send-keys-mode)
+    (define-key map (kbd "C-c C-q") #'zellij-send-answer-question)
     (define-key map (kbd "M-p")     #'zellij-send-history-prev)
     (define-key map (kbd "M-n")     #'zellij-send-history-next)
     map)
@@ -1078,8 +1639,11 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
 (defun zellij-send--mode-setup ()
   "zellij-send-mode の共通セットアップ処理。"
   (setq-local header-line-format
-              '(:eval (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー"
-                              (or zellij-send--session "?"))))
+              '(:eval (if zellij-send-keys-mode
+                          (format " Session: %s  |  ⌨ キー透過中: ↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t 解除"
+                                  (or zellij-send--session "?"))
+                        (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー  C-c C-t: キー透過"
+                                (or zellij-send--session "?")))))
   ;; subscribe はセッション名が入ってから張る（`--get-or-create-buffer' が呼ぶ）。
   ;; ここで確実に止めておかないと、常駐プロセスがバッファより長生きする
   ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の

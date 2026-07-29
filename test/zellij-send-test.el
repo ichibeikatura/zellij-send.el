@@ -120,6 +120,168 @@
                "PANE_ID  TYPE  TITLE\nterminal_1  terminal  claude\n" "terminal_1")
               :unknown)))
 
+;;; zellij-send--askq-parse
+;;
+;; 素材は 2026-07-29 に実機（Claude Code v2.1.220 / zellij 0.44.3、320 桁の
+;; 背景セッション）で dump-screen した画面をそのまま貼ったもの。
+;; 想像で書いた画面ではないので、ここが通れば実機でも読める。
+
+(defconst zellij-send-test--askq-single "\
+⏺ I'll ask both questions at once. No files will be touched.
+────────────────────────────────────────
+←  ☐ 好きな色  ☐ 好きな果物  ✔ Submit  →
+
+好きな色はどれですか？
+
+❯ 1. 青
+     空や海の色。落ち着いた印象。
+  2. 赤
+     情熱的で目を引く色。
+  3. 緑
+     自然や植物の色。目に優しい。
+  4. Type something.
+────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+")
+
+(defconst zellij-send-test--askq-multi "\
+────────────────────────────────────────
+←  ☒ 好きな色  ☒ 好きな果物  ✔ Submit  →
+
+好きな果物はどれですか（複数選択可）？
+
+❯ 1. [ ] りんご
+  定番。シャキシャキした食感。
+  2. [✔] みかん
+  冬の定番。手で剥ける手軽さ。
+  3. [ ] ぶどう
+  甘みが強く種なしも人気。
+  4. [✔] いちご
+  春の味覚。デザートの主役。
+  5. [ ] Type something
+     Submit
+────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Vim · Esc to cancel
+")
+
+;; 確認画面にはヒント行が無い（実機の通し確認で判明。ヒント行だけを条件に
+;; すると、ここで回答フローが止まる）。素材は実機のダンプそのまま。
+(defconst zellij-send-test--askq-review "\
+────────────────────────────────────────
+←  ☒ 色  ☒ 果物  ✔ Submit  →
+
+Review your answers
+
+ ● テスト用のダミー質問です。好きな色はどれですか？
+   → 青
+ ● テスト用のダミー質問です。好きな果物を選んでください（複数可）。
+   → りんご, ぶどう
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+
+
+")
+
+(defconst zellij-send-test--askq-lone "\
+❯ もう一度テストです。
+────────────────────────────────────────
+ ☐ 朝か夜か
+
+朝と夜、どちらが好きですか？
+
+❯ 1. 朝
+     早起きして静かな時間に作業するのが好き。
+  2. 夜
+     夜更けに集中して作業するのが好き。
+  3. Type something.
+────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+")
+
+(ert-deftest zellij-send-test-askq-parse-none ()
+  "質問が出ていない画面では nil を返す。"
+  (should-not (zellij-send--askq-parse ""))
+  (should-not (zellij-send--askq-parse nil))
+  (should-not (zellij-send--askq-parse "❯ 1. 青\n  2. 赤\n通常のプロンプト\n")))
+
+(ert-deftest zellij-send-test-askq-parse-single ()
+  "単一選択の質問を読み取る。カーソル・説明・自由入力まで拾う。"
+  (let* ((q (zellij-send--askq-parse zellij-send-test--askq-single))
+         (opts (plist-get q :options)))
+    (should (eq (plist-get q :kind) 'question))
+    (should-not (plist-get q :multi))
+    (should (equal (plist-get q :question) "好きな色はどれですか？"))
+    (should (= (length opts) 5))
+    (should (equal (mapcar (lambda (o) (plist-get o :label)) opts)
+                   '("青" "赤" "緑" "Type something." "Chat about this")))
+    (should (equal (plist-get (nth 0 opts) :desc) "空や海の色。落ち着いた印象。"))
+    (should (plist-get (nth 0 opts) :focused))
+    (should-not (plist-get (nth 1 opts) :focused))
+    (should (zellij-send--askq-other-p (nth 3 opts)))
+    (should (equal (zellij-send--askq-digits (nth 3 opts)) '(?4)))))
+
+(ert-deftest zellij-send-test-askq-parse-multi ()
+  "複数選択はチェック状態まで読み取る。トグルの要否がこれで決まる。"
+  (let* ((q (zellij-send--askq-parse zellij-send-test--askq-multi))
+         (opts (plist-get q :options)))
+    (should (plist-get q :multi))
+    (should (equal (plist-get q :question) "好きな果物はどれですか（複数選択可）？"))
+    (should (equal (mapcar (lambda (o) (plist-get o :label)) opts)
+                   '("りんご" "みかん" "ぶどう" "いちご" "Type something"
+                     "Chat about this")))
+    (should (equal (mapcar (lambda (o) (plist-get o :checked)) opts)
+                   '(nil t nil t nil nil)))
+    ;; 罫線の下にある Chat about this にはチェックボックスが無い
+    (should (plist-get (nth 4 opts) :box))
+    (should-not (plist-get (nth 5 opts) :box))
+    (should (zellij-send--askq-other-p (nth 4 opts)))))
+
+(ert-deftest zellij-send-test-askq-parse-review ()
+  "確認画面はヒント行が無くても review として読み取れる。"
+  (let* ((q (zellij-send--askq-parse zellij-send-test--askq-review))
+         (opts (plist-get q :options)))
+    (should (eq (plist-get q :kind) 'review))
+    (should-not (string-match-p zellij-send-askq-hint-regexp
+                                zellij-send-test--askq-review))
+    (should (equal (mapcar (lambda (o) (plist-get o :label)) opts)
+                   '("Submit answers" "Cancel")))))
+
+(ert-deftest zellij-send-test-askq-parse-question-wins ()
+  "確認画面より下に新しい質問が出ていれば、そちらを読む。
+古い確認画面の残骸に引きずられて、答え済みの画面をもう一度出さないこと。"
+  (let ((q (zellij-send--askq-parse
+            (concat zellij-send-test--askq-review "\n"
+                    zellij-send-test--askq-single))))
+    (should (eq (plist-get q :kind) 'question))
+    (should (equal (plist-get q :question) "好きな色はどれですか？"))))
+
+(ert-deftest zellij-send-test-askq-parse-lone ()
+  "質問が 1 つだけならタブ行が簡略化され、ヒント行も別文言になる。
+ヒントを `Tab/Arrow' で見分けると、この画面を取りこぼす。"
+  (let ((q (zellij-send--askq-parse zellij-send-test--askq-lone)))
+    (should q)
+    (should (equal (plist-get q :question) "朝と夜、どちらが好きですか？"))
+    (should (= (length (plist-get q :options)) 4))))
+
+(ert-deftest zellij-send-test-askq-signature ()
+  "署名は画面が変わったかどうかを見分ける（無限ループの歯止め）。"
+  (let ((a (zellij-send--askq-parse zellij-send-test--askq-single))
+        (b (zellij-send--askq-parse zellij-send-test--askq-multi)))
+    (should (equal (zellij-send--askq-signature a)
+                   (zellij-send--askq-signature
+                    (zellij-send--askq-parse zellij-send-test--askq-single))))
+    (should-not (equal (zellij-send--askq-signature a)
+                       (zellij-send--askq-signature b)))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
