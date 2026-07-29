@@ -279,6 +279,27 @@ zellij-send-slash-command
 - 歯止めは `zellij-send-slash-max-rounds`（既定 200）と「3 回続けて進まなければ
   終了」の 2 段階。待ち時間は `zellij-send-slash-settle-delay`（既定 0.25 秒）
 
+### 先読みとキャッシュ
+
+- キャッシュは**作業ディレクトリごと**（`zellij-send--slash-cache-table`、
+  キーは `file-truename` した `default-directory`）。一覧の中身を決めるのは
+  プロジェクトのコマンドとスキルなので、同じディレクトリなら結果は同じ。
+  2 つ目以降のセッションは取得ゼロで開ける（実測で確認）
+- `zellij-send--subscribe-start`（＝ペインに繋がった時点）から
+  `zellij-send--slash-prefetch-maybe` を呼び、`zellij-send-slash-prefetch-delay`
+  （既定 5 秒）後に黙って取りに行く。取れなければ
+  `zellij-send-slash-prefetch-retries`（既定 4）回まで置き直して再試行する
+  ——起動直後は信頼確認などで入力欄が空でないことがあるため
+- 先読み中は `zellij-send--slash-prefetching`（バッファローカル）が真になり、
+  `zellij-send--slash-msg` が進捗・失敗メッセージを黙らせる。**動的束縛は使えない**
+  （コールバックが sentinel / タイマーをまたぐので `let` が生き残らない）
+- **取得中に入力欄が `/` 以外になったら即中止する**（`--slash-scroll` の先頭の分岐）。
+  ユーザーがターミナル側で打ち始めた合図なので、Ctrl+U で片付けずに手を引く。
+  このとき**部分的な一覧は返さない**（nil を返す）。中途半端な一覧を
+  キャッシュに焼き付けると、以後ずっと欠けたまま出てしまう。
+  実測: 中止後の入力欄は `/ユーザーの入力` になる（先頭の `/` は残るが、
+  相手の入力は消えない）
+
 ### 決めたこと（2026-07-29）
 
 - **一覧は画面から拾う**。静的リストを持たない。Claude Code の更新・スキルの
@@ -287,6 +308,9 @@ zellij-send-slash-command
   自由入力、ヒント無しなら聞かずに送る
 - **対話画面が出るコマンドは送るところまで**。自動でキー透過モードに入ったりしない
   （`/clear` のように対話画面が出ないコマンドでも read-only になってしまうため）
+- **一覧は先読みする**（黒板バッファがペインに繋がった数秒後に一度）。
+  初回の 8 秒を体感させないため。ペインにキーを送るのが嫌なら
+  `zellij-send-slash-prefetch` を nil にする
 - **`/compact`（`c`）と `/clear`（`C`）のメニュー項目は外した**。`/` で全部送れる
   ようになったので二重に置かない。`zellij-send-compact` /
   `zellij-send-cc-clear` は M-x 用に残す（前者はダッシュボードの `c` が呼ぶ。

@@ -739,7 +739,9 @@ pane-id が取れれば attach クライアント無しでも送信できる。
       ;; 終了コードが当てにならないので、初回イベントの有無で成否を見る
       (setq zellij-send--subscribe-timer
             (run-at-time zellij-send-subscribe-initial-timeout nil
-                         #'zellij-send--subscribe-check-initial buf)))))
+                         #'zellij-send--subscribe-check-initial buf))
+      ;; ペインに繋がったので、スラッシュコマンド一覧を先読みしておく
+      (zellij-send--slash-prefetch-maybe))))
 
 (defun zellij-send--subscribe-ensure ()
   "必要なら subscribe を（再）開始する。
@@ -853,9 +855,54 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   :type 'integer
   :group 'zellij-send)
 
-(defvar-local zellij-send--slash-cache nil
-  "このセッションのスラッシュコマンド一覧。((\"/name\" . \"説明\") ...)。
-取得に往復が要るのでバッファに覚えておく。")
+(defcustom zellij-send-slash-prefetch t
+  "non-nil なら、黒板バッファを開いた少し後に一覧を黙って取りに行く。
+初回の `zellij-send-slash-command' を待ち時間ゼロにするための先読み。
+取得はペインに実際にキーを送るので、ペインを一切触られたくない環境では
+nil にする。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(defcustom zellij-send-slash-prefetch-delay 5
+  "先読みを始めるまでの待ち時間（秒）。
+起動直後の claude はまだ入力を受け付けないことがあるので少し置く。"
+  :type 'number
+  :group 'zellij-send)
+
+(defcustom zellij-send-slash-prefetch-retries 4
+  "先読みをやり直す回数の上限。
+信頼確認（trust プロンプト）などで入力欄が空でないときは取得を諦めるので、
+少し置いて何度か試す。使い切ったら諦めて、初回の
+`zellij-send-slash-command' で取ることになる。"
+  :type 'integer
+  :group 'zellij-send)
+
+(defvar zellij-send--slash-cache-table (make-hash-table :test 'equal)
+  "作業ディレクトリごとのスラッシュコマンド一覧。
+キーは絶対パス、値は ((\"/name\" . \"説明\") ...)。
+**セッションではなくディレクトリで持つ**——一覧の中身を決めるのは
+プロジェクトのコマンドとスキルなので、同じディレクトリのセッションなら
+同じ結果になる。2 つ目以降のセッションは取得ゼロで開ける。")
+
+(defvar-local zellij-send--slash-prefetching nil
+  "先読みの取得中なら non-nil。多重起動を防ぎ、進捗メッセージを黙らせる。")
+
+(defun zellij-send--slash-cache-key ()
+  "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
+  (directory-file-name (file-truename default-directory)))
+
+(defun zellij-send--slash-cached ()
+  "カレントバッファのディレクトリの一覧を返す。無ければ nil。"
+  (gethash (zellij-send--slash-cache-key) zellij-send--slash-cache-table))
+
+(defun zellij-send--slash-cache-put (alist)
+  "ALIST をカレントバッファのディレクトリの一覧として覚える。"
+  (puthash (zellij-send--slash-cache-key) alist zellij-send--slash-cache-table))
+
+(defun zellij-send--slash-msg (format-string &rest args)
+  "先読み中でなければ `message' する。先読みは黙って走らせる。"
+  (unless zellij-send--slash-prefetching
+    (apply #'message format-string args)))
 
 (defconst zellij-send--slash-input-regexp "\\`❯[[:space:]]?\\(.*\\)\\'"
   "入力欄の行に一致する正規表現。1=入力欄の中身。")
@@ -982,7 +1029,8 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
    buf #'zellij-send--slash-idle-p
    (lambda (screen)
      (if (null screen)
-         (progn (message "ペインの入力欄が空ではありません。先にペインを片付けてください")
+         (progn (zellij-send--slash-msg
+                 "ペインの入力欄が空ではありません。先にペインを片付けてください")
                 (funcall callback nil))
        (with-current-buffer buf
          (zellij-send--slash-write-chars
@@ -1030,6 +1078,12 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                 (dry (if (or stalled (null new)) (1+ dry) 0))
                 (visible (length entries)))
            (cond
+            ;; 入力欄が `/' から変わった＝ユーザーがターミナル側で打ち始めた。
+            ;; ここで Ctrl+U を送ると相手の入力を消すので、片付けずに手を引く
+            ((and screen (not (equal (zellij-send--slash-input-text screen) "/")))
+             (zellij-send--slash-msg "ペインが操作されたので取得を中止しました")
+             ;; 中途半端な一覧を覚えさせない。失敗として返す
+             (funcall callback nil))
             ;; メニューが消えた（＝読み違えた）か、3 回続けて進まない
             ((or (null entries) (>= dry 3))
              (zellij-send--slash-tail buf found names callback))
@@ -1040,7 +1094,8 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                           buf found (1+ rounds) dry pinned names callback))
             (t
              (when (zerop (mod rounds 8))
-               (message "スラッシュコマンドを取得中… %d 件" (length found)))
+               (zellij-send--slash-msg "スラッシュコマンドを取得中… %d 件"
+                                       (length found)))
              (zellij-send--send-keys
               zellij-send--session
               ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
@@ -1177,7 +1232,7 @@ HINT が `a|b|c' の形なら候補として選ばせ、それ以外は自由入
   "BUF のキャッシュから選ばせ、引数を尋ねてから送る。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((name (string-trim (zellij-send--slash-read zellij-send--slash-cache))))
+      (let ((name (string-trim (zellij-send--slash-read (zellij-send--slash-cached)))))
         (unless (string-empty-p name)
           (unless (string-prefix-p "/" name)
             (setq name (concat "/" name)))
@@ -1190,7 +1245,9 @@ HINT が `a|b|c' の形なら候補として選ばせ、それ以外は自由入
 
 (defun zellij-send-slash-command (&optional refresh)
   "Claude Code のスラッシュコマンドを選んで送る。
-コマンド一覧はペインの補完メニューから読み取り、セッションごとに覚える。
+コマンド一覧はペインの補完メニューから読み取り、作業ディレクトリごとに覚える
+（`zellij-send-slash-prefetch' が non-nil なら黒板バッファを開いた時点で
+先読みしてあるので、たいてい待ち時間は無い）。
 REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
 
 一覧の取得はペインの入力欄を実際に打って行うので、入力欄が空でないときは
@@ -1199,7 +1256,7 @@ REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
   (interactive "P")
   (zellij-send--assert-session)
   (let ((buf (current-buffer)))
-    (if (and zellij-send--slash-cache (not refresh))
+    (if (and (zellij-send--slash-cached) (not refresh))
         (zellij-send--slash-choose buf)
       (message "スラッシュコマンド一覧を取得中…（初回のみ数秒かかります）")
       (zellij-send--slash-collect
@@ -1209,9 +1266,47 @@ REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
            (with-current-buffer buf
              (if (null alist)
                  (message "コマンド一覧を取得できませんでした。ペインの状態を確認してください")
-               (setq-local zellij-send--slash-cache alist)
+               (zellij-send--slash-cache-put alist)
                (message "スラッシュコマンド %d 件" (length alist))
                (run-at-time 0 nil #'zellij-send--slash-choose buf)))))))))
+
+;;;; 先読み
+
+(defun zellij-send--slash-prefetch-maybe ()
+  "一覧をまだ持っていなければ、少し待ってから黙って取りに行く。
+`zellij-send--subscribe-start' から呼ばれる（＝ペインに繋がった時点）。
+初回の `zellij-send-slash-command' を待たせないための先読み。"
+  (when (and zellij-send-slash-prefetch
+             zellij-send--session
+             (null (zellij-send--slash-cached))
+             (not zellij-send--slash-prefetching))
+    (run-at-time zellij-send-slash-prefetch-delay nil
+                 #'zellij-send--slash-prefetch-run (current-buffer) 1)))
+
+(defun zellij-send--slash-prefetch-run (buf try)
+  "BUF の一覧を黙って取りに行く。TRY は何回目か。
+取れなければ少し置いてやり直す——起動直後の claude は信頼確認などで
+入力欄が空でないことがあり、その間は取得を諦めるため。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and zellij-send-slash-prefetch
+                 zellij-send--session
+                 zellij-send--pane-id
+                 (null (zellij-send--slash-cached))
+                 (not zellij-send--slash-prefetching)
+                 (<= try zellij-send-slash-prefetch-retries))
+        (setq zellij-send--slash-prefetching t)
+        (zellij-send--slash-collect
+         buf
+         (lambda (alist)
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (setq zellij-send--slash-prefetching nil)
+               (if alist
+                   (zellij-send--slash-cache-put alist)
+                 (run-at-time zellij-send-slash-prefetch-delay nil
+                              #'zellij-send--slash-prefetch-run
+                              buf (1+ try)))))))))))
 
 ;;; インタラクティブコマンド
 

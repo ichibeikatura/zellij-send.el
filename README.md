@@ -180,10 +180,16 @@ it down, `RET` to pick. Commands that take an argument (`/effort`, `/model`, `/a
 ask for it right after: a fixed set of choices becomes completion candidates, anything
 else is free text. Commands that take none are sent as they are.
 
-Reading the list takes a few seconds (102 commands here), so it is cached per session;
-`C-u C-c C-s` reads it again after you add a skill or a project command. The list is
-gathered by typing into the pane, so nothing happens while the pane's input box has
-text in it — your draft is never wiped. Commands that open a dialog (`/model`,
+Reading the list takes a few seconds (102 commands here), so it is **prefetched in the
+background** a few seconds after the blackboard buffer connects — by the time you press
+`C-c C-s` there is nothing to wait for. The result is **shared per working directory**,
+so the second session on the same project opens with no fetch at all. `C-u C-c C-s`
+reads it again after you add a skill or a project command, and
+`zellij-send-slash-prefetch` turns the prefetch off.
+
+The list is gathered by typing into the pane, so nothing happens while the pane's input
+box has text in it, and a fetch already under way stops the moment you start typing
+there — your draft is never wiped. Commands that open a dialog (`/model`,
 `/config`) are simply sent; drive the dialog with key passthrough mode below.
 
 ### Key passthrough mode (`C-c C-t`)
