@@ -302,6 +302,12 @@ zellij --session NAME subscribe --pane-id terminal_N --format json
 - **`viewport` は差分ではなく毎回フル**の行配列。`string-join` して既存の
   `zellij-send--update-buffer` にそのまま渡せる。**再接続時に `dump-screen` で
   取り直す必要はない**（初回配信がフルなので勝手に整合する）
+- **`viewport` の各行はペイン幅ぶんスペースで右パディングされている**
+  （`dump-screen` はされない。2026-07-29 実測）。320 桁の背景セッションでは
+  1 行あたり数百文字の空白が付き、実データで **24407 文字 → 2175 文字（91% が空白）**
+  だった。`zellij-send--process-dump` が行末空白と末尾の連続空行を落とすので、
+  **この処理を外さないこと**。ANSI 除去より後に削る（エスケープが残っていると
+  行末を判定できない）
 - **1 イベント約 8 KB**で複数回に分かれて届く。プロセスフィルタは**行単位の
   バッファリングが必須**（`zellij-send--subscribe-pending`）
 - **セッションが消えても subscribe は終了しない**。`delete-session --force` の後も

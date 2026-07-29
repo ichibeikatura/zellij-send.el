@@ -344,12 +344,22 @@ nF エスケープ（`ESC ( B' など）も 2 文字規則より前に処理す�
     result))
 
 (defun zellij-send--process-dump (raw)
-  "dump-screen の生テキスト RAW を整形して返す。
+  "dump-screen / subscribe の生テキスト RAW を整形して返す。
 zellij は `--ansi' を付けない限りエスケープを除去済みの平文を返すので、
-`zellij-send--strip-ansi' はここでは保険として通しているだけ。"
-  (replace-regexp-in-string "^─+" ""
-   (zellij-send--strip-ansi
-    (replace-regexp-in-string "\r" "" raw))))
+`zellij-send--strip-ansi' はここでは保険として通しているだけ。
+
+**行末の空白を必ず削る**。`subscribe' の `viewport' は各行をペイン幅ぶん
+スペースで右パディングして返す（`dump-screen' は返さない）ので、320 桁に
+広げた背景セッションでは 1 行あたり数百文字の空白が付いてくる（2026-07-29 実測）。
+末尾の連続空行もまとめて落とす。ANSI 除去より後に行うこと
+（エスケープが残ったままだと行末を正しく判定できない）。"
+  (let* ((text (replace-regexp-in-string
+                "^─+" ""
+                (zellij-send--strip-ansi
+                 (replace-regexp-in-string "\r" "" raw))))
+         (text (replace-regexp-in-string "[ \t]+$" "" text)))
+    ;; 画面下端の空行（パディングだけの行）を落とす
+    (replace-regexp-in-string "\n+\\'" "" text)))
 
 (defun zellij-send--dump-screen-async (session callback &optional full)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。

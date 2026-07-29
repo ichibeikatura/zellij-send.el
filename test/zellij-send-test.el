@@ -47,6 +47,32 @@
     (should (equal (zellij-send--strip-ansi plain) plain)))
   (should (equal (zellij-send--strip-ansi "") "")))
 
+;;; zellij-send--process-dump
+
+(ert-deftest zellij-send-test-process-dump-trailing-spaces ()
+  "subscribe の viewport が付ける行末パディングを削る。"
+  (should (equal (zellij-send--process-dump
+                  (concat "日本語の行" (make-string 300 ?\s) "\n"
+                          (make-string 320 ?\s) "\n"
+                          "次の行" (make-string 10 ?\s)))
+                 "日本語の行\n\n次の行")))
+
+(ert-deftest zellij-send-test-process-dump-trailing-blank-lines ()
+  "画面下端の連続空行（パディングだけの行）をまとめて落とす。"
+  (should (equal (zellij-send--process-dump
+                  (concat "本文\n" (make-string 320 ?\s) "\n   \n\n"))
+                 "本文")))
+
+(ert-deftest zellij-send-test-process-dump-keeps-inner-blanks-and-indent ()
+  "本文中の空行と行頭のインデントは保つ。"
+  (should (equal (zellij-send--process-dump "  上\t \n\n  下  ")
+                 "  上\n\n  下")))
+
+(ert-deftest zellij-send-test-process-dump-strips-ansi-then-spaces ()
+  "ANSI を除去した結果の行末空白も削る（除去順の確認）。"
+  (should (equal (zellij-send--process-dump "本文\033[0m   \n")
+                 "本文")))
+
 ;;; zellij-send--parse-sessions
 
 (ert-deftest zellij-send-test-parse-sessions ()
