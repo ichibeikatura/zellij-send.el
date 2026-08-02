@@ -28,6 +28,7 @@
 (require 'tabulated-list)
 (require 'cl-lib)
 (require 'subr-x)
+(require 'color)                        ; 使用状況バーの色を薄める
 
 (declare-function svg-create "svg")
 (declare-function svg-rectangle "svg")
@@ -182,6 +183,14 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
 
 (defcustom zellij-send-dashboard-remote-control-poll 1.5
   "Remote Control 待ちのポーリング間隔（秒）。"
+  :type 'number
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-usage-light-ratio 0.4
+  "「Current session」のバーを薄くする度合い。
+0 なら「Current week」と同じ濃さ、1 なら背景色と同じ（＝見えない）。
+5 時間制限と 1 週間制限は同じ使用率だと同じ色になり見分けが付かないため、
+5 時間側だけ背景へ寄せて薄くする。色の系統（緑・黄・赤）は変えない。"
   :type 'number
   :group 'zellij-send-dashboard)
 
@@ -437,7 +446,36 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
         ((>= pct 50) 'zellij-send-dashboard-usage-mid-face)
         (t           'zellij-send-dashboard-usage-low-face)))
 
-(defun zellij-send-dashboard--bar-block (pct width)
+(defun zellij-send-dashboard--blend (color toward ratio)
+  "COLOR を TOWARD へ RATIO（0-1）だけ寄せた色を \"#rrggbb\" で返す。
+どちらかの色名を解決できなければ COLOR をそのまま返す。"
+  (let ((a (color-values color))
+        (b (color-values toward)))
+    (if (not (and a b))
+        color
+      (apply #'color-rgb-to-hex
+             (append (cl-mapcar (lambda (x y)
+                                  (/ (+ (* (- 1.0 ratio) x) (* ratio y))
+                                     65535.0))
+                                a b)
+                     (list 2))))))
+
+(defun zellij-send-dashboard--usage-color (pct &optional light)
+  "PCT に対応するバーの色を返す。解決できなければ nil。
+LIGHT が非 nil なら背景色へ寄せて薄くする（5 時間制限と 1 週間制限を
+見分けるため）。"
+  (let ((color (face-foreground (zellij-send-dashboard--usage-face pct) nil t))
+        (ratio zellij-send-dashboard-usage-light-ratio))
+    ;; tty では `color-values' が端末のパレットに丸めるため、混ぜると色相
+    ;; ごと壊れる（実測: 橙 #c07000 も赤 #b00000 も純赤に丸められ、混色の
+    ;; 結果が同じになる）。薄めるのはグラフィカルなフレームだけにする。
+    (if (and color light (numberp ratio) (> ratio 0) (display-graphic-p))
+        (zellij-send-dashboard--blend
+         color (or (face-background 'default nil t) "white")
+         (min 1.0 ratio))
+      color)))
+
+(defun zellij-send-dashboard--bar-block (pct width &optional light)
   "PCT を表すブロック文字のバーを WIDTH 桁で返す。
 ブロック文字は East Asian Ambiguous のため環境によっては 1 文字 2 桁に
 なる。文字数ではなく桁数で割り当てないとバーが 2 倍の長さになるので、
@@ -448,37 +486,44 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
          (full (/ eighths 8))
          (rest (% eighths 8))
          (bar (concat (make-string full ?█)
-                      (aref zellij-send-dashboard--bar-partials rest))))
-    (concat (propertize bar 'face (zellij-send-dashboard--usage-face pct))
+                      (aref zellij-send-dashboard--bar-partials rest)))
+         (color (zellij-send-dashboard--usage-color pct light)))
+    (concat (propertize bar 'face (if color
+                                      `(:foreground ,color)
+                                    (zellij-send-dashboard--usage-face pct)))
             (make-string (max 0 (- width (string-width bar))) ?\s))))
 
-(defun zellij-send-dashboard--bar-face (pct width)
+(defun zellij-send-dashboard--bar-face (pct width &optional light)
   "PCT を表すバーを、空白に背景色を付けて WIDTH 桁で返す。
 グリフを使わないのでフォントに左右されない（字形が行の高さを超える
 フォントでも崩れない）。"
   (let* ((filled (round (* (/ pct 100.0) width)))
-         (color (face-foreground (zellij-send-dashboard--usage-face pct) nil t)))
+         (color (zellij-send-dashboard--usage-color pct light)))
     (concat (propertize (make-string filled ?\s)
                         'face (if color `(:background ,color) 'region))
             (propertize (make-string (- width filled) ?\s)
                         'face 'fringe))))
 
-(defun zellij-send-dashboard--bar-ascii (pct width)
+(defun zellij-send-dashboard--bar-ascii (pct width &optional light)
   "PCT を表すバーを # と - だけで WIDTH 桁で返す。"
-  (let ((filled (round (* (/ pct 100.0) width))))
+  (let ((filled (round (* (/ pct 100.0) width)))
+        (color (zellij-send-dashboard--usage-color pct light)))
     (concat (propertize (make-string filled ?#)
-                        'face (zellij-send-dashboard--usage-face pct))
+                        'face (if color
+                                  `(:foreground ,color)
+                                (zellij-send-dashboard--usage-face pct)))
             (propertize (make-string (- width filled) ?-) 'face 'shadow))))
 
-(defun zellij-send-dashboard--bar (pct)
+(defun zellij-send-dashboard--bar (pct &optional light)
   "PCT（0-100）を表す幅 `zellij-send-dashboard-usage-bar-width' 桁のバーを返す。
-描き方は `zellij-send-dashboard-usage-bar-style' で選ぶ。"
+描き方は `zellij-send-dashboard-usage-bar-style' で選ぶ。
+LIGHT が非 nil なら色を薄くする（`zellij-send-dashboard-usage-light-ratio'）。"
   (let ((width zellij-send-dashboard-usage-bar-width)
         (pct (min 100 (max 0 (or pct 0)))))
     (pcase zellij-send-dashboard-usage-bar-style
-      ('block (zellij-send-dashboard--bar-block pct width))
-      ('ascii (zellij-send-dashboard--bar-ascii pct width))
-      (_      (zellij-send-dashboard--bar-face pct width)))))
+      ('block (zellij-send-dashboard--bar-block pct width light))
+      ('ascii (zellij-send-dashboard--bar-ascii pct width light))
+      (_      (zellij-send-dashboard--bar-face pct width light)))))
 
 (defun zellij-send-dashboard--tz-label ()
   "リセット時刻に添えるタイムゾーン表記を返す。"
@@ -525,7 +570,9 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
 
 (defun zellij-send-dashboard--insert-usage-line (key limit width)
   "LIMIT（alist）を 1 行で挿入する。KEY はラベル、WIDTH はラベル幅。
-「ラベル:バー NN% used Resets ...」の 1 行にまとめる（縦を使わない）。"
+「ラベル:バー NN% used Resets ...」の 1 行にまとめる（縦を使わない）。
+5 時間制限（KEY が `five_hour'）のバーだけ色を薄くして 1 週間制限と
+見分けられるようにする。"
   (let ((pct (alist-get 'used_percentage limit))
         (resets (alist-get 'resets_at limit))
         (label (alist-get key zellij-send-dashboard--usage-labels)))
@@ -536,7 +583,7 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
                        (make-string (max 0 (- width (string-width label))) ?\s)
                        ":")
                'face 'bold)
-              (zellij-send-dashboard--bar pct)
+              (zellij-send-dashboard--bar pct (eq key 'five_hour))
               (format " %3d%% used" (round pct)))
       (when-let* ((line (zellij-send-dashboard--fmt-reset resets)))
         (insert " " (propertize line 'face 'shadow)))

@@ -334,6 +334,8 @@ Claude Code の `/usage` と同じセッション/週の使用状況を表示で
 
 バーはブロック文字（`█`）ではなく**空白に背景色**を付けて描いています。フォントによっては（M PLUS など）ブロック文字の字形が行の高さを超えてバーが崩れるためです。`zellij-send-dashboard-usage-bar-style` を `block` / `ascii` にすれば変更できます。
 
+2 本のバーは使用率に応じた同じ色（緑・黄・赤）で描くため、使用率が近いと見分けが付きません。そこで 5 時間制限（`Current session`）のバーだけを 1 週間制限より少し薄く描いています（`zellij-send-dashboard-usage-light-ratio`。`0` で無効）。色相は変えていません——ここでの色は「制限にどれだけ近いか」を表すもので、どちらの制限かを表すものではないからです。
+
 `/usage` は TUI 内でしか実行できず、`claude` CLI にも `usage` サブコマンドはありません。この情報を取得できる公式ルートは **statusLine コマンドの stdin に渡される JSON だけ**です。そこで、その JSON をキャッシュに保存するステータス行を設定し、ダッシュボードはそれを読むだけにします（追加プロセス・非公開 API なし）。
 
 **1. `~/.claude/hooks/statusline-zellij-send.sh` を作成:**
@@ -408,6 +410,7 @@ exit 0
 | `zellij-send-dashboard-usage-file`       | キャッシュのパス（既定 `~/.claude/zellij-send-usage.json`） |
 | `zellij-send-dashboard-usage-bar-width`  | バーの表示幅・桁（既定 24）                                 |
 | `zellij-send-dashboard-usage-bar-style`  | `face` 背景色（既定）/ `block` █ / `ascii` `#`・`-`         |
+| `zellij-send-dashboard-usage-light-ratio` | 5 時間制限のバーを薄くする度合い（既定 0.4。0 で 1 週間制限と同じ濃さ） |
 | `zellij-send-dashboard-usage-timezone`   | タイムゾーン表記。`nil` なら `$TZ`、次に `%Z`               |
 
 ## カスタマイズ

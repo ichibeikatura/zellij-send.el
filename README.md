@@ -346,6 +346,8 @@ three lines of height.
 
 The bar is drawn as spaces with a background colour rather than block glyphs (`█`), because in some fonts (M PLUS, for one) the block glyph is taller than the line box and the bar breaks up. Set `zellij-send-dashboard-usage-bar-style` to `block` or `ascii` if you prefer.
 
+The two bars share the same colour scale — green, amber, red by how much is used — so when the two percentages are close the bars are hard to tell apart. The session bar is therefore drawn a shade paler than the week bar (`zellij-send-dashboard-usage-light-ratio`, `0` to turn that off). Hues are left alone, since colour here means "how close to the limit", not which limit it is.
+
 `/usage` only exists inside the TUI and the `claude` CLI has no `usage` subcommand, so this data has exactly one supported source: the JSON that Claude Code pipes to a **statusLine command** on stdin. Set up a status line that caches that JSON and the dashboard reads the cache — no extra processes, no undocumented APIs.
 
 **1. Create `~/.claude/hooks/statusline-zellij-send.sh`:**
@@ -421,6 +423,7 @@ The cache is refreshed by any running Claude Code session, so the dashboard show
 | `zellij-send-dashboard-usage-file`            | Cache path (default `~/.claude/zellij-send-usage.json`) |
 | `zellij-send-dashboard-usage-bar-width`       | Bar width in columns (default 24)                   |
 | `zellij-send-dashboard-usage-bar-style`       | `face` coloured spaces (default), `block` █ glyphs, `ascii` `#`/`-` |
+| `zellij-send-dashboard-usage-light-ratio`     | How much paler the session bar is than the week bar (default 0.4; 0 makes them identical) |
 | `zellij-send-dashboard-usage-timezone`        | Timezone label; `nil` uses `$TZ`, then `%Z`         |
 
 ## Customization
