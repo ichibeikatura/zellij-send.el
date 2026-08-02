@@ -427,6 +427,12 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
   **text / thinking / tool_use / tool_result を全部出す**。
   `mode` / `ai-title` / `file-history-snapshot` などの行は会話ではないので捨てる
 - **`tool_result` は role が `user`** だが、ユーザーの発言ではないので見出しは `tool` にする
+- **画像ブロックは base64 を出さず要約に置き換える**（`--transcript-block`）。
+  実測で 89692 文字の 1 行になっていた。`[画像 image/png 66 KB]` の形にする
+- **長い 1 行は切る**（`--transcript-clip`、既定 2000 文字）。行数制限
+  （`--max-block-lines`）では止まらない。`tool_use` の入力は `json-encode` した
+  改行なしの 1 行なので、`Write` 1 回で 6918 文字になった（実測）。
+  **切るのは行数を数える前**（順序を入れ替えると長い 1 行が生き残る）
 - **`zellij-send--update-buffer` を使ってはいけない**。あれはプロンプト検出と
   AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆する。直接 insert する
 - 表示後は `zellij-send--user-cleared` を立てる。これをしないと
@@ -438,7 +444,8 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
   編集済みのバッファでは下書きを捨てる確認を挟む（クリア `x` や送信でも
   `--user-cleared` は nil に戻るが、取り直しはしない）
 - 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
-  `--transcript-trim` / `--transcript-claude-p`。テストが `test/` にある
+  `--transcript-trim` / `--transcript-clip` / `--transcript-block` /
+  `--transcript-claude-p`。テストが `test/` にある
 
 ## スクリーン取得の限界（調査済み・再調査不要）
 

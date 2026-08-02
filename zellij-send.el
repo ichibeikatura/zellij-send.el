@@ -119,6 +119,14 @@ detach が効かなくてもこの時間で必ずプロセスを殺す。"
   :type '(choice (const :tag "省略しない" nil) integer)
   :group 'zellij-send)
 
+(defcustom zellij-send-transcript-max-line-length 2000
+  "transcript の 1 行を表示する最大文字数。nil なら省略しない。
+画像の base64 や、tool_use の入力を JSON にしたものは改行を含まないため、
+1 行が数万文字になる。折り返しで画面が埋まって読めなくなるので、
+既定で切り詰める。通常の文章 1 段落は超えない長さにしてある。"
+  :type '(choice (const :tag "省略しない" nil) integer)
+  :group 'zellij-send)
+
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
   "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
 実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
@@ -457,6 +465,32 @@ Stop フックは transcript のパスを Emacs に渡していないので現�
                                    (parse-iso8601-time-string ts))))
         "")))
 
+(defun zellij-send--transcript-size (bytes)
+  "BYTES を人が読める大きさの文字列にする。"
+  (cond ((>= bytes 1048576) (format "%.1f MB" (/ bytes 1048576.0)))
+        ((>= bytes 1024)    (format "%.0f KB" (/ bytes 1024.0)))
+        (t                  (format "%d B" bytes))))
+
+(defun zellij-send--transcript-block (b)
+  "text を持たない会話ブロック B を 1 行の要約にする。
+画像は base64 が数 MB の 1 行になり、そのまま出すと黒板が読めなくなるので
+必ず要約に置き換える（元データは表示しても意味がない）。"
+  (let* ((alist (and (listp b) (listp (car-safe b)) b))
+         (type (and alist (alist-get 'type alist))))
+    (if (not (equal type "image"))
+        (format "%S" b)
+      (let* ((src (alist-get 'source alist))
+             (data (or (alist-get 'data src) ""))
+             (media (or (alist-get 'media_type src)
+                        (alist-get 'url src)
+                        "image"))
+             ;; base64 は元データの約 4/3 の長さ
+             (bytes (/ (* 3 (length data)) 4)))
+        (if (string-empty-p data)
+            (format "[画像 %s]" media)
+          (format "[画像 %s %s]" media
+                  (zellij-send--transcript-size bytes)))))))
+
 (defun zellij-send--transcript-text (content)
   "tool_result の CONTENT（文字列またはブロックの配列）を文字列にする。"
   (cond
@@ -464,7 +498,7 @@ Stop フックは transcript のパスを Emacs に渡していないので現�
    ((listp content)
     (mapconcat (lambda (b)
                  (or (and (listp b) (alist-get 'text b))
-                     (format "%S" b)))
+                     (zellij-send--transcript-block b)))
                content "\n"))
    (t (format "%S" content))))
 
@@ -509,13 +543,33 @@ Stop フックは transcript のパスを Emacs に渡していないので現�
                                 :body (zellij-send--transcript-text
                                        (alist-get 'content b))))
                          (t (list :kind (or kind "?")
-                                  :body (format "%S" b)))))
+                                  :body (zellij-send--transcript-block b)))))
                        out))))))))))
     (nreverse out)))
 
+(defun zellij-send--transcript-clip (body)
+  "BODY の各行を `zellij-send-transcript-max-line-length' 文字までに切る。
+行数ではなく 1 行の長さを見る。base64 や JSON は改行を持たないので、
+行数で切っても画面が埋まるのを止められないため。"
+  (let ((max zellij-send-transcript-max-line-length))
+    (if (not (and max (natnump max) (> max 0)))
+        body
+      (mapconcat
+       (lambda (line)
+         (if (<= (length line) max)
+             line
+           (concat (substring line 0 max)
+                   (format "…（この行はあと %d 文字）" (- (length line) max)))))
+       (split-string (or body "") "\n")
+       "\n"))))
+
 (defun zellij-send--transcript-trim (body)
-  "BODY を `zellij-send-transcript-max-block-lines' 行までに切り詰める。"
-  (let ((max zellij-send-transcript-max-block-lines))
+  "BODY を読める大きさに切り詰める。
+長すぎる行を `zellij-send--transcript-clip' で切ってから、
+`zellij-send-transcript-max-block-lines' 行までに縮める。
+行を先に切るのは、長い 1 行は行数制限では止まらないため。"
+  (let ((body (zellij-send--transcript-clip body))
+        (max zellij-send-transcript-max-block-lines))
     (if (not (and max (natnump max)))
         body
       (let ((lines (split-string (or body "") "\n")))

@@ -443,6 +443,62 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       (should (equal (zellij-send--transcript-trim body)
                      "1\n2\n… （残り 2 行）")))))
 
+(ert-deftest zellij-send-test-transcript-clip ()
+  "長すぎる 1 行だけを切る。短い行と改行の並びは変えない。"
+  (let ((zellij-send-transcript-max-line-length 10))
+    ;; 上限ちょうどは切らない
+    (should (equal (zellij-send--transcript-clip "0123456789") "0123456789"))
+    (should (equal (zellij-send--transcript-clip "abc\ndef") "abc\ndef"))
+    ;; 1 行が長いときだけ切り、残り文字数を添える
+    (should (equal (zellij-send--transcript-clip "0123456789abc")
+                   "0123456789…（この行はあと 3 文字）"))
+    ;; 長い行と短い行が混ざっても、短い行はそのまま
+    (should (equal (zellij-send--transcript-clip "ok\n0123456789abc\nok")
+                   "ok\n0123456789…（この行はあと 3 文字）\nok"))
+    ;; 文字数で数える（バイト数ではない）
+    (should (equal (zellij-send--transcript-clip "あいうえおかきくけこさ")
+                   "あいうえおかきくけこ…（この行はあと 1 文字）")))
+  ;; nil なら切らない
+  (let ((zellij-send-transcript-max-line-length nil))
+    (should (equal (zellij-send--transcript-clip (make-string 5000 ?x))
+                   (make-string 5000 ?x)))))
+
+(ert-deftest zellij-send-test-transcript-block ()
+  "画像ブロックは base64 を出さず要約にする。"
+  (let ((img '((type . "image")
+               (source . ((type . "base64")
+                          (media_type . "image/png")
+                          (data . "AAAABBBBCCCCDDDD"))))))
+    (should (equal (zellij-send--transcript-block img) "[画像 image/png 12 B]"))
+    ;; base64 の中身が出ていないこと（これが本題）
+    (should-not (string-match-p "AAAA" (zellij-send--transcript-block img))))
+  ;; データが無くても落ちない
+  (should (equal (zellij-send--transcript-block
+                  '((type . "image") (source . ((media_type . "image/jpeg")))))
+                 "[画像 image/jpeg]"))
+  ;; 大きさは人が読める単位にする
+  (let ((big `((type . "image")
+               (source . ((media_type . "image/png")
+                          (data . ,(make-string 1400000 ?A)))))))
+    (should (equal (zellij-send--transcript-block big) "[画像 image/png 1.0 MB]")))
+  ;; 画像以外のブロックは従来どおり
+  (should (string-match-p "unknown" (zellij-send--transcript-block
+                                     '((type . "unknown") (foo . 1))))))
+
+(ert-deftest zellij-send-test-transcript-entries-image ()
+  "tool_result に画像が入っていても base64 が本文に混ざらない。"
+  (let* ((line (json-encode
+                '((type . "user")
+                  (message . ((content . (((type . "tool_result")
+                                           (content . (((type . "image")
+                                                        (source . ((media_type . "image/png")
+                                                                   (data . "QUJDREVGRw=="))))))))))))))
+         (entries (zellij-send--transcript-entries line))
+         (body (plist-get (car entries) :body)))
+    (should (= (length entries) 1))
+    (should (string-match-p "\\[画像 image/png" body))
+    (should-not (string-match-p "QUJDREVG" body))))
+
 (ert-deftest zellij-send-test-transcript-claude-p ()
   "Claude Code のときだけ transcript 経路に入る。"
   (let ((zellij-send-default-command "claude")) (should (zellij-send--transcript-claude-p)))

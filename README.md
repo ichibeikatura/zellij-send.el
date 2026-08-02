@@ -228,8 +228,13 @@ the scrollback (only meaningful for commands that are not full-screen TUIs).
 - Non-Claude commands, and `C-u a`, keep the old behaviour: dump the zellij screen.
 - The transcript is picked by most-recent modification time within the project
   directory, so running two sessions in the same working directory can pick the wrong one.
+- Images are never printed as base64. An image in a tool result becomes a one-line summary
+  (`[画像 image/png 66 KB]`) — the data is megabytes long and unreadable anyway.
+- Any line longer than `zellij-send-transcript-max-line-length` (default 2000 characters)
+  is cut with a note of how much was dropped. Tool inputs are stored as single-line JSON,
+  so without this one `Write` can fill the window. Set it to `nil` to keep lines whole.
 - Set `zellij-send-transcript-max-block-lines` to a number if huge tool outputs make the
-  buffer unwieldy (default `nil`, meaning nothing is elided).
+  buffer unwieldy (default `nil`, meaning no block is shortened by line count).
 
 ### Numbered prompts
 
