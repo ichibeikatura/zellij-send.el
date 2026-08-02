@@ -357,8 +357,37 @@ TMP="$CACHE.$$.tmp"
 
 input=$(cat)
 
+# Rate limits come from an API response, so a session that has not made a
+# request yet sends JSON without them. The cache is one file shared by every
+# session and the last writer wins, so writing that payload as-is would blank
+# out a reading the dashboard was happily showing. Carry the previous value
+# over when the new payload has none — and restore the previous mtime with it,
+# since the dashboard labels the reading with the file's age.
+ZS_INPUT="$input" ZS_CACHE="$CACHE" ZS_TMP="$TMP" python3 - <<'PY' 2>/dev/null || printf '%s' "$input" > "$TMP" 2>/dev/null
+import json, os
+
+cache, tmp = os.environ["ZS_CACHE"], os.environ["ZS_TMP"]
+new = json.loads(os.environ["ZS_INPUT"])
+mtime = None
+
+if not new.get("rate_limits"):
+    try:
+        with open(cache) as f:
+            old = json.load(f)
+        if old.get("rate_limits"):
+            new["rate_limits"] = old["rate_limits"]
+            mtime = os.path.getmtime(cache)
+    except Exception:
+        pass
+
+with open(tmp, "w") as f:
+    json.dump(new, f)
+if mtime is not None:
+    os.utime(tmp, (mtime, mtime))
+PY
+
 # Write then rename, so Emacs never reads a half-written file
-printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
+mv -f "$TMP" "$CACHE" 2>/dev/null
 rm -f "$TMP" 2>/dev/null
 
 # Printing nothing hides the status line in the TUI — the cache is still written,
@@ -384,7 +413,7 @@ Restart Claude Code (or open `/statusline` once) so the new status line takes ef
 
 The script above prints nothing, so no status line appears in Claude Code — the hook still runs on every update, which is all the cache needs. Print something there if you want the TUI status line back.
 
-The cache is refreshed by any running Claude Code session, so the dashboard shows how old the reading is (`12s前の記録`). Rate limits are only present for Claude subscription accounts, and only after the first API response of a session.
+The cache is refreshed by any running Claude Code session, so the dashboard shows how old the reading is (`12s前の記録`). Rate limits are only present for Claude subscription accounts, and only after the first API response of a session — which is why the script above keeps the previous reading instead of letting a freshly started session blank it out.
 
 | Option                                        | Meaning                                             |
 |-----------------------------------------------|-----------------------------------------------------|

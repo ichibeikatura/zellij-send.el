@@ -345,8 +345,36 @@ TMP="$CACHE.$$.tmp"
 
 input=$(cat)
 
+# rate_limits は API 応答から来るので、まだ 1 往復もしていないセッションが
+# 渡す JSON には入っていない。キャッシュは全セッション共通の 1 ファイルで
+# 最後に書いた者が勝つため、そのまま上書きすると直前まで出ていた使用状況が
+# 消える。無いときだけ前回の値を引き継ぐ。引き継いだときは mtime も前回の
+# ものに戻す（ダッシュボードは mtime を「◯前の記録」として表示するため）。
+ZS_INPUT="$input" ZS_CACHE="$CACHE" ZS_TMP="$TMP" python3 - <<'PY' 2>/dev/null || printf '%s' "$input" > "$TMP" 2>/dev/null
+import json, os
+
+cache, tmp = os.environ["ZS_CACHE"], os.environ["ZS_TMP"]
+new = json.loads(os.environ["ZS_INPUT"])
+mtime = None
+
+if not new.get("rate_limits"):
+    try:
+        with open(cache) as f:
+            old = json.load(f)
+        if old.get("rate_limits"):
+            new["rate_limits"] = old["rate_limits"]
+            mtime = os.path.getmtime(cache)
+    except Exception:
+        pass
+
+with open(tmp, "w") as f:
+    json.dump(new, f)
+if mtime is not None:
+    os.utime(tmp, (mtime, mtime))
+PY
+
 # 書いてから rename する（Emacs が書きかけを読まないように）
-printf '%s' "$input" > "$TMP" 2>/dev/null && mv -f "$TMP" "$CACHE" 2>/dev/null
+mv -f "$TMP" "$CACHE" 2>/dev/null
 rm -f "$TMP" 2>/dev/null
 
 # 何も出力しなければ TUI にステータス行は出ない（キャッシュは書かれるので
@@ -372,7 +400,7 @@ exit 0
 
 上のスクリプトは何も出力しないので、Claude Code 側にステータス行は表示されません。フック自体は毎回呼ばれるため、キャッシュの更新には十分です。TUI にもステータス行が欲しい場合はここで出力してください。
 
-キャッシュは動作中の Claude Code セッションが更新するため、ダッシュボードには読み取り時点の古さ（`12s前の記録`）を添えて表示します。レート制限は Claude サブスクリプションのアカウントで、かつセッションの最初の API 応答以降にのみ現れます。
+キャッシュは動作中の Claude Code セッションが更新するため、ダッシュボードには読み取り時点の古さ（`12s前の記録`）を添えて表示します。レート制限は Claude サブスクリプションのアカウントで、かつセッションの最初の API 応答以降にのみ現れます。上のスクリプトが前回の値を引き継いでいるのはこのためで、起動したばかりのセッションが表示を消してしまうのを防いでいます。
 
 | 変数                                     | 意味                                                        |
 |------------------------------------------|-------------------------------------------------------------|
