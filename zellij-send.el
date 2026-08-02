@@ -16,6 +16,8 @@
 (require 'transient)
 (require 'seq)
 (require 'cl-lib)
+(require 'json)         ; transcript の JSONL を読む
+(require 'parse-time)   ; transcript の timestamp（ISO 8601）を解釈する
 
 (declare-function markdown-mode "markdown-mode")
 (declare-function zellij-send-mode "zellij-send")
@@ -103,6 +105,18 @@ detach が効かなくてもこの時間で必ずプロセスを殺す。"
 (defcustom zellij-send-quit-poll-interval 0.5
   "`zellij-send-quit' がセッションの消滅を確認する間隔（秒）。"
   :type 'number
+  :group 'zellij-send)
+
+(defcustom zellij-send-transcript-dir "~/.claude/projects"
+  "Claude Code が会話履歴（JSONL）を置くディレクトリ。"
+  :type 'directory
+  :group 'zellij-send)
+
+(defcustom zellij-send-transcript-max-block-lines nil
+  "transcript の 1 ブロックを表示する最大行数。nil なら省略しない。
+ツールの出力（tool_result）はファイル全文を含むことがあるため、
+黒板が重いときだけ数値を設定する。"
+  :type '(choice (const :tag "省略しない" nil) integer)
   :group 'zellij-send)
 
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
@@ -401,6 +415,160 @@ alt-screen でないコマンドを `zellij-send-default-command' に設定し�
            (when (buffer-live-p req-buffer)
              (with-current-buffer req-buffer
                (funcall callback content)))))))))
+
+;;; transcript（Claude Code の会話履歴）
+
+;; 画面（dump-screen / subscribe）から過去の会話は取れない。alt-screen には
+;; スクロールバックが無く、送信した長文は `[Pasted text #1 +59 lines]' に
+;; 畳まれて本文が画面に存在しないため。履歴は Claude Code が書く JSONL から読む。
+
+(defun zellij-send--transcript-slug (dir)
+  "作業ディレクトリ DIR に対応する Claude Code のプロジェクト名を返す。
+英数字以外はすべて `-' に置き換わる（`/Users/mck/.claude' なら
+`-Users-mck--claude'。2026-08-02 に実在するディレクトリ名で確認）。"
+  (replace-regexp-in-string
+   "[^A-Za-z0-9]" "-" (directory-file-name (expand-file-name dir))))
+
+(defun zellij-send--transcript-file (dir)
+  "DIR に対応する transcript のうち最終更新が最も新しいものを返す。無ければ nil。
+同じディレクトリで複数のセッションを動かしていると取り違えうるが、
+Stop フックは transcript のパスを Emacs に渡していないので現状はこれで選ぶ。"
+  (let ((proj (expand-file-name (zellij-send--transcript-slug dir)
+                                zellij-send-transcript-dir)))
+    (when (file-directory-p proj)
+      (car (sort (directory-files proj t "\\.jsonl\\'")
+                 (lambda (a b)
+                   (time-less-p (file-attribute-modification-time
+                                 (file-attributes b))
+                                (file-attribute-modification-time
+                                 (file-attributes a)))))))))
+
+(defun zellij-send--transcript-claude-p ()
+  "`zellij-send-default-command' が Claude Code なら non-nil。"
+  (let ((cmd (car (split-string (or zellij-send-default-command "") nil t))))
+    (and cmd (string-prefix-p "claude" (file-name-nondirectory cmd)))))
+
+(defun zellij-send--transcript-time (entry)
+  "ENTRY の timestamp を `MM-DD HH:MM:SS' に整形する。読めなければ空文字。"
+  (let ((ts (alist-get 'timestamp entry)))
+    (or (and (stringp ts)
+             (ignore-errors
+               (format-time-string "%m-%d %H:%M:%S"
+                                   (parse-iso8601-time-string ts))))
+        "")))
+
+(defun zellij-send--transcript-text (content)
+  "tool_result の CONTENT（文字列またはブロックの配列）を文字列にする。"
+  (cond
+   ((stringp content) content)
+   ((listp content)
+    (mapconcat (lambda (b)
+                 (or (and (listp b) (alist-get 'text b))
+                     (format "%S" b)))
+               content "\n"))
+   (t (format "%S" content))))
+
+(defun zellij-send--transcript-entries (text)
+  "transcript の TEXT（JSONL）から会話の要素を順に取り出す。
+返り値は plist のリスト（`:role' `:time' `:kind' `:name' `:body' `:sub'）。
+会話でない行（mode・ai-title・file-history-snapshot など）は捨てる。
+壊れた行は黙って読み飛ばす（書き込み中の末尾行がありうるため）。"
+  (let (out)
+    (dolist (line (split-string text "\n" t))
+      (let ((obj (ignore-errors
+                   (json-parse-string line :object-type 'alist
+                                      :array-type 'list
+                                      :null-object nil
+                                      :false-object nil))))
+        (when obj
+          (let ((type (alist-get 'type obj)))
+            (when (member type '("user" "assistant"))
+              (let* ((time (zellij-send--transcript-time obj))
+                     (sub (and (alist-get 'isSidechain obj) t))
+                     (content (alist-get 'content (alist-get 'message obj)))
+                     (base (list :role type :time time :sub sub)))
+                (if (stringp content)
+                    (push (append base (list :kind "text" :body content)) out)
+                  (dolist (b content)
+                    (let ((kind (alist-get 'type b)))
+                      (push
+                       (append
+                        base
+                        (cond
+                         ((equal kind "text")
+                          (list :kind "text" :body (alist-get 'text b)))
+                         ((equal kind "thinking")
+                          (list :kind "thinking" :body (alist-get 'thinking b)))
+                         ((equal kind "tool_use")
+                          (list :kind "tool_use"
+                                :name (alist-get 'name b)
+                                :body (json-encode (alist-get 'input b))))
+                         ((equal kind "tool_result")
+                          (list :kind "tool_result"
+                                :name (and (alist-get 'is_error b) "エラー")
+                                :body (zellij-send--transcript-text
+                                       (alist-get 'content b))))
+                         (t (list :kind (or kind "?")
+                                  :body (format "%S" b)))))
+                       out))))))))))
+    (nreverse out)))
+
+(defun zellij-send--transcript-trim (body)
+  "BODY を `zellij-send-transcript-max-block-lines' 行までに切り詰める。"
+  (let ((max zellij-send-transcript-max-block-lines))
+    (if (not (and max (natnump max)))
+        body
+      (let ((lines (split-string (or body "") "\n")))
+        (if (<= (length lines) max)
+            body
+          (concat (string-join (seq-take lines max) "\n")
+                  (format "\n… （残り %d 行）" (- (length lines) max))))))))
+
+(defun zellij-send--transcript-format (entries)
+  "ENTRIES を黒板に流す文字列に整形する。
+役割が変わるたびに `## ' 見出しを置き、text 以外のブロックには
+`### ' の小見出しを付ける。"
+  (let (out (prev nil))
+    (dolist (e entries)
+      (let* ((role (plist-get e :role))
+             (kind (plist-get e :kind))
+             (name (plist-get e :name))
+             ;; tool_result は role が "user" だが、あなたの発言ではないので分ける
+             (head (concat (if (equal kind "tool_result") "tool" role)
+                           (if (plist-get e :sub) "（サブ）" ""))))
+        (unless (equal head prev)
+          (setq prev head)
+          (push (format "\n## %s  %s" head (plist-get e :time)) out))
+        (unless (equal kind "text")
+          (push (format "### %s%s" kind (if name (format "  %s" name) "")) out))
+        (push (zellij-send--transcript-trim
+               (string-trim (or (plist-get e :body) "")))
+              out)))
+    (string-trim (string-join (nreverse out) "\n"))))
+
+(defun zellij-send--transcript-show (file)
+  "FILE（transcript）の会話を黒板バッファに流す。
+`zellij-send--update-buffer' は使わない。あれはプロンプト検出と
+AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆する。"
+  (let* ((text (with-temp-buffer
+                 (insert-file-contents file)
+                 (buffer-string)))
+         (body (zellij-send--transcript-format
+                (zellij-send--transcript-entries text))))
+    (if (string-empty-p body)
+        (message "transcript に会話がありません: %s" file)
+      (with-silent-modifications
+        (erase-buffer)
+        (insert body))
+      (set-buffer-modified-p nil)
+      ;; 自動更新に上書きされないよう、クリアと同じ扱いにする
+      (setq zellij-send--user-cleared t)
+      (zellij-send--clear-prompt-highlight)
+      (goto-char (point-max))
+      (let ((win (get-buffer-window (current-buffer) t)))
+        (when (window-live-p win) (set-window-point win (point-max))))
+      (message "会話履歴を表示しました（%s）。生画面に戻すには x でクリア"
+               (file-name-nondirectory file)))))
 
 ;;; セッション情報の取得（cwd・pane-id）
 
@@ -1334,22 +1502,30 @@ REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
            (setq zellij-send--history-draft nil))
          (message "送信しました → [%s]" session))))))
 
-(defun zellij-send-show-response ()
-  "zellij スクリーンの内容をバッファに取得・表示する。
-手動取得なのでスクロールバックまで取る（`--full'）。ポーリングは
-viewport のみ。Claude Code では両者に差は出ない（alt-screen にスクロール
-バックが無いため）が、alt-screen でないコマンドを使う場合に効く。"
-  (interactive)
+(defun zellij-send-show-response (&optional arg)
+  "会話の内容をバッファに表示する。
+Claude Code なら黒板をクリアして transcript の会話を最初から流す
+（画面には流れて消えた分が残っていないため）。それ以外のコマンドや
+ARG（\\[universal-argument]）付きのときは、従来どおり zellij スクリーンを
+取り直す。手動取得なのでスクロールバックまで取る（`--full'）。"
+  (interactive "P")
   (zellij-send--assert-session)
-  (zellij-send--dump-screen-async
-   zellij-send--session
-   (lambda (content)
-     (if content
-         (progn
-           (zellij-send--update-buffer content)
-           (message "スクリーン内容を取得しました"))
-       (message "スクリーン内容の取得に失敗しました")))
-   t))
+  (let* ((claude (and (not arg) (zellij-send--transcript-claude-p)))
+         (file (and claude (zellij-send--transcript-file default-directory))))
+    (cond
+     (file (zellij-send--transcript-show file))
+     (t
+      (when claude
+        (message "transcript が見つかりません。スクリーンを取得します"))
+      (zellij-send--dump-screen-async
+       zellij-send--session
+       (lambda (content)
+         (if content
+             (progn
+               (zellij-send--update-buffer content)
+               (message "スクリーン内容を取得しました"))
+           (message "スクリーン内容の取得に失敗しました")))
+       t)))))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
@@ -2111,7 +2287,7 @@ UTF-8 のバイト列に分解してから送る。"
   "ZellijSend メニュー"
   [["表示"
     ("d" "ダッシュボード（セッション一覧）" zellij-send-open-dashboard)
-    ("a" "Claude Code の回答を表示" zellij-send-show-response)
+    ("a" "会話の履歴を表示 (transcript)" zellij-send-show-response)
     ("l" "出力ログを開く (markdown)" zellij-send-open-log)
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)]
    ["送信"

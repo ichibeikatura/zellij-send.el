@@ -411,6 +411,30 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 
 ログは `C-c C-a` → `l`（`zellij-send-open-log`）で開く。
 
+## 会話履歴の表示（`zellij-send-show-response` / メニュー `a`）
+
+`a` は Claude Code のときだけ **transcript の JSONL を読んで会話を最初から黒板に流す**。
+Claude Code 以外（`zellij-send-default-command` が claude で始まらない）と `C-u a` は
+従来どおり `dump-screen --full`。
+
+- transcript の場所は `~/.claude/projects/SLUG/*.jsonl`。SLUG は cwd の
+  **英数字以外をすべて `-` に置換**したもの（`/Users/mck/.claude` →
+  `-Users-mck--claude`。2026-08-02 に実在ディレクトリ名で確認）
+- 同じ cwd に複数の jsonl があるので**最終更新が最新のものを選ぶ**。
+  Stop フックは transcript のパスを Emacs に渡していないため、これ以上は絞れない。
+  同一ディレクトリで 2 セッション動かすと取り違えうる（既知の制約）
+- 出すのは `user` / `assistant` 行のみ。ブロックは
+  **text / thinking / tool_use / tool_result を全部出す**。
+  `mode` / `ai-title` / `file-history-snapshot` などの行は会話ではないので捨てる
+- **`tool_result` は role が `user`** だが、ユーザーの発言ではないので見出しは `tool` にする
+- **`zellij-send--update-buffer` を使ってはいけない**。あれはプロンプト検出と
+  AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆する。直接 insert する
+- 表示後は `zellij-send--user-cleared` を立てる。これをしないと
+  **26〜40 ms 後の subscribe イベントに上書きされて消える**。
+  生画面に戻すにはクリア（メニュー `x`）するか、送信する（`--user-cleared` が nil に戻る）
+- 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
+  `--transcript-trim` / `--transcript-claude-p`。テストが `test/` にある
+
 ## スクリーン取得の限界（調査済み・再調査不要）
 
 2026-07-28 に zellij 0.44.3 + Claude Code v2.1.220 で実測した結果。
@@ -428,8 +452,10 @@ Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処�
 | claude ペイン（alt-screen） | 28 行（22〜40 のみ） | **28 行。同一。1〜21 は取れない** |
 | 通常ペイン（`seq 1 200`） | 27 行 | 200 行（1 から全部） |
 
-`--full` 自体は正常。**流れて消えた Claude の出力は `zellij-send-log-file`
-（Stop フックが transcript から追記）で読む**。これが唯一の正しい経路。
+`--full` 自体は正常。**流れて消えた会話は画面からは絶対に取れない**ので、
+transcript（Claude Code が書く JSONL）から読む。経路は 2 つ:
+`C-c C-a` → `a`（`zellij-send-show-response`、下記）と `l`（`zellij-send-log-file`、
+Stop フックが追記）。
 `zellij-send-show-response` に `--full` を付けてあるのは、alt-screen でない
 コマンドを `zellij-send-default-command' にした場合のためだけ。
 

@@ -365,6 +365,92 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   ;; 別のコマンドのヒントを読み違えない（画面がまだ前の状態のとき）
   (should-not (zellij-send--slash-arg-hint " ↯ ─\n❯ /effort  [low|high]\n" "/model")))
 
+;;; transcript（Claude Code の会話履歴）
+
+(defconst zellij-send-test--transcript
+  (concat
+   ;; 会話でない行。捨てる
+   "{\"type\":\"mode\",\"mode\":\"normal\"}\n"
+   "{\"type\":\"file-history-snapshot\",\"messageId\":\"x\"}\n"
+   ;; user は素の文字列のことがある
+   "{\"type\":\"user\",\"timestamp\":\"2026-08-02T12:28:32.618Z\","
+   "\"message\":{\"content\":\"こんにちは\"}}\n"
+   "{\"type\":\"assistant\",\"timestamp\":\"2026-08-02T12:28:36.359Z\","
+   "\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"考え中\"},"
+   "{\"type\":\"text\",\"text\":\"やります\"},"
+   "{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}\n"
+   "{\"type\":\"user\",\"timestamp\":\"2026-08-02T12:28:37.010Z\","
+   "\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"a.txt\","
+   "\"is_error\":false}]}}\n"
+   ;; 書き込み中の壊れた末尾行。読み飛ばす
+   "{\"type\":\"assist")
+  "テスト用の transcript（実データの形を写したもの）。")
+
+(ert-deftest zellij-send-test-transcript-slug ()
+  "作業ディレクトリ名は英数字以外がすべて `-' になる。"
+  (should (equal (zellij-send--transcript-slug "/Users/mck/Documents/github/zellij-send")
+                 "-Users-mck-Documents-github-zellij-send"))
+  ;; ドットも `-' になる（`.claude' が `-claude' で 2 連続の `-' になる）
+  (should (equal (zellij-send--transcript-slug "/Users/mck/.claude")
+                 "-Users-mck--claude"))
+  ;; 末尾のスラッシュは落とす（付いたままだと余分な `-' が増える）
+  (should (equal (zellij-send--transcript-slug "/Users/mck/tmp/")
+                 "-Users-mck-tmp"))
+  ;; 空白も `-' になる
+  (should (equal (zellij-send--transcript-slug "/Users/mck/My Drive/memo")
+                 "-Users-mck-My-Drive-memo")))
+
+(ert-deftest zellij-send-test-transcript-entries ()
+  "会話の行だけを、ブロックごとに順番どおり取り出す。"
+  (let ((es (zellij-send--transcript-entries zellij-send-test--transcript)))
+    (should (= (length es) 5))
+    (should (equal (mapcar (lambda (e) (plist-get e :kind)) es)
+                   '("text" "thinking" "text" "tool_use" "tool_result")))
+    (should (equal (mapcar (lambda (e) (plist-get e :role)) es)
+                   '("user" "assistant" "assistant" "assistant" "user")))
+    (should (equal (plist-get (nth 0 es) :body) "こんにちは"))
+    (should (equal (plist-get (nth 3 es) :name) "Bash"))
+    ;; is_error が偽なら「エラー」印は付かない
+    (should-not (plist-get (nth 4 es) :name))
+    (should (equal (plist-get (nth 4 es) :body) "a.txt"))))
+
+(ert-deftest zellij-send-test-transcript-format ()
+  "役割が変わったところにだけ見出しを置き、text 以外に小見出しを付ける。"
+  (let* ((es (zellij-send--transcript-entries zellij-send-test--transcript))
+         (zellij-send-transcript-max-block-lines nil)
+         (out (zellij-send--transcript-format es)))
+    (should (string-prefix-p "## user" out))
+    ;; assistant の 3 ブロックで見出しは 1 回だけ。
+    ;; tool_result は role が "user" だが「user」に混ぜず "tool" にする
+    ;; 時刻はタイムゾーンで変わるので、見出しの名前だけを見る
+    (should (equal (mapcar (lambda (l) (car (split-string l "  ")))
+                           (seq-filter (lambda (l) (string-prefix-p "## " l))
+                                       (split-string out "\n")))
+                   '("## user" "## assistant" "## tool")))
+    (should (string-match-p "^### thinking$" out))
+    (should (string-match-p "^### tool_use  Bash$" out))
+    ;; text には小見出しを付けない
+    (should-not (string-match-p "### text" out))))
+
+(ert-deftest zellij-send-test-transcript-trim ()
+  "行数上限を設けたときだけ切り詰める。"
+  (let ((body "1\n2\n3\n4"))
+    (let ((zellij-send-transcript-max-block-lines nil))
+      (should (equal (zellij-send--transcript-trim body) body)))
+    (let ((zellij-send-transcript-max-block-lines 10))
+      (should (equal (zellij-send--transcript-trim body) body)))
+    (let ((zellij-send-transcript-max-block-lines 2))
+      (should (equal (zellij-send--transcript-trim body)
+                     "1\n2\n… （残り 2 行）")))))
+
+(ert-deftest zellij-send-test-transcript-claude-p ()
+  "Claude Code のときだけ transcript 経路に入る。"
+  (let ((zellij-send-default-command "claude")) (should (zellij-send--transcript-claude-p)))
+  (let ((zellij-send-default-command "/usr/local/bin/claude --resume"))
+    (should (zellij-send--transcript-claude-p)))
+  (let ((zellij-send-default-command "zsh")) (should-not (zellij-send--transcript-claude-p)))
+  (let ((zellij-send-default-command "")) (should-not (zellij-send--transcript-claude-p))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
