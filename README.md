@@ -2,25 +2,82 @@
 
 English | [日本語](README.ja.md)
 
-An Emacs package for sending text to [zellij](https://zellij.dev/) session panes — designed for use with AI coding agents like Claude Code.
+Run detached AI coding agents from Emacs. Each [zellij](https://zellij.dev/) session
+becomes an ordinary Emacs buffer that you type into and read from — no terminal
+emulator inside Emacs, no attached client, no window you have to keep open.
 
 ## Overview
 
-Use the `*ai-session-name*` buffer as a shared blackboard: write your message, send it, read the AI's response, and repeat.
+`M-x zellij-send` creates a **detached** zellij session, starts an agent
+(`claude` by default) in a pane, and gives you `*ai-session-name*` as a shared
+blackboard: write your message, send it with `C-c C-c`, and the pane's screen comes
+back into the same buffer.
 
 ![The blackboard buffer](Screen01.png)
 
-You type in the buffer and press `C-c C-c`; the text goes to the pane with
-`zellij action paste`, and the pane's screen comes back into the same buffer.
-The header line carries the session name and the keys you need.
+Nothing is attached to the session, so nothing has to stay open. The agent keeps
+working while you are somewhere else, and after an Emacs restart the dashboard picks
+the running sessions back up on its own. Run several at once and it tells you which
+are working, which are done, and which are waiting on an answer from you.
 
 ## Why this tool?
 
-Emacs terminal emulators like `vterm` and `eat` pass key events directly to the child process, which means Emacs input methods (e.g. ddSKK) do not work inside them.
+Emacs treats everything as text, and every buffer as equally real. A conversation with
+an agent is text; so is the file it is editing, the note you are drafting, and the log
+of what it said an hour ago. Putting the agent in a buffer puts it in the same world as
+everything else you have open — which suits a particular way of working:
 
-`shell-mode` and `eshell` do support input methods, but they are not suited for running interactive TUI applications like Claude Code.
+> Emacs is built on the idea that everything is text and that all buffers exist on equal
+> terms. That fits people who open files from all over the place, potter about with
+> whatever they feel like at the moment, and wait for the hyperfocus to arrive.
 
-This tool bridges the gap: compose text in a regular Emacs buffer (where your input method works normally), and have it sent to a zellij session (where TUI apps run fine).
+That is the goal here. Not an IDE that writes your code for you while you watch, but a
+workbench where an agent can be building software in one buffer while another agent helps
+you draft prose in a second, and you move between them as your attention moves. Elaborate
+things are possible when you want them — the point is that pottering stays cheap.
+
+What follows from that:
+
+- **The agents outlive their windows.** Sessions are created with
+  `zellij attach --create-background` and driven by pane id, so no terminal client is
+  ever required. Close the frame, restart Emacs, come back tomorrow — `zellij attach` in
+  any terminal still shows you the same session if you want to look at it directly.
+- **Several at once is the normal case.** The [dashboard](#dashboard-zellij-send-dashboardel)
+  lists every session with its state, how long it has been in that state, and how long
+  since its screen last changed — so a stuck one is visible without visiting it.
+- **Emacs composes the text, not the terminal.** You write in a normal buffer, with your
+  input method, your abbrevs and snippets, text yanked from other buffers, and as many
+  passes over the wording as you like before anything is sent.
+- **The conversation is a buffer.** Search it, save it, feed it to something else. `C-c C-a`
+  → `a` rebuilds the whole conversation from Claude Code's own transcript, so what scrolled
+  off the pane is not lost.
+
+### If your input method breaks inside `vterm` / `eat`
+
+This was the original reason the package exists, and it is still the sharpest one for the
+people it affects.
+
+Emacs terminal emulators such as `vterm` and `eat` hand key events straight to the child
+process. That is exactly what you want for a TUI — and it means **input methods that run
+inside Emacs never get a chance to see your keys**. Not "work badly": they do not run at
+all. `shell-mode` and `eshell` do keep them, but they cannot host an interactive TUI like
+Claude Code.
+
+Note the shape of the problem: an OS-level IME (macOS, ibus, fcitx) composes text before
+Emacs is involved, so it is usually fine inside `vterm`. What breaks is **Emacs's own
+input**, and there are more people in that boat than you might expect:
+
+| | |
+|---|---|
+| Japanese | [ddSKK](https://github.com/skk-dev/ddskk) — conversion runs in Emacs Lisp |
+| Chinese | [`pyim`](https://github.com/tumashu/pyim), [`emacs-rime`](https://github.com/DogLooksGood/emacs-rime) |
+| Russian, Greek, … | `C-\` with `russian-computer` and friends — switching the *OS* layout would break every keybinding you have, so the Emacs-side method is the standard answer |
+| Vietnamese, Indic scripts | built-in Quail methods (`vietnamese-telex`, `devanagari-itrans`, …) |
+| Not a language at all | `agda-input`, `lean4-input`, the `TeX` method — typing `\forall` to get ∀ is the same mechanism |
+
+If you are in that table, the fix is the same for all of you: compose in a regular Emacs
+buffer where your input works, and let zellij-send deliver it to a pane where the TUI is
+happy.
 
 ## Requirements
 
@@ -76,7 +133,12 @@ Type your message in the buffer and press `C-c C-c` to send. The buffer is clear
 
 When Claude Code finishes its reply, the `*ai-session-name*` buffer **updates automatically**.
 
-To fetch manually, open the menu with `C-c C-a` and press `a`.
+The buffer mirrors the pane, which means it shows one screenful — a TUI in the alternate
+screen has no scrollback, so whatever scrolled past is gone as far as the terminal is
+concerned. To read the conversation from the beginning, open the menu with `C-c C-a` and
+press `a`: for Claude Code this replaces the buffer with the whole conversation, rebuilt
+from the transcript JSONL that Claude Code writes. Clear the buffer (`x`) or send
+something to go back to the live screen.
 
 ## Key Bindings
 
@@ -99,7 +161,7 @@ Inside the `*ai-session-name*` buffer:
 | Key | Action                                                                          |
 |-----|---------------------------------------------------------------------------------|
 | `d` | Open the dashboard (all sessions at a glance)                                    |
-| `a` | Show AI response (dumps the zellij screen)                                      |
+| `a` | Show the whole conversation (from the transcript; `C-u a` dumps the screen instead) |
 | `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
 | `x` | Clear the buffer                                                                |
 
@@ -139,6 +201,24 @@ Opens `*zellij-reply-session-name*`. You can read the AI's response in `*ai-sess
 | `C-c C-c` | Send text and close the buffer      |
 
 After sending, the original window layout is restored automatically.
+
+### Reading the whole conversation (`C-c C-a` → `a`)
+
+The pane only ever holds one screenful, and long text you send is folded into
+`[Pasted text #1 +N lines]`, so the screen cannot be used to reconstruct what was said.
+`a` reads Claude Code's transcript instead — the JSONL under
+`~/.claude/projects/<slug>/` — and lays the conversation into the blackboard from the
+beginning: your messages, the assistant's prose, its thinking, every tool call and every
+tool result, in order.
+
+The buffer is marked as cleared while the transcript is showing, so the live stream does
+not overwrite it. Press `x` (or just send something) to go back to the live screen.
+
+- Non-Claude commands, and `C-u a`, keep the old behaviour: dump the zellij screen.
+- The transcript is picked by most-recent modification time within the project
+  directory, so running two sessions in the same working directory can pick the wrong one.
+- Set `zellij-send-transcript-max-block-lines` to a number if huge tool outputs make the
+  buffer unwieldy (default `nil`, meaning nothing is elided).
 
 ### Numbered prompts
 
@@ -358,7 +438,7 @@ Attaching from a terminal shrinks the session to that client's size — that is 
 
 The Stop hook does two things every time Claude Code finishes a response:
 
-1. **Markdown log**: extracts the latest assistant message from the transcript and appends it to `.zellij-send/claude-log.md` in the working directory (open it with `C-c C-a` → `l`). Useful for reviewing what Claude said earlier in a long session.
+1. **Markdown log**: extracts the latest assistant message from the transcript and appends it to `.zellij-send/claude-log.md` in the working directory (open it with `C-c C-a` → `l`). This is a durable, per-project record that survives outside `~/.claude`; for reading back the current conversation, `C-c C-a` → `a` is usually what you want.
 2. **Auto-receive**: updates the `*ai-session-name*` buffer via `emacsclient`. This part requires an Emacs server to be running (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
@@ -471,6 +551,7 @@ With this in place, the `*ai-session-name*` buffer updates every time Claude Cod
 - **New session**: `zellij attach --create-background` creates a detached session; `zellij run --cwd DIR -- claude` starts the agent in a new pane and returns its pane id, which is remembered for all later commands. No attached client (terminal emulator) is needed.
 - **Sending text**: `zellij action paste --pane-id ID` sends the text as a bracketed paste; `zellij action write --pane-id ID 13` (CR) sends Enter. Without a known pane id, the focused pane is targeted instead (requires an attached client). `paste` is used instead of `write-chars` because `write-chars` passes newlines through as bare LF, which a shell (or any agent that submits on LF) treats as multiple separate lines. `paste` wraps the text in bracketed-paste markers only when the receiving pane has that mode enabled, so panes that do not support it still receive plain text.
 - **Reading response**: `zellij action dump-screen` prints the pane content to stdout (zellij 0.44+); ANSI escapes are stripped before displaying in the buffer
+- **Reading history**: the pane cannot provide it (no scrollback in the alternate screen, and pasted text is folded into a placeholder), so `C-c C-a` → `a` parses Claude Code's transcript JSONL directly
 - **All zellij calls are asynchronous** (`make-process` + sentinel) so Emacs never blocks
 - **Auto-receive (Stop hook)**: Claude Code Stop hook → appends the latest assistant message to the markdown log, then `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
 - **Live updates**: One long-running `zellij subscribe --pane-id ID --format json` process per session streams pane changes as NDJSON; the buffer is rewritten from the `viewport` field (which always carries the full pane, not a diff). Updates are skipped while the user is editing (`buffer-modified-p`) or after an explicit clear, but the last-change timestamp keeps being recorded so the dashboard still sees activity. An idle session produces one event (the initial delivery) rather than a `dump-screen` process every 2 seconds, and a change reaches the buffer in tens of milliseconds instead of up to 2 seconds. If the stream drops, it reconnects with exponential backoff (`zellij-send-subscribe-initial-timeout`, `zellij-send-subscribe-max-retries`, `zellij-send-subscribe-backoff-max`).
