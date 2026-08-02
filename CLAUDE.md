@@ -430,8 +430,13 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
 - **`zellij-send--update-buffer` を使ってはいけない**。あれはプロンプト検出と
   AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆する。直接 insert する
 - 表示後は `zellij-send--user-cleared` を立てる。これをしないと
-  **26〜40 ms 後の subscribe イベントに上書きされて消える**。
-  生画面に戻すにはクリア（メニュー `x`）するか、送信する（`--user-cleared` が nil に戻る）
+  **26〜40 ms 後の subscribe イベントに上書きされて消える**
+- 生画面に戻す経路は `zellij-send-show-live`（メニュー `g`）。`--user-cleared` と
+  `buffer-modified-p` の**両方**を落としてから `dump-screen` で取り直す。
+  **解除はコールバックの中ではなく取得を投げる前に行う**——`--user-cleared` が
+  立ったままだと `--update-buffer` が書き込みを拒み、コールバックが空振りする。
+  編集済みのバッファでは下書きを捨てる確認を挟む（クリア `x` や送信でも
+  `--user-cleared` は nil に戻るが、取り直しはしない）
 - 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
   `--transcript-trim` / `--transcript-claude-p`。テストが `test/` にある
 

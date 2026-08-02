@@ -567,7 +567,7 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
       (goto-char (point-max))
       (let ((win (get-buffer-window (current-buffer) t)))
         (when (window-live-p win) (set-window-point win (point-max))))
-      (message "会話履歴を表示しました（%s）。生画面に戻すには x でクリア"
+      (message "会話履歴を表示しました（%s）。生画面に戻すには C-c C-a → g"
                (file-name-nondirectory file)))))
 
 ;;; セッション情報の取得（cwd・pane-id）
@@ -1507,7 +1507,11 @@ REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
 Claude Code なら黒板をクリアして transcript の会話を最初から流す
 （画面には流れて消えた分が残っていないため）。それ以外のコマンドや
 ARG（\\[universal-argument]）付きのときは、従来どおり zellij スクリーンを
-取り直す。手動取得なのでスクロールバックまで取る（`--full'）。"
+取り直す。手動取得なのでスクロールバックまで取る（`--full'）。
+
+表示した後は自動更新が止まる（過去の会話が subscribe の画面で
+上書きされないようにするため）。生の画面に戻すには
+`zellij-send-show-live'（メニュー `g'）を使う。"
   (interactive "P")
   (zellij-send--assert-session)
   (let* ((claude (and (not arg) (zellij-send--transcript-claude-p)))
@@ -1526,6 +1530,41 @@ ARG（\\[universal-argument]）付きのときは、従来どおり zellij ス�
                (message "スクリーン内容を取得しました"))
            (message "スクリーン内容の取得に失敗しました")))
        t)))))
+
+(defun zellij-send-show-live (&optional arg)
+  "黒板を今のペイン画面に戻し、自動更新を再開する。
+
+自動更新は 2 つの場合に止まっている:
+transcript を表示した後（`zellij-send--user-cleared')と、
+バッファを編集した後（`buffer-modified-p')。どちらも解除して
+`dump-screen' で取り直すので、以後は subscribe の更新が
+そのまま流れてくる。
+
+書きかけの下書きは失われるので、編集済みのときは確認する。
+ARG（\\[universal-argument]）付きならスクロールバックまで取る（`--full')。"
+  (interactive "P")
+  (zellij-send--assert-session)
+  (when (and (buffer-modified-p)
+             (not (zerop (buffer-size)))
+             (not (yes-or-no-p
+                   "書きかけの内容は失われます。ペインの画面に戻しますか? ")))
+    (user-error "中止しました"))
+  ;; 取得の完了を待たずに解除する。`--user-cleared' が立ったままだと
+  ;; `--update-buffer' が書き込みを拒むため、コールバックが空振りする。
+  (set-buffer-modified-p nil)
+  (setq zellij-send--user-cleared nil)
+  (let ((buf (current-buffer)))
+    (zellij-send--dump-screen-async
+     zellij-send--session
+     (lambda (content)
+       (if content
+           (progn
+             (zellij-send--update-buffer content)
+             (when (buffer-live-p buf)
+               (with-current-buffer buf (goto-char (point-max))))
+             (message "ペインの画面に戻しました（自動更新を再開）"))
+         (message "スクリーン内容の取得に失敗しました（自動更新は再開しました）")))
+     arg)))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
@@ -2288,6 +2327,7 @@ UTF-8 のバイト列に分解してから送る。"
   [["表示"
     ("d" "ダッシュボード（セッション一覧）" zellij-send-open-dashboard)
     ("a" "会話の履歴を表示 (transcript)" zellij-send-show-response)
+    ("g" "いまの画面に戻す（自動更新を再開）" zellij-send-show-live)
     ("l" "出力ログを開く (markdown)" zellij-send-open-log)
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)]
    ["送信"

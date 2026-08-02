@@ -139,8 +139,8 @@ The buffer mirrors the pane, which means it shows one screenful — a TUI in the
 screen has no scrollback, so whatever scrolled past is gone as far as the terminal is
 concerned. To read the conversation from the beginning, open the menu with `C-c C-a` and
 press `a`: for Claude Code this replaces the buffer with the whole conversation, rebuilt
-from the transcript JSONL that Claude Code writes. Clear the buffer (`x`) or send
-something to go back to the live screen.
+from the transcript JSONL that Claude Code writes. Press `g` to go back to the pane as it
+is right now and resume the live stream.
 
 ## Key Bindings
 
@@ -164,6 +164,7 @@ Inside the `*ai-session-name*` buffer:
 |-----|---------------------------------------------------------------------------------|
 | `d` | Open the dashboard (all sessions at a glance)                                    |
 | `a` | Show the whole conversation (from the transcript; `C-u a` dumps the screen instead) |
+| `g` | Back to the live pane — refetch the screen and resume automatic updates          |
 | `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
 | `x` | Clear the buffer                                                                |
 
@@ -214,7 +215,15 @@ beginning: your messages, the assistant's prose, its thinking, every tool call a
 tool result, in order.
 
 The buffer is marked as cleared while the transcript is showing, so the live stream does
-not overwrite it. Press `x` (or just send something) to go back to the live screen.
+not overwrite it.
+
+### Back to the live pane (`C-c C-a` → `g`)
+
+`g` is the way back: it refetches the pane with `dump-screen` and resumes automatic
+updates. Use it after reading history with `a`, and equally after typing a draft you have
+decided not to send — editing the buffer also stops automatic updates, which is what makes
+the screen look frozen. `g` warns before discarding a non-empty draft. `C-u g` includes
+the scrollback (only meaningful for commands that are not full-screen TUIs).
 
 - Non-Claude commands, and `C-u a`, keep the old behaviour: dump the zellij screen.
 - The transcript is picked by most-recent modification time within the project
