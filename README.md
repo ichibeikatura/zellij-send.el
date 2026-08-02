@@ -15,6 +15,8 @@ back into the same buffer.
 
 ![The blackboard buffer](Screen01.png)
 
+The header line carries the session name and the keys you need.
+
 Nothing is attached to the session, so nothing has to stay open. The agent keeps
 working while you are somewhere else, and after an Emacs restart the dashboard picks
 the running sessions back up on its own. Run several at once and it tells you which
