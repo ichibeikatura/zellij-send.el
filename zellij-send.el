@@ -2394,6 +2394,7 @@ UTF-8 のバイト列に分解してから送る。"
     ("i" "中断 (Esc)"              zellij-send-interrupt)
     ("/" "スラッシュコマンド (/…)" zellij-send-slash-command)
     ("s" "作業を記録"              zellij-send-save-progress)
+    ("+" "エージェントを増やす（同じ場所にもう1体）" zellij-send-add-agent)
     ("q" "終了（セッション削除）"  zellij-send-quit)]])
 
 ;;; メジャーモード
@@ -2465,10 +2466,36 @@ UTF-8 のバイト列に分解してから送る。"
    (expand-file-name
     (read-directory-name "作業ディレクトリ: " default-directory))))
 
-(defun zellij-send--assert-session-unique (session known-sessions)
-  "SESSION が KNOWN-SESSIONS に含まれる場合 user-error を発する。"
-  (when (member session known-sessions)
-    (user-error "セッション「%s」はすでに存在します" session)))
+(defun zellij-send--session-base (session)
+  "SESSION 名から末尾 2 桁の連番を取り除いた基底名を返す。
+連番が無ければ SESSION をそのまま返す。
+桁数を 2 に固定しているのは `zellij-send--numbered-session-name' が
+必ず 2 桁で作るため。数字を貪欲に剥がすと `project200'（= project2 の
+1 体目）の基底名が `project' になってしまう。"
+  (if (string-match "\\`\\(.+\\)[0-9][0-9]\\'" session)
+      (match-string 1 session)
+    session))
+
+(defun zellij-send--numbered-session-name (base taken)
+  "BASE に 2 桁の連番を付け、TAKEN に無い最小の名前を返す。
+同じプロジェクトで複数のエージェントを立てるための命名
+\(`myproj00' / `myproj01' …)。1 体目から連番を付ける。"
+  (let ((n 0))
+    (while (member (format "%s%02d" base n) taken)
+      (setq n (1+ n)))
+    (format "%s%02d" base n)))
+
+(defun zellij-send--taken-session-names (&optional sessions)
+  "使用済みセッション名のリストを返す。
+SESSIONS（zellij から取った一覧）に加え、黒板バッファが握っている
+セッション名も含める。作成直後でまだ `list-sessions' に出ていない
+セッションと衝突しないようにするため。"
+  (delete-dups
+   (append (copy-sequence sessions)
+           (delq nil
+                 (mapcar (lambda (buf)
+                           (buffer-local-value 'zellij-send--session buf))
+                         (buffer-list))))))
 
 (defun zellij-send--setup-session-buffer (session dir)
   "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。
@@ -2591,49 +2618,77 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
        (message "セッション [%s] の拡幅%s" session
                 (if resized "が完了しました" "は行いませんでした"))))))
 
-(defun zellij-send--create-new-session (known-sessions)
-  "新規 detached zellij セッションを作成し claude ペインを起動する。
+(defun zellij-send--spawn-session (session dir)
+  "SESSION という名前の detached zellij セッションを DIR に作り、ペインを起動する。
 attach クライアント（eat）は使わない: `zellij attach --create-background' で
 セッションを作り、`zellij run' で `zellij-send-default-command' を起動して
 返る pane-id を保持し、以後 --pane-id 指定で送受信する。
-KNOWN-SESSIONS は重複チェック用のセッション名リスト。"
+黒板バッファは同期で用意して表示し、cwd・pane-id は後から埋まる。"
+  (let ((buf (zellij-send--setup-session-buffer session dir)))
+    (zellij-send--zellij-async
+     (list "attach" "--create-background" session)
+     (lambda (exit)
+       (if (not (zerop exit))
+           (message "zellij セッション作成に失敗しました (exit: %d)" exit)
+         ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
+         ;; あとから作るペインは拡幅後のサイズを継承する
+         (zellij-send--resize-session
+          session
+          (lambda (_resized)
+            ;; セッション初期化を待ってから claude ペインを起動
+            (run-with-timer
+             0.5 nil
+             (lambda ()
+               (zellij-send--run-in-session-async
+                session dir zellij-send-default-command
+                (lambda (pane-id)
+                  (if (not pane-id)
+                      (message "%s の起動に失敗しました"
+                               zellij-send-default-command)
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        (setq-local zellij-send--pane-id pane-id)
+                        (zellij-send--subscribe-ensure)))
+                    ;; `attach --create-background' が生むデフォルト shell ペイン
+                    ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
+                    ;; 致命的ではないので結果は無視する。
+                    (zellij-send--zellij-async
+                     (list "--session" session "action" "close-pane"
+                           "--pane-id" "terminal_0")
+                     #'ignore)
+                    (message "セッション [%s] を作成しました (%s)"
+                             session pane-id)))))))))))
+    buf))
+
+(defun zellij-send--create-new-session (known-sessions)
+  "作業ディレクトリを尋ね、新しい zellij セッションを作る。
+セッション名はディレクトリ名 + 2 桁の連番（`myproj00'）。
+KNOWN-SESSIONS は連番を決めるための既存セッション名リスト。"
   (let* ((dir (zellij-send--prompt-session-dir))
-         (session (file-name-nondirectory dir)))
-    (zellij-send--assert-session-unique session known-sessions)
-    (let ((buf (zellij-send--setup-session-buffer session dir)))
-      (zellij-send--zellij-async
-       (list "attach" "--create-background" session)
-       (lambda (exit)
-         (if (not (zerop exit))
-             (message "zellij セッション作成に失敗しました (exit: %d)" exit)
-           ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
-           ;; あとから作るペインは拡幅後のサイズを継承する
-           (zellij-send--resize-session
-            session
-            (lambda (_resized)
-             ;; セッション初期化を待ってから claude ペインを起動
-             (run-with-timer
-              0.5 nil
-              (lambda ()
-                (zellij-send--run-in-session-async
-               session dir zellij-send-default-command
-               (lambda (pane-id)
-                 (if (not pane-id)
-                     (message "%s の起動に失敗しました"
-                              zellij-send-default-command)
-                   (when (buffer-live-p buf)
-                     (with-current-buffer buf
-                       (setq-local zellij-send--pane-id pane-id)
-                       (zellij-send--subscribe-ensure)))
-                   ;; `attach --create-background' が生むデフォルト shell ペイン
-                   ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
-                   ;; 致命的ではないので結果は無視する。
-                   (zellij-send--zellij-async
-                    (list "--session" session "action" "close-pane"
-                          "--pane-id" "terminal_0")
-                    #'ignore)
-                   (message "セッション [%s] を作成しました (%s)"
-                            session pane-id))))))))))))))
+         (session (zellij-send--numbered-session-name
+                   (file-name-nondirectory dir)
+                   (zellij-send--taken-session-names known-sessions))))
+    (zellij-send--spawn-session session dir)))
+
+(defun zellij-send-add-agent ()
+  "同じディレクトリにもう 1 体エージェントを立ち上げる。
+いまの黒板バッファの作業ディレクトリと基底名を引き継ぎ、空いている
+連番（`myproj00' → `myproj01'）で新しい zellij セッションを作る。
+セッションは 1 体につき 1 つなので、送信・subscribe・`zellij-send-quit'
+はいずれも既存のまま各バッファ単位で効く。"
+  (interactive)
+  (zellij-send--assert-session)
+  (let ((base (zellij-send--session-base zellij-send--session))
+        (dir (directory-file-name (expand-file-name default-directory))))
+    (message "セッション一覧を取得中...")
+    (zellij-send--list-sessions-async
+     (lambda (sessions)
+       (if (eq sessions :timeout)
+           (message "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。")
+         (let ((session (zellij-send--numbered-session-name
+                         base (zellij-send--taken-session-names sessions))))
+           ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
+           (run-at-time 0 nil #'zellij-send--spawn-session session dir)))))))
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。

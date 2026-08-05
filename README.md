@@ -123,7 +123,7 @@ M-x zellij-send
 
 A list of running zellij sessions is shown. Selecting one opens the `*ai-session-name*` buffer.
 
-Select `[New]` to create a new zellij session. You will be prompted for a working directory; the directory name becomes the session name. A **detached** (background) zellij session is created, and the command configured in `zellij-send-default-command` (default: `claude`) is launched in a new pane. The pane id is remembered, so no terminal client needs to be attached — everything works in the background. To watch the session live, run `zellij attach SESSION` in any terminal.
+Select `[New]` to create a new zellij session. You will be prompted for a working directory; the session name is the **directory name plus a two-digit counter** (`myproj00`). Starting another agent in the same directory gives you `myproj01`, `myproj02`, … (`C-c C-a` → `+`; see "Adding agents" below). A **detached** (background) zellij session is created, and the command configured in `zellij-send-default-command` (default: `claude`) is launched in a new pane. The pane id is remembered, so no terminal client needs to be attached — everything works in the background. To watch the session live, run `zellij attach SESSION` in any terminal.
 
 For **existing** sessions (not created by this package), the pane id is unknown, so input is sent to the focused pane. This requires at least one attached client (e.g. your terminal); fully detached foreign sessions will not receive input.
 
@@ -185,7 +185,18 @@ Inside the `*ai-session-name*` buffer:
 | `i` | Interrupt what the AI is doing (sends Esc)                                     |
 | `/` | Pick a slash command from the minibuffer and send it (`/compact`, `/clear`, …) |
 | `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
+| `+` | Add another agent in the same directory                                        |
 | `q` | Delete session: remove the zellij session and close buffer (asks confirmation) |
+
+### Adding agents
+
+`C-c C-a` → `+` (`M-x zellij-send-add-agent`) starts another agent in the **same directory as the current buffer**. You are not asked for a working directory.
+
+The new session takes the current session's base name plus the lowest free counter (`myproj00` → `myproj01`). The counter looks at both the zellij session list and the open blackboard buffers, so it never collides with a session that was just created and has not shown up in the list yet. Gaps are filled in.
+
+**One zellij session per agent**, so sending, auto-receiving and `q` (quit) keep working per buffer as before — quitting one agent leaves the others alone. The dashboard (`d`) lists each of them on its own row.
+
+Known limitation: `a` (transcript view) locates the transcript by working directory, so with several agents in one directory it may pick the wrong one (it takes the most recently modified).
 
 ### Send history
 

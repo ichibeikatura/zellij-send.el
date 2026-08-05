@@ -507,6 +507,36 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   (let ((zellij-send-default-command "zsh")) (should-not (zellij-send--transcript-claude-p)))
   (let ((zellij-send-default-command "")) (should-not (zellij-send--transcript-claude-p))))
 
+;;; セッションの連番（同じプロジェクトで複数エージェント）
+
+(ert-deftest zellij-send-test-numbered-session-name ()
+  "1 体目から 2 桁の連番が付き、空いている最小の番号を使う。"
+  (should (equal (zellij-send--numbered-session-name "myproj" nil) "myproj00"))
+  (should (equal (zellij-send--numbered-session-name "myproj" '("myproj00"))
+                 "myproj01"))
+  ;; 途中が空いていればそこを埋める（01 を終了した後に増やす場合）
+  (should (equal (zellij-send--numbered-session-name
+                  "myproj" '("myproj00" "myproj02"))
+                 "myproj01"))
+  ;; 別プロジェクトの名前は邪魔しない
+  (should (equal (zellij-send--numbered-session-name "myproj" '("other00"))
+                 "myproj00"))
+  ;; 10 以上も 2 桁のまま
+  (should (equal (zellij-send--numbered-session-name
+                  "p" (mapcar (lambda (n) (format "p%02d" n)) (number-sequence 0 9)))
+                 "p10")))
+
+(ert-deftest zellij-send-test-session-base ()
+  "連番サフィックスだけを剥がす。剥がしすぎない。"
+  (should (equal (zellij-send--session-base "myproj00") "myproj"))
+  (should (equal (zellij-send--session-base "myproj12") "myproj"))
+  ;; 連番が付いていない従来のセッション名はそのまま
+  (should (equal (zellij-send--session-base "myproj") "myproj"))
+  ;; 基底名自体が数字で終わる場合、剥がすのは末尾 2 桁だけ
+  (should (equal (zellij-send--session-base "project200") "project2"))
+  ;; 1 桁しかなければ連番ではない
+  (should (equal (zellij-send--session-base "myproj1") "myproj1")))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

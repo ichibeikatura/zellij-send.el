@@ -506,7 +506,23 @@ TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X
 
 ## 新規セッション作成
 
-`zellij-send--create-new-session` のフロー（すべて非同期）:
+セッション名は**ディレクトリ名 + 2 桁の連番**（`myproj00`）。1 体目から番号を付ける。
+同じプロジェクトで複数エージェントを立てるためで、**エージェント 1 体 = zellij セッション 1 つ**。
+バッファ名がセッション名と 1 対 1 のまま（`*ai-myproj01*`）なので、履歴・subscribe・
+`zellij-send-quit`・ダッシュボードはどれも既存の仕組みのまま効く。
+
+- `zellij-send--numbered-session-name` が空いている最小の番号を選ぶ。候補の除外集合は
+  `zellij-send--taken-session-names`（`list-sessions` の結果 **＋ 開いている黒板バッファの
+  `zellij-send--session`**）。作成直後でまだ一覧に出ないセッションと衝突させないため
+- `zellij-send--session-base` は**末尾 2 桁だけ**を剥がす。数字を貪欲に剥がすと
+  `project200`（= `project2` の 1 体目）の基底名が `project` になる
+- 追加は `zellij-send-add-agent`（メニュー `+`）。いまのバッファの `default-directory` と
+  基底名を引き継ぐのでディレクトリを聞かない。`list-sessions` のコールバックは sentinel の
+  中なので、**`run-at-time 0` を挟んでから** `--spawn-session`（`switch-to-buffer` を含む）を呼ぶ
+- 実体の作成は `zellij-send--spawn-session`（セッション名と dir を受け取る）。
+  `zellij-send--create-new-session` はディレクトリを尋ねて名前を決めるだけの薄い層
+
+`zellij-send--spawn-session` のフロー（すべて非同期）:
 1. `zellij attach --create-background NAME` — detached セッション作成（tty 不要）
 2. `zellij-send--resize-session` — 一瞬 attach して 320×80 に広げる（下記）。
    **ペインを作る前**に行うこと。後から作るペインが拡幅後のサイズを継承する
