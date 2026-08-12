@@ -1856,11 +1856,30 @@ Claude Code が選択肢プロンプトの最下部に必ず出すヒント行�
   :type 'regexp
   :group 'zellij-send)
 
-(defcustom zellij-send-askq-auto t
-  "non-nil なら質問を検出した時点で回答 UI を自動で開く。
-nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。"
-  :type 'boolean
+(defcustom zellij-send-askq-auto 'keys
+  "質問を検出した時点で何を自動で開くか。
+
+- `keys'      … キー透過モード（`zellij-send-keys-mode'）に入る。
+                黒板には生画面がそのまま映っているので、説明文や事例を
+                読みながら数字キー・↑↓・RET で答えられる（既定）
+- `minibuffer' … ミニバッファの `completing-read' で選ばせる（旧挙動）。
+                ラベルしか出ないので、説明が要る質問には向かない
+- nil         … 何もしない
+
+nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。
+互換のため t は `minibuffer' として扱う。"
+  :type '(choice (const :tag "キー透過モード" keys)
+                 (const :tag "ミニバッファ" minibuffer)
+                 (const :tag "自動で開かない" nil))
   :group 'zellij-send)
+
+(defun zellij-send--askq-auto-method ()
+  "`zellij-send-askq-auto' を `keys' / `minibuffer' / nil に正規化する。
+旧設定の t は `minibuffer'（旧挙動）に読み替える。"
+  (pcase zellij-send-askq-auto
+    ('keys 'keys)
+    ('nil nil)
+    (_ 'minibuffer)))
 
 (defcustom zellij-send-askq-settle-delay 0.8
   "キーを送ってから画面を読み直すまでの待ち時間（秒）。"
@@ -1886,6 +1905,14 @@ nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。"
 
 (defvar-local zellij-send--askq-rounds 0
   "1 回の回答フローで質問を処理した回数。")
+
+;; キー透過モードは後ろのセクションで定義するので、ここでは前方宣言だけしておく
+(defvar zellij-send-keys-mode)
+
+(defvar-local zellij-send--askq-keys-auto nil
+  "質問の自動起動でキー透過モードに入ったなら non-nil。
+質問が画面から消えたときに自動で抜けるのはこの場合だけ。
+ユーザーが `C-c C-t' で自分で入れたモードは勝手に切らない。")
 
 (defcustom zellij-send-askq-max-rounds 12
   "1 回の回答フローで処理する質問の上限。
@@ -2263,17 +2290,39 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
     (with-current-buffer buf
       (unless zellij-send--askq-answering
         (when (zellij-send--askq-parse (buffer-string))
+          ;; 表示はするがウィンドウは選ばない（別バッファでの作業を邪魔しない）
           (display-buffer buf)
-          (call-interactively #'zellij-send-answer-question))))))
+          (pcase (zellij-send--askq-auto-method)
+            ('keys (zellij-send--askq-keys-enter))
+            ('minibuffer (call-interactively #'zellij-send-answer-question))))))))
+
+(defun zellij-send--askq-keys-enter ()
+  "質問が出たのでキー透過モードに入る。カレントバッファで呼ぶ。
+既に入っているなら何もしない（自動で入ったという印も付け替えない）。"
+  (unless zellij-send-keys-mode
+    (setq zellij-send--askq-keys-auto t)
+    (zellij-send-keys-mode 1)
+    (message "質問です。%s に移って数字 / ↑↓ / RET で答えてください（C-c C-t で解除）"
+             (buffer-name))))
+
+(defun zellij-send--askq-keys-exit ()
+  "質問が消えたので、自動で入ったキー透過モードだけ抜ける。"
+  (when (and zellij-send--askq-keys-auto zellij-send-keys-mode)
+    (zellij-send-keys-mode -1))
+  (setq zellij-send--askq-keys-auto nil))
 
 (defun zellij-send--askq-maybe-auto ()
-  "画面更新のたびに呼ばれ、質問が出た瞬間だけ回答 UI を開く。"
+  "画面更新のたびに呼ばれ、質問が出た瞬間だけ回答 UI を開く。
+質問が消えたときは、自動で入ったキー透過モードを元に戻す。"
   (let ((now (and (zellij-send--askq-parse (buffer-string)) t)))
-    (when (and now
-               (not zellij-send--askq-active)
-               zellij-send-askq-auto
-               (not zellij-send--askq-answering))
+    (cond
+     ((and now
+           (not zellij-send--askq-active)
+           (zellij-send--askq-auto-method)
+           (not zellij-send--askq-answering))
       (run-at-time 0 nil #'zellij-send--askq-auto-open (current-buffer)))
+     ((and (not now) zellij-send--askq-keys-auto)
+      (zellij-send--askq-keys-exit)))
     (setq zellij-send--askq-active now)))
 
 ;;; キー透過モード
@@ -2357,6 +2406,9 @@ UTF-8 のバイト列に分解してから送る。"
         (setq buffer-read-only t)
         (message "キー透過モード ON（↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t で解除）"))
     (setq buffer-read-only zellij-send--keys-saved-read-only)
+    ;; 手で抜けたら「自動で入った」印も落とす。次に自分で入れ直したモードを
+    ;; 質問が消えた拍子に勝手に切らないため
+    (setq zellij-send--askq-keys-auto nil)
     (message "キー透過モード OFF")))
 
 (defun zellij-send-keys-quit ()

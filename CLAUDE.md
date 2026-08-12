@@ -211,6 +211,24 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
   `zellij-send-askq-max-rounds`（既定 12）を超えたら無条件で中止。
   画面が毎回変わりながら空回りする不具合が実在したので、署名だけでは足りない
 
+#### 自動起動の既定はキー透過モード（2026-08-12）
+
+`zellij-send-askq-auto` は 3 値（`keys` / `minibuffer` / nil、既定 `keys`）。
+**t は `minibuffer` に読み替える**（`zellij-send--askq-auto-method` が正規化する）。
+ミニバッファ版は選択肢のラベルしか出せず、説明や事例が要る質問に答えられないため
+既定を替えた。キー透過モードなら黒板の生画面をそのまま読みながら数字キーで答えられる。
+
+- 入る/抜けるのは `--askq-keys-enter` / `--askq-keys-exit`。自動で入ったことは
+  `zellij-send--askq-keys-auto`（バッファローカル）で覚え、**質問が画面から消えたときに
+  自動で抜けるのはこの場合だけ**。ユーザーが `C-c C-t` で入れたモードは切らない。
+  手で抜けたらこのフラグも落とす（`zellij-send-keys-mode` の無効化側）
+- **ウィンドウは `display-buffer` するだけで選択しない**。選択待ちのたびに
+  フォーカスを奪わないため。キーを届けるにはユーザーが自分でそのウィンドウへ移る
+- キー透過モード中はバッファが read-only になるが、`--update-buffer` は
+  `with-silent-modifications`（= `inhibit-read-only`）で書くので**画面更新は止まらない**
+- `zellij-send-keys-mode` はファイルの後方で定義されるので、askq セクションの
+  頭に `(defvar zellij-send-keys-mode)` の前方宣言を置いてある（バイトコンパイル警告対策）
+
 ## スラッシュコマンド（調査済み・再調査不要）
 
 2026-07-29 に Claude Code v2.1.220 + zellij 0.44.3（320 桁の背景セッション）で

@@ -262,7 +262,9 @@ The blackboard buffer already mirrors the pane, so zellij-send reads the questio
 - **Other / free text** — choose `Type something`, type your answer in the minibuffer, and it is pasted into the field.
 - **Review screen** — you get a `y/n` prompt before anything is submitted; answering `n` cancels.
 
-By default the minibuffer opens on its own the moment a question appears (`zellij-send-askq-auto`). Set it to `nil` if you would rather trigger it yourself with `C-c C-q` (or `C-c C-a` → `u`). `C-g` backs out at any point and leaves the question untouched in the pane.
+By default (`zellij-send-askq-auto` = `keys`) a question does **not** open the minibuffer: the blackboard buffer is shown and [key passthrough mode](#key-passthrough-mode-c-c-c-t) turns itself on, so you can read the option descriptions and examples on screen and answer with the number keys (`↑↓` / `RET` work too). It turns itself back off once the question is gone — unless you had turned it on yourself, in which case it is left alone. The window is only displayed, never selected, so move to it before typing.
+
+Set it to `minibuffer` for the old behaviour (options offered in the minibuffer by label only), or to `nil` to trigger it yourself with `C-c C-q` (or `C-c C-a` → `u`). `C-g` backs out at any point and leaves the question untouched in the pane.
 
 ### Slash commands (`C-c C-s`)
 
@@ -469,7 +471,7 @@ Question answering (see [Answering questions](#answering-questions-askuserquesti
 
 | Option                            | Meaning                                                                    |
 |-----------------------------------|----------------------------------------------------------------------------|
-| `zellij-send-askq-auto`           | Open the minibuffer as soon as a question appears (default `t`)            |
+| `zellij-send-askq-auto`           | What a question opens: `keys` (key passthrough, default), `minibuffer`, `nil` |
 | `zellij-send-askq-settle-delay`   | Seconds to wait after a keypress before reading the screen (default `0.8`) |
 | `zellij-send-askq-max-rounds`     | Give up after this many questions in one run (default 12)                  |
 
