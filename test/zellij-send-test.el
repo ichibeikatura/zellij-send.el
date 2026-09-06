@@ -365,6 +365,104 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   ;; 別のコマンドのヒントを読み違えない（画面がまだ前の状態のとき）
   (should-not (zellij-send--slash-arg-hint " ↯ ─\n❯ /effort  [low|high]\n" "/model")))
 
+
+;;; スラッシュコマンドの引数（ヒントと候補メニュー）
+
+;; 2026-09-06 に Claude Code v2.1.263 + zellij 0.45.1 で実測した画面。
+;; コマンド一覧と同じ場所に出るが、行の先頭に `/' が付かない。
+
+(defconst zellij-send-test--slash-arg-menu "\
+⚠ 4 MCP servers need authentication · run /mcp
+  agentPushNotifEnabled=     true | false
+  artifacts=                 true | false
+  autoCompact=               true | false
+ ↯ ─
+❯ /config
+")
+
+(defconst zellij-send-test--slash-arg-menu-wrapped "\
+  42crunch-api-security-testing@claude-plugins-official     Automate API security directly in Claude Code with 42Crunch
+                                                            detect vulnerabilities aligned with OWASP API Security risks
+  activecampaign@claude-plugins-official                    Marketing automation, CRM, and email marketing
+ ↯ ─
+❯ /plugin install
+")
+
+(ert-deftest zellij-send-test-slash-arg-entries ()
+  "引数の候補メニューを画面の順のまま拾う。本文の行は拾わない。"
+  (let ((entries (zellij-send--slash-arg-entries
+                  zellij-send-test--slash-arg-menu)))
+    (should (equal (mapcar #'car entries)
+                   '("agentPushNotifEnabled=" "artifacts=" "autoCompact=")))
+    (should (equal (cdr (car entries)) "true | false"))))
+
+(ert-deftest zellij-send-test-slash-arg-entries-wrapped ()
+  "説明が折り返しても続き行を候補にしない。"
+  (should (equal (mapcar #'car (zellij-send--slash-arg-entries
+                                zellij-send-test--slash-arg-menu-wrapped))
+                 '("42crunch-api-security-testing@claude-plugins-official"
+                   "activecampaign@claude-plugins-official"))))
+
+(ert-deftest zellij-send-test-slash-arg-entries-not-commands ()
+  "コマンド一覧（`/name' 始まり）を引数の候補と読み違えない。"
+  (should-not (zellij-send--slash-arg-entries zellij-send-test--slash-menu))
+  (should-not (zellij-send--slash-arg-entries zellij-send-test--slash-idle)))
+
+(ert-deftest zellij-send-test-slash-hint-values ()
+  "ヒントから選択肢を取り出す。入れ子・複数グループの形も実在する。"
+  (should (equal (zellij-send--slash-hint-values
+                  "low|medium|high|xhigh|max|ultracode|auto")
+                 '("low" "medium" "high" "xhigh" "max" "ultracode" "auto")))
+  ;; `[codex|gemini] [--dry-run]' の中身。2 つ目のグループは候補にしない
+  (should (equal (zellij-send--slash-hint-values "codex|gemini] [--dry-run")
+                 '("codex" "gemini")))
+  ;; `<...>' は自由入力なので落とす
+  (should (equal (zellij-send--slash-hint-values "open|share|<description>")
+                 '("open" "share")))
+  (should (equal (zellij-send--slash-hint-values
+                  "reconnect <server>|enable|disable [<server>|all")
+                 '("reconnect" "enable" "disable" "all")))
+  ;; 1 つだけ残る形もある（`[auto|<tokens>]'）。候補に無い値も打てるので出す
+  (should (equal (zellij-send--slash-hint-values "auto|<tokens>") '("auto")))
+  ;; 選択肢ではないヒントからは候補を作らない
+  (should-not (zellij-send--slash-hint-values "model"))
+  (should-not (zellij-send--slash-hint-values "what to design")))
+
+(ert-deftest zellij-send-test-slash-hint-kind ()
+  "パスを求めるヒントは Emacs 側で補完する。"
+  (should (eq (zellij-send--slash-hint-kind "path") 'directory))
+  (should (eq (zellij-send--slash-hint-kind "dir") 'directory))
+  (should (eq (zellij-send--slash-hint-kind "filename") 'file))
+  (should-not (zellij-send--slash-hint-kind "model"))
+  (should-not (zellij-send--slash-hint-kind "low|medium|high")))
+
+(ert-deftest zellij-send-test-slash-arg-append ()
+  "候補はトークン全体で返るので、書きかけのトークンは置き換える。
+置き換えるかは画面から推測せず、打った側が覚えている（第 3 引数）。"
+  (should (equal (zellij-send--slash-arg-append "" "enable") "enable"))
+  (should (equal (zellij-send--slash-arg-append "enable" "myplugin")
+                 "enable myplugin"))
+  ;; `/config autoScroll=' の次の候補は `autoScroll=true'。足すと壊れる
+  (should (equal (zellij-send--slash-arg-append "autoScroll=" "autoScroll=true" t)
+                 "autoScroll=true"))
+  ;; 絞り込みに打った `air' に続けて選んだ候補も置き換える
+  (should (equal (zellij-send--slash-arg-append "install air" "airwallex@x" t)
+                 "install airwallex@x"))
+  ;; 確定したトークンの後ろは足す。候補が偶然そのトークンで始まっても同じ
+  (should (equal (zellij-send--slash-arg-append "install" "install-helper@x")
+                 "install install-helper@x")))
+
+(ert-deftest zellij-send-test-slash-probe-text ()
+  "続きを聞くために打つ文字列。書きかけのトークンには空白を足さない
+（空白を足すと絞り込みが解除されて別の候補が出る）。"
+  (should (equal (zellij-send--slash-probe-text "/config" "") "/config "))
+  (should (equal (zellij-send--slash-probe-text "/config" "autoScroll=")
+                 "/config autoScroll="))
+  (should (equal (zellij-send--slash-probe-text "/plugin" "install air" t)
+                 "/plugin install air"))
+  (should (equal (zellij-send--slash-probe-text "/plugin" "enable")
+                 "/plugin enable ")))
+
 ;;; transcript（Claude Code の会話履歴）
 
 (defconst zellij-send-test--transcript

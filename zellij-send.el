@@ -1077,6 +1077,15 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   :type 'integer
   :group 'zellij-send)
 
+(defcustom zellij-send-slash-arg-max-rounds 40
+  "引数の候補メニューを集めるときに ↓ を送る回数の上限。
+`/plugin install' のように候補が数百あるコマンドで延々とキーを送り続けない
+ための歯止め。ここで打ち切った一覧は「一部」として扱い、キャッシュしない
+（欠けた一覧を焼き付けると以後ずっと欠けたまま出る）。候補に無い値も
+そのまま打てるので、打ち切っても行き止まりにはならない。"
+  :type 'integer
+  :group 'zellij-send)
+
 (defcustom zellij-send-slash-prefetch t
   "non-nil なら、黒板バッファを開いた少し後に一覧を黙って取りに行く。
 初回の `zellij-send-slash-command' を待ち時間ゼロにするための先読み。
@@ -1121,6 +1130,36 @@ nil にする。"
   "ALIST をカレントバッファのディレクトリの一覧として覚える。"
   (puthash (zellij-send--slash-cache-key) alist zellij-send--slash-cache-table))
 
+(defvar zellij-send--slash-arg-cache-table (make-hash-table :test 'equal)
+  "引数の候補メニューのキャッシュ。
+キーは (ディレクトリ コマンド ここまでの引数)、値は ((候補 . 説明) ...)。
+`/plugin install' のように候補が数百あるものを毎回集め直さないため。
+**打ち切った（一部の）一覧は入れない**。`C-u' で捨てる。")
+
+(defun zellij-send--slash-arg-cache-key (name args open)
+  "NAME・ARGS（OPEN は末尾が書きかけか）の引数候補キャッシュのキーを返す。"
+  (list (zellij-send--slash-cache-key) name (string-trim (or args "")) (and open t)))
+
+(defun zellij-send--slash-arg-cached (name args open)
+  "NAME・ARGS の引数候補を覚えていれば返す。無ければ nil。"
+  (gethash (zellij-send--slash-arg-cache-key name args open)
+           zellij-send--slash-arg-cache-table))
+
+(defun zellij-send--slash-arg-cache-put (name args open entries)
+  "NAME・ARGS の引数候補として ENTRIES を覚える。"
+  (when entries
+    (puthash (zellij-send--slash-arg-cache-key name args open) entries
+             zellij-send--slash-arg-cache-table)))
+
+(defun zellij-send--slash-arg-cache-clear ()
+  "カレントバッファのディレクトリぶんの引数候補キャッシュを捨てる。
+`maphash' の最中に消すと動作が保証されないので、キーを集めてから消す。"
+  (let ((dir (zellij-send--slash-cache-key))
+        (keys nil))
+    (maphash (lambda (k _v) (when (equal (car k) dir) (push k keys)))
+             zellij-send--slash-arg-cache-table)
+    (dolist (k keys) (remhash k zellij-send--slash-arg-cache-table))))
+
 (defun zellij-send--slash-msg (format-string &rest args)
   "先読み中でなければ `message' する。先読みは黙って走らせる。"
   (unless zellij-send--slash-prefetching
@@ -1132,6 +1171,18 @@ nil にする。"
 (defconst zellij-send--slash-entry-regexp
   "\\`[[:space:]]+\\(/[A-Za-z0-9:_-]+\\)\\(?:[[:space:]]\\{2,\\}\\(.*\\)\\)?\\'"
   "補完メニューの 1 件に一致する正規表現。1=コマンド名 2=説明。")
+
+(defconst zellij-send--slash-arg-entry-regexp
+  "\\`[[:space:]]\\{1,6\\}\\([A-Za-z0-9._~][^[:space:]]\\{0,120\\}\\)\\(?:[[:space:]]\\{2,\\}\\(.*\\)\\)?\\'"
+  "引数の候補メニューの 1 件に一致する正規表現。1=候補 2=説明。
+コマンド一覧と同じ場所に出るが**先頭に `/' が付かない**
+（`autoScroll=' / `enable' / `Documents/'。2026-09-06 実測）。
+本文の行を拾わないよう、候補は空白を含まない 1 語に限り、
+`/' 始まり（＝コマンド一覧）と記号始まり（`⏺' などの本文の飾り）を除く。")
+
+(defconst zellij-send--slash-arg-max-visible 8
+  "1 画面から拾う引数候補の上限。
+メニューは実測 5 件までなので、これを超えたら本文を読み違えている。")
 
 (defconst zellij-send--slash-hint-regexp
   "\\`\\(/[A-Za-z0-9:_-]+\\)[[:space:]]+\\(?:\\[\\(.*\\)\\]\\|<\\(.*\\)>\\)\\'"
@@ -1166,9 +1217,10 @@ nil にする。"
          (or (string-empty-p text)
              (string-prefix-p "Try \"" text)))))
 
-(defun zellij-send--slash-menu-entries (screen)
-  "SCREEN の補完メニューから ((\"/name\" . \"説明\") ...) を上から順に返す。
-入力枠のすぐ上にある連続ブロックだけを読む。説明の折り返し行は読み飛ばす。"
+(defun zellij-send--slash-menu-block (screen regexp &optional limit)
+  "SCREEN の入力枠のすぐ上のメニューを REGEXP で読み、((値 . 説明) ...) を返す。
+LIMIT が non-nil ならその件数を読んだところでやめる。
+説明の折り返し行（深いインデントの続き行）は読み飛ばす。"
   (let* ((lines (split-string screen "\n"))
          (i (zellij-send--askq-last-index lines zellij-send--slash-input-regexp))
          (entries nil))
@@ -1184,16 +1236,28 @@ nil にする。"
         (while (and (>= j 0) (not stop))
           (let ((line (nth j lines)))
             (cond
-             ((string-match zellij-send--slash-entry-regexp line)
+             ((string-match regexp line)
               (push (cons (match-string 1 line)
                           (let ((desc (match-string 2 line)))
                             (and desc (string-trim desc))))
-                    entries))
+                    entries)
+              (when (and limit (>= (length entries) limit))
+                (setq stop t)))
              ;; 説明の折り返し（深いインデントの続き行）
              ((string-match-p "\\`[[:space:]]\\{8,\\}[^[:space:]]" line) nil)
              (t (setq stop t))))
           (setq j (1- j)))))
     entries))
+
+(defun zellij-send--slash-menu-entries (screen)
+  "SCREEN の補完メニューから ((\"/name\" . \"説明\") ...) を上から順に返す。"
+  (zellij-send--slash-menu-block screen zellij-send--slash-entry-regexp))
+
+(defun zellij-send--slash-arg-entries (screen)
+  "SCREEN の引数候補メニューから ((\"値\" . \"説明\") ...) を上から順に返す。
+コマンド一覧と同じ場所に出るが、行の形が違う（先頭に `/' が付かない）。"
+  (zellij-send--slash-menu-block screen zellij-send--slash-arg-entry-regexp
+                                 zellij-send--slash-arg-max-visible))
 
 (defun zellij-send--slash-arg-hint (screen name)
   "SCREEN の入力欄から NAME の引数ヒント（角括弧の中身）を返す。無ければ nil。"
@@ -1202,6 +1266,73 @@ nil にする。"
                (string-match zellij-send--slash-hint-regexp text)
                (equal (match-string 1 text) name))
       (or (match-string 2 text) (match-string 3 text)))))
+
+(defun zellij-send--slash-hint-kind (hint)
+  "HINT がパスを求めていれば `directory' か `file'、そうでなければ nil。
+`/add-dir  <path>' の類はペインに聞き返すより Emacs 側で補完した方が早い
+（ペインの候補は途中まで打たないと出てこない。2026-09-06 実測）。"
+  (let ((h (downcase (string-trim (or hint "")))))
+    (cond
+     ((member h '("path" "dir" "directory" "folder")) 'directory)
+     ((member h '("file" "filename" "filepath")) 'file))))
+
+(defun zellij-send--slash-hint-values (hint)
+  "HINT から選択肢のリストを返す。選択肢の形でなければ nil。
+
+`low|medium|high' のような素直な形だけではない。claude 本体の
+argumentHint を調べると `[codex|gemini] [--dry-run]' や
+`[reconnect <server>|enable|disable [<server>|all]]' のように
+グループが 2 つあったり入れ子になったりする。`|' で切ってから
+`<...>'（自由入力）と括弧の残骸を落とし、1 語で残ったものだけを候補にする。
+候補に無い値も打てる（require-match しない）ので、落としすぎても困らない。"
+  (when (and hint (string-match-p "|" hint))
+    (delete-dups
+     (delq nil
+           (mapcar
+            (lambda (piece)
+              ;; グループの閉じ括弧から後ろは別のグループ（`[codex|gemini]
+              ;; [--dry-run]' の `--dry-run'）なので切り落とす。残った
+              ;; `<...>'（自由入力）と括弧は消す
+              (let ((s (string-trim
+                        (replace-regexp-in-string
+                         "<[^>]*>\\|[[]" " "
+                         (car (split-string piece "]"))))))
+                (and (string-match-p
+                      "\\`[A-Za-z0-9][A-Za-z0-9._:@/=+-]*\\'" s)
+                     s)))
+            (split-string hint "|" t))))))
+
+(defun zellij-send--slash-arg-open-p (token)
+  "TOKEN が書きかけ（`=' `:' `/' で終わる）なら non-nil。
+`/config autoScroll=' まで打つと候補が `autoScroll=true' に変わる（実測）。
+この状態では空白を足さずに続きを聞き、候補はトークンごと置き換える。"
+  (and token (string-match-p "[=:/]\\'" token)))
+
+(defun zellij-send--slash-arg-append (args value &optional replace)
+  "引数文字列 ARGS に候補 VALUE を足した文字列を返す。
+REPLACE が non-nil なら足さずに末尾のトークンを置き換える。
+メニューの候補は**トークン全体**で返る（`autoScroll=' の次の候補は
+`autoScroll=true'、`air' まで打つと `airwallex-dev@…'）ので、書きかけの
+トークンに続けて選んだ候補は置き換えないと二重になる。
+置き換えるかどうかは画面から推測せず、**打った側が覚えておく**
+（プラグイン名が偶然そのトークンで始まることがあるため）。"
+  (let ((tokens (split-string (or args "") "[[:space:]]+" t)))
+    (string-join
+     (if (and replace tokens)
+         (append (butlast tokens) (list value))
+       (append tokens (list value)))
+     " ")))
+
+(defun zellij-send--slash-probe-text (name args &optional open)
+  "NAME の引数 ARGS の続きを聞くために入力欄へ打つ文字列を返す。
+OPEN（末尾のトークンが書きかけ）なら空白を足さずに聞く——その状態では
+メニューが打った文字で絞り込まれる。そうでなければ末尾に空白を足す
+——空白を打って初めて次の候補やヒントが出る。"
+  (let ((args (string-trim (or args ""))))
+    (cond
+     ((string-empty-p args) (concat name " "))
+     ((or open (zellij-send--slash-arg-open-p args)) (concat name " " args))
+     (t (concat name " " args " ")))))
 
 ;;;; ペインとのやりとり
 
@@ -1242,7 +1373,35 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
                             #'zellij-send--slash-wait
                             buf pred callback (1+ tries))))))))))
 
-;;;; 一覧の取得（↓ で送りながら読む）
+;;;; メニューの取得（↓ で送りながら読む）
+
+;; コマンド一覧と引数の候補は**同じ仕組み**で集める（2026-09-06 実測）。
+;; 出る場所（入力枠のすぐ上）もスクロールの癖（カーソルが最下段に着いてから
+;; 窓が 1 件ずつ動く・末尾で先頭へ折り返す）も同じで、違うのは行の形と、
+;; メニューを開くために打つ文字列だけ。その差は SPEC の plist に閉じ込める:
+;;
+;;   :input      メニューを開くために入力欄へ打つ文字列（"/" や "/config "）
+;;   :expect     集めている間、入力欄がこの文字列のままであること
+;;   :parse      画面から ((値 . 説明) ...) を読む関数
+;;   :max-rounds ↓ を送る回数の上限
+;;   :sort       名前順に並べ替えるか（コマンド一覧だけ）
+;;   :label      進捗メッセージに出す名前
+
+(defun zellij-send--slash-command-spec ()
+  "コマンド一覧を集めるための SPEC を返す。"
+  (list :input "/" :expect "/"
+        :parse #'zellij-send--slash-menu-entries
+        :max-rounds zellij-send-slash-max-rounds
+        :sort t
+        :label "スラッシュコマンド"))
+
+(defun zellij-send--slash-arg-spec (text)
+  "引数の候補を集めるための SPEC を返す。TEXT はメニューを開く入力文字列。"
+  (list :input text :expect (string-trim-right text)
+        :parse #'zellij-send--slash-arg-entries
+        :max-rounds zellij-send-slash-arg-max-rounds
+        :sort nil
+        :label "引数の候補"))
 
 (defun zellij-send--slash-collect (buf callback)
   "BUF のセッションのスラッシュコマンド一覧を集めて CALLBACK に渡す。
@@ -1254,24 +1413,27 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
          (progn (zellij-send--slash-msg
                  "ペインの入力欄が空ではありません。先にペインを片付けてください")
                 (funcall callback nil))
-       (with-current-buffer buf
-         (zellij-send--slash-write-chars
-          zellij-send--session "/"
-          (lambda (ok)
-            (if (not ok)
-                (funcall callback nil)
-              (zellij-send--slash-wait
-               buf #'zellij-send--slash-menu-entries
-               (lambda (menu)
-                 (if (null menu)
-                     (zellij-send--slash-collect-finish buf nil callback)
-                   (zellij-send--slash-scroll buf nil 0 0 nil nil callback))))))))))))
+       (let ((spec (zellij-send--slash-command-spec))
+             (done (lambda (result) (funcall callback (plist-get result :entries)))))
+         (with-current-buffer buf
+           (zellij-send--slash-write-chars
+            zellij-send--session (plist-get spec :input)
+            (lambda (ok)
+              (if (not ok)
+                  (funcall callback nil)
+                (zellij-send--slash-wait
+                 buf (plist-get spec :parse)
+                 (lambda (menu)
+                   (if (null menu)
+                       (zellij-send--slash-gather-finish buf spec nil nil done)
+                     (zellij-send--slash-scroll
+                      buf spec nil 0 0 nil nil done)))))))))))))
 
-(defun zellij-send--slash-scroll (buf found rounds dry pinned last callback)
-  "メニューを ↓ で送りながら一覧を集め、集め終わったら CALLBACK に渡す。
+(defun zellij-send--slash-scroll (buf spec found rounds dry pinned last callback)
+  "SPEC のメニューを ↓ で送りながら集め、集め終わったら CALLBACK に渡す。
 FOUND は見つかった順の alist、ROUNDS は送った回数、DRY は画面が
 進まなかった連続回数、PINNED はカーソルが最下段に着いているか、
-LAST は前回見えていた名前のリスト。
+LAST は前回見えていた値のリスト。
 
 守るべき点が 2 つある:
 
@@ -1284,13 +1446,18 @@ LAST は前回見えていた名前のリスト。
 DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶので最後の数件を
 取りこぼす**（実測で末尾の `/verify' が落ちた）。その分は
 `zellij-send--slash-tail' が ↑ の折り返しで拾う。"
-  (if (or (not (buffer-live-p buf)) (> rounds zellij-send-slash-max-rounds))
-      (zellij-send--slash-collect-finish buf found callback)
+  (cond
+   ((not (buffer-live-p buf))
+    (zellij-send--slash-gather-finish buf spec found nil callback))
+   ;; 回数を使い切った。集めた分は「一部」として返す（キャッシュには入れない）
+   ((> rounds (plist-get spec :max-rounds))
+    (zellij-send--slash-gather-finish buf spec found t callback))
+   (t
     (with-current-buffer buf
       (zellij-send--dump-screen-async
        zellij-send--session
        (lambda (screen)
-         (let* ((entries (and screen (zellij-send--slash-menu-entries screen)))
+         (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
                 (names (mapcar #'car entries))
                 (new (seq-remove (lambda (e) (assoc (car e) found)) entries))
                 (found (append found new))
@@ -1300,24 +1467,25 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                 (dry (if (or stalled (null new)) (1+ dry) 0))
                 (visible (length entries)))
            (cond
-            ;; 入力欄が `/' から変わった＝ユーザーがターミナル側で打ち始めた。
+            ;; 入力欄が変わった＝ユーザーがターミナル側で打ち始めた。
             ;; ここで Ctrl+U を送ると相手の入力を消すので、片付けずに手を引く
-            ((and screen (not (equal (zellij-send--slash-input-text screen) "/")))
+            ((and screen (not (equal (zellij-send--slash-input-text screen)
+                                     (plist-get spec :expect))))
              (zellij-send--slash-msg "ペインが操作されたので取得を中止しました")
              ;; 中途半端な一覧を覚えさせない。失敗として返す
              (funcall callback nil))
             ;; メニューが消えた（＝読み違えた）か、3 回続けて進まない
             ((or (null entries) (>= dry 3))
-             (zellij-send--slash-tail buf found names callback))
+             (zellij-send--slash-tail buf spec found names callback))
             (stalled
              ;; 描画待ち。送らずにもう一度読む
              (run-at-time zellij-send-slash-settle-delay nil
                           #'zellij-send--slash-scroll
-                          buf found (1+ rounds) dry pinned names callback))
+                          buf spec found (1+ rounds) dry pinned names callback))
             (t
              (when (zerop (mod rounds 8))
-               (zellij-send--slash-msg "スラッシュコマンドを取得中… %d 件"
-                                       (length found)))
+               (zellij-send--slash-msg "%sを取得中… %d 件"
+                                       (plist-get spec :label) (length found)))
              (zellij-send--send-keys
               zellij-send--session
               ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
@@ -1327,16 +1495,17 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                                 '(27 91 66)))
               (lambda (exit)
                 (if (not (zerop exit))
-                    (zellij-send--slash-tail buf found names callback)
+                    (zellij-send--slash-tail buf spec found names callback)
                   (run-at-time zellij-send-slash-settle-delay nil
                                #'zellij-send--slash-scroll
-                               buf found (1+ rounds) dry t names callback))))))))))))
+                               buf spec found (1+ rounds) dry t names
+                               callback)))))))))))))
 
-(defun zellij-send--slash-tail (buf found last callback)
-  "一覧の末尾を拾ってから `zellij-send--slash-collect-finish' へ渡す。
-LAST は直前に見えていた名前のリスト。
+(defun zellij-send--slash-tail (buf spec found last callback)
+  "一覧の末尾を拾ってから `zellij-send--slash-gather-finish' へ渡す。
+LAST は直前に見えていた値のリスト。
 
-`/' を打ち直して先頭に戻り、そこから **↑ を 1 回**送る。一覧は先頭で
+メニューを開き直して先頭に戻り、そこから **↑ を 1 回**送る。一覧は先頭で
 折り返すので、これで最後の 1 画面がそのまま出る（2026-07-29 実測）。
 ↓ で送る本編は折り返しをまたぐ回に窓が飛ぶため、末尾の数件がここでしか
 取れない。"
@@ -1344,111 +1513,264 @@ LAST は直前に見えていた名前のリスト。
    buf
    (lambda (_ok)
      (if (not (buffer-live-p buf))
-         (zellij-send--slash-collect-finish buf found callback)
+         (zellij-send--slash-gather-finish buf spec found nil callback)
        (with-current-buffer buf
          (zellij-send--slash-write-chars
-          zellij-send--session "/"
+          zellij-send--session (plist-get spec :input)
           (lambda (ok)
             (if (not ok)
-                (zellij-send--slash-collect-finish buf found callback)
+                (zellij-send--slash-gather-finish buf spec found nil callback)
               (zellij-send--slash-wait
-               buf #'zellij-send--slash-menu-entries
+               buf (plist-get spec :parse)
                (lambda (screen)
-                 (zellij-send--slash-tail-up buf found last screen callback)))))))))))
+                 (zellij-send--slash-tail-up buf spec found last screen
+                                             callback)))))))))))
 
-(defun zellij-send--slash-tail-up (buf found last screen callback)
+(defun zellij-send--slash-tail-up (buf spec found last screen callback)
   "先頭に戻った SCREEN から ↑ を 1 回送り、折り返した末尾の画面を読む。"
   (if (or (null screen) (not (buffer-live-p buf)))
-      (zellij-send--slash-collect-finish buf found callback)
-    (let ((top (mapcar #'car (zellij-send--slash-menu-entries screen))))
+      (zellij-send--slash-gather-finish buf spec found nil callback)
+    (let ((top (mapcar #'car (funcall (plist-get spec :parse) screen))))
       (with-current-buffer buf
         (zellij-send--send-keys
          zellij-send--session '(27 91 65)
          (lambda (exit)
            (if (not (zerop exit))
-               (zellij-send--slash-collect-finish buf found callback)
+               (zellij-send--slash-gather-finish buf spec found nil callback)
              (zellij-send--slash-wait
               buf
               (lambda (s)
-                (let ((names (mapcar #'car (zellij-send--slash-menu-entries s))))
+                (let ((names (mapcar #'car (funcall (plist-get spec :parse) s))))
                   ;; ↑ が効いた（＝画面が動いた）ことを確かめてから読む
                   (and names (not (equal names top)) (not (equal names last)))))
               (lambda (s)
-                (let* ((entries (and s (zellij-send--slash-menu-entries s)))
+                (let* ((entries (and s (funcall (plist-get spec :parse) s)))
                        (new (seq-remove (lambda (e) (assoc (car e) found)) entries)))
-                  (zellij-send--slash-collect-finish
-                   buf (append found new) callback)))))))))))
+                  (zellij-send--slash-gather-finish
+                   buf spec (append found new) nil callback)))))))))))
 
-(defun zellij-send--slash-collect-finish (buf found callback)
-  "入力欄を片付けてから、名前順に並べた FOUND を CALLBACK に渡す。"
+(defun zellij-send--slash-gather-finish (buf spec found truncated callback)
+  "入力欄を片付けてから、集めた FOUND を CALLBACK に渡す。
+CALLBACK に渡すのは plist (:entries ENTRIES :truncated TRUNCATED)。
+TRUNCATED が non-nil なら回数を使い切って打ち切った一覧。"
   (zellij-send--slash-clear-input
    buf
    (lambda (_ok)
      (funcall callback
-              (sort (copy-sequence found)
-                    (lambda (a b) (string< (car a) (car b))))))))
+              (list :entries (if (plist-get spec :sort)
+                                 (sort (copy-sequence found)
+                                       (lambda (a b) (string< (car a) (car b))))
+                               found)
+                    :truncated truncated)))))
 
-;;;; 引数のヒントを読む
+;;;; 引数を読む（ゴーストのヒントと、カーソルで選ぶ候補メニュー）
 
-(defun zellij-send--slash-probe-arg (buf name callback)
-  "NAME の引数ヒントをペインの入力欄から読んで CALLBACK に渡す。
-引数を取らないコマンドなら nil を渡す。読み終えたら入力欄は空に戻す。"
-  (if (not (buffer-live-p buf))
-      (funcall callback nil)
+;; `/name ' まで打ったときにペインが返すものは 2 通りある（2026-09-06 実測、
+;; Claude Code v2.1.263）。**同じ調査を繰り返さないこと。**
+;;
+;; (1) ゴーストの引数ヒント（入力欄の中に薄く出る）
+;;
+;;       ❯ /effort  [low|medium|high|xhigh|max|ultracode|auto]
+;;       ❯ /add-dir  <path>
+;;
+;; (2) 候補メニュー（コマンド一覧と同じ場所・同じ操作感。カーソルで選ぶ形）
+;;
+;;         autoScroll=                true | false      ← /config
+;;         enable          Enable an installed plugin   ← /plugin
+;;         cost-optimize                                ← /claude-api（説明なし）
+;;         Documents/     directory                     ← /add-dir ~/Doc
+;;
+;; - 出るのはどちらか片方。ヒントが出るコマンドにメニューは出ない
+;; - **ヒントは引数が空のときだけ出る**（`/name ' の空白が 1 つだけの状態）。
+;;   `/plugin enable ' のような深い段では出ないので、そこでは読みに行かない
+;; - **候補は入れ子になる**。`/plugin ' → `enable' → `/plugin enable ' →
+;;   プラグイン名、`/config ' → `autoScroll=' → `/config autoScroll=' →
+;;   `autoScroll=true'。だから 1 段で終わりにせず、選ぶたびに聞き直す
+;; - 候補は**トークン全体**で返る（`autoScroll=' の次は `autoScroll=true'）。
+;;   足すのではなく置き換えること（`zellij-send--slash-arg-append'）
+;; - メニューのスクロールはコマンド一覧と同じ。ただし `/plugin install' は
+;;   候補が数百あるので `zellij-send-slash-arg-max-rounds' で打ち切る
+;; - `<path>` のヒントはペインに聞かず Emacs 側で補完する。ペインの
+;;   ディレクトリ候補は途中まで打たないと出てこないため
+
+(defun zellij-send--slash-probe-arg (buf name args open callback)
+  "NAME の引数 ARGS の続きをペインに聞いて CALLBACK に渡す。
+CALLBACK に渡すのは plist:
+
+  (:hint HINT)                      ゴーストの引数ヒント（引数が空のときだけ）
+  (:values ENTRIES :truncated BOOL) カーソルで選ぶ候補メニュー
+  (:abort t)                        ペインを操作されたなどで取得を中止した
+  nil                               これ以上の引数は無い
+
+読み終えたら入力欄は空に戻す。"
+  (let ((cached (and (buffer-live-p buf)
+                     (with-current-buffer buf
+                       (zellij-send--slash-arg-cached name args open)))))
+    (cond
+     ((not (buffer-live-p buf)) (funcall callback nil))
+     (cached (funcall callback (list :values cached)))
+     (t
+      ;; 打つ前に入力欄が空であることを確かめる。ユーザーがターミナル側で
+      ;; 書きかけたテキストの後ろに打ち足すと、その入力を壊したうえに
+      ;; 画面も読み違える（実機で踏んだ）
+      (zellij-send--slash-wait
+       buf #'zellij-send--slash-idle-p
+       (lambda (idle)
+         (if (null idle)
+             (progn
+               (zellij-send--slash-msg
+                "ペインの入力欄が空ではありません。先にペインを片付けてください")
+               (funcall callback (list :abort t)))
+           (zellij-send--slash-probe-write buf name args open callback))))))))
+
+(defun zellij-send--slash-probe-write (buf name args open callback)
+  "NAME の引数 ARGS の続きを聞くための文字列を入力欄に打ち、画面を読む。"
+  (let ((text (zellij-send--slash-probe-text name args open)))
     (with-current-buffer buf
       (zellij-send--slash-write-chars
-       zellij-send--session (concat name " ")
+       zellij-send--session text
        (lambda (ok)
          (if (not ok)
              (funcall callback nil)
-           ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置いてから読む
+           ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
            (run-at-time
             zellij-send-slash-settle-delay nil
             (lambda ()
               (zellij-send--slash-wait
                buf
-               (lambda (s) (let ((text (zellij-send--slash-input-text s)))
-                             (and text (string-prefix-p name text))))
+               (lambda (s) (let ((it (zellij-send--slash-input-text s)))
+                             (and it (string-prefix-p name it))))
                (lambda (screen)
-                 (let ((hint (and screen (zellij-send--slash-arg-hint screen name))))
-                   (zellij-send--slash-clear-input
-                    buf (lambda (_ok) (funcall callback hint))))))))))))))
+                 (zellij-send--slash-probe-read
+                  buf name args open screen callback)))))))))))
+
+(defun zellij-send--slash-probe-read (buf name args open screen callback)
+  "SCREEN からヒントか候補メニューを読み、CALLBACK に渡す。
+メニューが出ていたら ↓ を送りながら全件集める。"
+  (let* ((empty (string-empty-p (string-trim (or args ""))))
+         (hint (and screen empty (zellij-send--slash-arg-hint screen name)))
+         (entries (and screen (null hint) (zellij-send--slash-arg-entries screen))))
+    (cond
+     (hint (zellij-send--slash-clear-input
+            buf (lambda (_ok) (funcall callback (list :hint hint)))))
+     (entries
+      (zellij-send--slash-scroll
+       buf (zellij-send--slash-arg-spec
+            (zellij-send--slash-probe-text name args open))
+       nil 0 0 nil nil
+       (lambda (result)
+         (if (null result)
+             (funcall callback (list :abort t))
+           (let ((values (plist-get result :entries))
+                 (truncated (plist-get result :truncated)))
+             (when (and values (not truncated) (buffer-live-p buf))
+               (with-current-buffer buf
+                 (zellij-send--slash-arg-cache-put name args open values)))
+             (funcall callback (list :values values :truncated truncated)))))))
+     (t (zellij-send--slash-clear-input
+         buf (lambda (_ok) (funcall callback nil)))))))
 
 ;;;; 入口
+
+(defconst zellij-send--slash-arg-max-depth 5
+  "引数を何段まで聞き直すか。
+`/plugin enable NAME' のように候補は入れ子になるので繰り返し聞くが、
+画面を読み違えて延々と聞き続けないための歯止め。")
+
+(defun zellij-send--slash-table (alist)
+  "ALIST（(値 . 説明)）を completing-read の補完表にする。
+説明は注釈で出し、並びは渡された順のまま（メニューの順に意味がある）。"
+  (lambda (str pred action)
+    (if (eq action 'metadata)
+        `(metadata
+          (annotation-function
+           . ,(lambda (cand)
+                (let ((desc (cdr (assoc cand alist))))
+                  (when desc
+                    (concat "  "
+                            (truncate-string-to-width desc 70 nil nil "…"))))))
+          (display-sort-function . identity))
+      (complete-with-action action alist str pred))))
 
 (defun zellij-send--slash-read (alist)
   "ALIST（(名前 . 説明)）から completing-read で 1 つ選ばせる。
 `/' を初期入力にしておくので、続けて英字を打つと絞り込める。
 一覧に無いコマンドも打てるように require-match しない。"
-  (let ((table
-         (lambda (str pred action)
-           (if (eq action 'metadata)
-               `(metadata
-                 (annotation-function
-                  . ,(lambda (cand)
-                       (let ((desc (cdr (assoc cand alist))))
-                         (when desc
-                           (concat "  "
-                                   (truncate-string-to-width desc 70 nil nil "…")))))))
-             (complete-with-action action alist str pred)))))
-    (completing-read "スラッシュコマンド: " table nil nil "/")))
+  (completing-read "スラッシュコマンド: " (zellij-send--slash-table alist)
+                   nil nil "/"))
 
-(defun zellij-send--slash-run (buf name hint)
-  "NAME に引数を付けてペインへ送る。HINT は入力欄に出ていた引数ヒント。
-HINT が `a|b|c' の形なら候補として選ばせ、それ以外は自由入力にする。"
+(defun zellij-send--slash-read-hint (name hint)
+  "ゴーストのヒント HINT に従って NAME の引数をミニバッファで尋ねる。
+パスを求めるヒントは Emacs 側でパス補完し、`a|b|c' の形は候補にする。"
+  (let ((kind (zellij-send--slash-hint-kind hint))
+        (values (zellij-send--slash-hint-values hint)))
+    (cond
+     ((eq kind 'directory)
+      (expand-file-name (read-directory-name (format "%s のディレクトリ: " name))))
+     ((eq kind 'file)
+      (expand-file-name (read-file-name (format "%s のファイル: " name))))
+     (values
+      (completing-read (format "%s の引数 [%s]（空で省略）: " name hint)
+                       values nil nil))
+     (t (read-string (format "%s の引数 [%s]（空で省略）: " name hint))))))
+
+(defun zellij-send--slash-read-value (name info)
+  "候補メニュー INFO から 1 つ選ばせる。空で確定したら nil を返す。
+返すのは (値 . 一覧にあったか)。一覧に無い値は**絞り込みの打ちかけ**として
+扱い、次にそれを打った状態で候補を出し直す——メニューは実測 12 件で
+頭打ちなので、数文字打って絞るのが唯一の手段になる。"
+  (let* ((entries (plist-get info :values))
+         (value (string-trim
+                 (completing-read
+                  (format "%s の引数%s（空で省略・数文字打つと絞り込み）: " name
+                          (if (plist-get info :truncated) "（候補は一部）" ""))
+                  (zellij-send--slash-table entries) nil nil))))
+    (unless (string-empty-p value)
+      (cons value (and (assoc value entries) t)))))
+
+(defun zellij-send--slash-submit (buf name args)
+  "NAME と ARGS を組み立ててペインへ送る。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let* ((arg (cond
-                   ((null hint) "")
-                   ((string-match-p "|" hint)
-                    (completing-read (format "%s の引数: " name)
-                                     (split-string hint "|" t "[[:space:]]+")
-                                     nil nil))
-                   (t (read-string (format "%s の引数 [%s]（空で省略）: " name hint)))))
-             (text (string-trim (concat name " " arg))))
+      (let ((text (string-trim (concat name " " (or args "")))))
         (zellij-send--send zellij-send--session text
                            (lambda (ok)
                              (when ok (message "送信しました: %s" text))))))))
+
+(defun zellij-send--slash-run (buf name args open depth info)
+  "NAME の引数を INFO に従って尋ね、決まったら送る。
+ARGS はここまでに決まった引数文字列、OPEN は末尾のトークンが書きかけか、
+DEPTH は何段目か。候補は入れ子になる（`/plugin' → `enable' → プラグイン名）
+ので、1 つ選ぶたびに次の段を聞き直す。"
+  (when (buffer-live-p buf)
+    (cond
+     ((plist-get info :abort)
+      (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
+     ((plist-get info :hint)
+      (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
+        (zellij-send--slash-submit
+         buf name (string-trim (concat args " " (or arg ""))))))
+     ((plist-get info :values)
+      (let ((choice (zellij-send--slash-read-value name info)))
+        (if (null choice)
+            (zellij-send--slash-submit buf name args)
+          (let* ((value (car choice))
+                 (listed (cdr choice))
+                 ;; 一覧から選んだ値は、それ自体が書きかけ（`autoScroll=' の
+                 ;; ような）でなければ 1 トークンぶんの確定。一覧に無い値は
+                 ;; 絞り込みの打ちかけとみなして、次はそれを打った状態で聞く
+                 (next-open (if listed (zellij-send--slash-arg-open-p value) t))
+                 (next (zellij-send--slash-arg-append args value open)))
+            (if (>= depth zellij-send--slash-arg-max-depth)
+                (zellij-send--slash-submit buf name next)
+              (message "%s %s の続きを確認中…" name next)
+              (zellij-send--slash-probe-arg
+               buf name next next-open
+               (lambda (result)
+                 ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）
+                 (run-at-time 0 nil #'zellij-send--slash-run
+                              buf name next next-open (1+ depth) result))))))))
+     (t (zellij-send--slash-submit buf name args)))))
 
 (defun zellij-send--slash-choose (buf)
   "BUF のキャッシュから選ばせ、引数を尋ねてから送る。"
@@ -1460,23 +1782,33 @@ HINT が `a|b|c' の形なら候補として選ばせ、それ以外は自由入
             (setq name (concat "/" name)))
           (message "%s の引数を確認中…" name)
           (zellij-send--slash-probe-arg
-           buf name
-           (lambda (hint)
+           buf name "" nil
+           (lambda (result)
              ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）
-             (run-at-time 0 nil #'zellij-send--slash-run buf name hint))))))))
+             (run-at-time 0 nil #'zellij-send--slash-run
+                          buf name "" nil 1 result))))))))
 
 (defun zellij-send-slash-command (&optional refresh)
   "Claude Code のスラッシュコマンドを選んで送る。
 コマンド一覧はペインの補完メニューから読み取り、作業ディレクトリごとに覚える
 （`zellij-send-slash-prefetch' が non-nil なら黒板バッファを開いた時点で
 先読みしてあるので、たいてい待ち時間は無い）。
-REFRESH（`\\[universal-argument]'）を付けると一覧を取り直す。
+REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数の候補を
+取り直す。
 
-一覧の取得はペインの入力欄を実際に打って行うので、入力欄が空でないときは
-何もしない。`/model' のように送信後に対話画面が出るコマンドは、
-そのままキー透過モード（\\[zellij-send-keys-mode]）で操作する。"
+コマンドを選ぶと引数も尋ねる。`/effort' のようにヒント（`[low|medium|…]'）
+が出るものは候補から選び、`<path>' はディレクトリ補完で選ぶ。`/config' や
+`/plugin' のようにペイン側でカーソルで選ぶ候補メニューが出るものは、
+その候補を集めてミニバッファで選ばせる（`/plugin enable NAME' のように
+入れ子になる場合は、選ぶたびに次の段を聞く）。
+
+一覧の取得も引数の確認もペインの入力欄を実際に打って行うので、入力欄が
+空でないときは何もしない。`/model' のように送信後に対話画面が出る
+コマンドは、そのままキー透過モード（\\[zellij-send-keys-mode]）で操作する。"
   (interactive "P")
   (zellij-send--assert-session)
+  (when refresh
+    (zellij-send--slash-arg-cache-clear))
   (let ((buf (current-buffer)))
     (if (and (zellij-send--slash-cached) (not refresh))
         (zellij-send--slash-choose buf)

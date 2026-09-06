@@ -281,21 +281,72 @@ Enter to select · Tab/Arrow keys to navigate · Esc to cancel
 zellij-send-slash-command
   ├─ --slash-collect      入力欄が空か確かめ、`/` を打ってメニューを開く
   │    └─ --slash-scroll  ↓ を送りながら読む（見えている件数から回数を決める）
-  │         └─ --slash-tail        `/` を打ち直し ↑ 1 回で末尾を拾う
-  │              └─ --slash-collect-finish  Ctrl+U で片付け、名前順で返す
+  │         └─ --slash-tail        メニューを開き直し ↑ 1 回で末尾を拾う
+  │              └─ --slash-gather-finish  Ctrl+U で片付けて返す
   ├─ --slash-choose       completing-read（初期入力 `/`、説明は注釈）
-  ├─ --slash-probe-arg    `/name ` を打って引数ヒントを読み、Ctrl+U で片付ける
-  └─ --slash-run          引数を尋ねて `zellij-send--send` で送る
+  ├─ --slash-probe-arg    入力欄が空か確かめ、`/name ` を打つ
+  │    └─ --slash-probe-read  ヒントか候補メニューかを見分ける
+  │         └─ --slash-scroll     メニューなら全件集める（同じ関数）
+  └─ --slash-run          引数を尋ね、候補なら次の段を聞き直して送る
 ```
 
+**メニューを集める経路はコマンド一覧と引数の候補で共有する**。出る場所も
+スクロールの癖も同じで、違うのは「打つ文字列」と「行の形」だけなので、
+その差は SPEC の plist（`--slash-command-spec` / `--slash-arg-spec`）に
+閉じ込めてある。`--slash-scroll` / `--slash-tail` / `--slash-gather-finish` は
+SPEC を受け取るだけで中身は 1 つ。
+
 - 純関数は `--slash-input-text` / `--slash-idle-p` / `--slash-menu-entries` /
-  `--slash-arg-hint`。zellij を呼ばないのでテストがある（`test/` の
+  `--slash-arg-entries` / `--slash-arg-hint` / `--slash-hint-values` /
+  `--slash-hint-kind` / `--slash-arg-append` / `--slash-probe-text`。
+  zellij を呼ばないのでテストがある（`test/` の
   `zellij-send-test-slash-*`）。画面を読む規則を変えるときはここを直す
 - **ミニバッファは必ず `run-at-time 0` を挟んでから開く**（`--slash-choose` /
   `--slash-run` の呼び出し）。sentinel の中で `completing-read` を開くと
   C-g が効かない。AskUserQuestion と同じ約束
-- 歯止めは `zellij-send-slash-max-rounds`（既定 200）と「3 回続けて進まなければ
+- 歯止めは `zellij-send-slash-max-rounds`（既定 200。引数の候補は
+  `zellij-send-slash-arg-max-rounds`、既定 40）と「3 回続けて進まなければ
   終了」の 2 段階。待ち時間は `zellij-send-slash-settle-delay`（既定 0.25 秒）
+
+### 引数の補完（調査済み・再調査不要）
+
+2026-09-06 に Claude Code v2.1.263 + zellij 0.45.1 で実測。
+`/name ` まで打ったときにペインが返すものは **2 通りしかない**。
+
+```
+❯ /effort  [low|medium|high|xhigh|max|ultracode|auto]   ← (1) ゴーストのヒント
+❯ /add-dir  <path>
+
+  autoScroll=                true | false               ← (2) 候補メニュー（/config）
+  enable          Enable an installed plugin            ←     （/plugin）
+  cost-optimize                                         ←     （/claude-api。説明なし）
+  Documents/     directory                              ←     （/add-dir ~/Doc）
+ ↯ ─
+❯ /config
+```
+
+- **出るのはどちらか片方**。ヒントが出るコマンドにメニューは出ない
+- **ヒントは引数が空のときだけ出る**（`/name ` の空白が 1 つだけの状態）。
+  `/plugin enable ` のような深い段では出ないので読みに行かない
+- 候補メニューは**コマンド一覧と同じ場所・同じ操作感**。行の形だけが違う
+  （先頭に `/` が付かない）。スクロールの癖（カーソルが最下段に着いてから
+  窓が 1 件ずつ動く・末尾で先頭へ折り返す）も同じ
+- **候補は入れ子になる**。`/plugin ` → `enable` → `/plugin enable ` →
+  プラグイン名。`/config ` → `autoScroll=` → `/config autoScroll=` →
+  `autoScroll=true`。1 段で終わりにせず、選ぶたびに聞き直すこと
+- **候補はトークン全体で返る**（`autoScroll=` の次は `autoScroll=true`）。
+  足すのではなく置き換える。**置き換えるかどうかを画面から推測してはいけない**
+  ——プラグイン名が偶然そのトークンで始まることがある。打った側が
+  「末尾は書きかけか（OPEN）」を覚えて `--slash-arg-append` に渡す
+- **メニューは一度に 12 件で頭打ち**（`/config` も `/plugin install` も 12 件で
+  先頭へ折り返した。数百あるプラグインも 12 件しか出ない）。絞り込みは
+  **打った文字**でしかできないので、候補に無い値を打ったら「絞り込みの
+  打ちかけ」として扱い、空白を足さずにもう一度聞く（`install` → `air` →
+  `airwallex-…`）
+- **`<path>` はペインに聞かない**。ディレクトリ候補は途中まで打たないと
+  出てこないので、Emacs 側の `read-directory-name` の方が速い
+- **打つ前に必ず入力欄が空か確かめる**（`--slash-idle-p`）。書きかけのテキストの
+  後ろに打ち足すと、相手の入力を壊したうえに画面も読み違える（実機で踏んだ）
 
 ### 先読みとキャッシュ
 
@@ -322,8 +373,13 @@ zellij-send-slash-command
 
 - **一覧は画面から拾う**。静的リストを持たない。Claude Code の更新・スキルの
   増減とずれないことを優先し、代わりに取得コスト（約 8 秒）はキャッシュで吸収する
-- **引数は選択後に一度だけ聞く**。ヒントが `a|b|c` なら補完候補、それ以外は
-  自由入力、ヒント無しなら聞かずに送る
+- **引数は決まるまで聞き直す**（2026-09-06 に変更）。ヒント型は 1 回で終わり
+  （`a|b|c` なら補完候補、`<path>` はディレクトリ補完、それ以外は自由入力）、
+  メニュー型は選ぶたびに次の段を聞く。歯止めは
+  `zellij-send--slash-arg-max-depth`（5 段）。ヒントも候補も無ければ聞かずに送る
+- **引数の候補は完全な一覧だけキャッシュする**（`--slash-arg-cache-table`。
+  キーは ディレクトリ＋コマンド＋ここまでの引数＋書きかけか）。打ち切った
+  一覧は入れない。`C-u` でコマンド一覧と一緒に捨てる
 - **対話画面が出るコマンドは送るところまで**。自動でキー透過モードに入ったりしない
   （`/clear` のように対話画面が出ないコマンドでも read-only になってしまうため）
 - **一覧は先読みする**（黒板バッファがペインに繋がった数秒後に一度）。

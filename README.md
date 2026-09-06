@@ -274,9 +274,18 @@ Every Claude Code slash command. This replaces the old `/compact` and `/clear` m
 entries — `M-x zellij-send-compact` and `M-x zellij-send-cc-clear` still exist, and the
 dashboard keeps its one-key `c` for `/compact`. The list is read
 from the pane's own completion menu — type `/` in the minibuffer, keep typing to narrow
-it down, `RET` to pick. Commands that take an argument (`/effort`, `/model`, `/add-dir`)
-ask for it right after: a fixed set of choices becomes completion candidates, anything
-else is free text. Commands that take none are sent as they are.
+it down, `RET` to pick.
+
+Commands that take an argument ask for it right after, and both of Claude Code's two
+argument styles are handled. A **ghost hint** (`/effort  [low|medium|high|…]`,
+`/add-dir  <path>`) becomes completion candidates for a fixed set of choices, Emacs
+directory completion for `<path>`, free text otherwise. A **candidate menu** — the kind
+you would pick with the cursor in the pane (`/config`, `/plugin`, `/claude-api`) — is
+read off the pane and offered in the minibuffer, one level at a time when the candidates
+nest (`/plugin` → `enable` → the plugin name; `/config` → `autoScroll=` →
+`autoScroll=true`). Claude Code only ever offers **12 candidates at a time**, so typing
+something that is not in the list narrows it and asks again (`install` → `air` →
+`airwallex-…`). Commands that take no argument are sent as they are.
 
 Reading the list takes a few seconds (102 commands here), so it is **prefetched in the
 background** a few seconds after the blackboard buffer connects — by the time you press
