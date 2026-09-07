@@ -987,10 +987,10 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
                             :status)))
     ;; `/remote-control' も、その後のメニュー解析（`❯' 行）も Claude Code の
     ;; 機能。他の CLI に打ち込むと本文として解釈される（astra の指摘）
-    (unless (with-current-buffer buf (zellij-send--claude-p))
+    (unless (with-current-buffer buf (zellij-send--claude-confirmed-p))
       (user-error "Remote Control は Claude Code 専用です（[%s] は %s）"
                   session
-                  (or (with-current-buffer buf (zellij-send--buffer-command))
+                  (or (with-current-buffer buf (zellij-send--agent-name))
                       "コマンド不明")))
     (unless (eq status 'idle)
       (user-error "[%s] は待機中ではありません。作業が終わってから実行してください"

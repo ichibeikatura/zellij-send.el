@@ -632,6 +632,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       ;; 対応が判らない CLI には送らない
       (setq-local zellij-send--command "/bin/zsh")
       (should-not (zellij-send--slash-supported-p "/compact"))
+      ;; コマンド不明でも既定値（claude）で代用しない
+      (setq-local zellij-send--command nil)
+      (should-not (zellij-send--slash-supported-p "/compact"))
       ;; 表に無いコマンドはどのエージェントでも送らない
       (setq-local zellij-send--command "claude")
       (should-not (zellij-send--slash-supported-p "/doctor")))))
@@ -781,19 +784,22 @@ codex の `Select Model and Effort' は `› 1. gpt-6-astra (current)' の形
     (insert "画面には ❯ 1. りんご のように出ます\n")
     (should-not (zellij-send--detect-prompt))))
 
-(ert-deftest zellij-send-test-prefetch-allowed-p ()
-  "先読みはコマンドが確定している claude のときだけ許す。
+(ert-deftest zellij-send-test-claude-confirmed-p ()
+  "ペインに打ち込む機能は、コマンドが確定している claude のときだけ許す。
 `zellij-send--command' が nil のときに既定値で代用すると、
 codex のペインに `/' を打ち込む。"
   (with-temp-buffer
     (let ((zellij-send-default-command "claude"))
-      ;; コマンド不明: `--claude-p' は t でも先読みはしない
+      ;; コマンド不明: 読むだけの `--claude-p' は t でも、打ち込む方は不可
       (should (zellij-send--claude-p))
-      (should-not (zellij-send--prefetch-allowed-p))
+      (should-not (zellij-send--agent-name))
+      (should-not (zellij-send--claude-confirmed-p))
+      (should-not (zellij-send--slash-supported-p "/compact"))
       (setq-local zellij-send--command "claude")
-      (should (zellij-send--prefetch-allowed-p))
+      (should (zellij-send--claude-confirmed-p))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
-      (should-not (zellij-send--prefetch-allowed-p)))))
+      (should (equal (zellij-send--agent-name) "codex"))
+      (should-not (zellij-send--claude-confirmed-p)))))
 
 ;;; セッションの連番（同じプロジェクトで複数エージェント）
 

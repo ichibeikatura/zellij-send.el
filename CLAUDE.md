@@ -422,11 +422,18 @@ zellij-send--command        ← このバッファのペインで動いている
   claude 以外のペインに `/` を打ち込んでしまう。経路は 3 つあり
   （`zellij-send-attach-session-async` / `--spawn-session` /
   `--subscribe-ensure` の pane-id 不明時）、**どれもこの順序を守ること**
-- **先読みだけは `--claude-p` ではなく `--prefetch-allowed-p` で守る**。
-  前者はコマンド不明時に既定値（普通は claude）で代用するので、
-  「不明 = claude」になって codex のペインに `/` を打つ。ユーザーが自分で
-  呼ぶ `zellij-send-slash-command` と違い先読みは黙って走るため、
-  **コマンドが確定しているときだけ**許す
+- **判定は 2 つある。読むだけか、打ち込むかで使い分ける**
+  - `--claude-p`（`--buffer-command` 経由）はコマンド不明時に
+    `zellij-send-default-command` で代用する。transcript 表示・出力ログ・
+    ヘッダ表示など、外しても実害の無い**読むだけ**の機能に使う
+  - `--claude-confirmed-p`（`--agent-name` 経由）は代用しない。
+    **ペインに打ち込む機能はすべてこちら**——スラッシュコマンドの補完と
+    先読み、AskUserQuestion の操作と自動起動、数字での回答、
+    Remote Control、`/compact` `/clear`。代用すると「不明 = claude」で
+    codex の入力欄に打ち込む
+- **pane-id を替えるときはコマンドを nil でも代入する**。`(when command …)`
+  にすると検出に失敗したときに前のペインのコマンドが残り、別の CLI を
+  claude だと思い込む（astra のレビューで指摘）
 - **ペインは TITLE ではなく COMMAND 列で選ぶ**（`--parse-terminal-panes` →
   `--pick-pane`）。`list-panes --all` を 1 回だけ叩いて pane-id と
   コマンドを同時に決める。生きているペインを優先し、全部 EXITED なら

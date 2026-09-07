@@ -256,7 +256,7 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 
 インタプリタに限るのは、全トークンを無条件に見ると `cat /tmp/claude' の
 ような引数まで拾って claude と判定してしまうため。この判定は
-先読みの許可条件（`zellij-send--prefetch-allowed-p'）に使うので、
+打ち込む機能の許可条件（`zellij-send--claude-confirmed-p'）に使うので、
 **誤って claude と読む方が危険**。"
   (let* ((names (mapcar #'file-name-nondirectory
                         (split-string (or command "") nil t)))
@@ -278,19 +278,31 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 Claude Code の画面・transcript に依存する機能はこれで分岐する。
 
 コマンドが判らないときは `zellij-send-default-command'（普通は claude）で
-代用する——読むだけの機能なら外しても実害が無いため。**ペインに打ち込む
-機能では代用してはいけない**（`zellij-send--prefetch-allowed-p' 参照）。"
+代用する——読むだけの機能（transcript 表示・出力ログ・ヘッダ表示）なら
+外しても実害が無いため。**ペインに打ち込む機能では代用してはいけない**。
+そちらは `zellij-send--claude-confirmed-p' を使う。"
   (let ((name (zellij-send--buffer-command)))
     (and name (string-prefix-p "claude" name))))
 
-(defun zellij-send--prefetch-allowed-p ()
-  "スラッシュコマンドの先読み（ペインの入力欄に `/' を打つ）をしてよければ non-nil。
+(defun zellij-send--agent-name ()
+  "**確定している**エージェント名を返す。判っていなければ nil。
+`zellij-send--buffer-command' と違い `zellij-send-default-command' で
+代用しない。"
+  (and zellij-send--command (zellij-send--command-name zellij-send--command)))
 
-**コマンドが確定していないセッションでは打たない。** `zellij-send--command'
-が nil のときに既定値（普通は claude）で代用すると、codex のペインに `/' を
-打ち込む。ユーザーが自分で呼ぶ `zellij-send-slash-command' と違って
-先読みは黙って走るので、間違えたときに気づけない。"
-  (and zellij-send--command (zellij-send--claude-p)))
+(defun zellij-send--claude-confirmed-p ()
+  "Claude Code だと**確定している**なら non-nil。
+
+**ペインに打ち込む機能はすべてこれで守る**——スラッシュコマンドの補完と
+先読み、AskUserQuestion の操作、数字での回答、Remote Control、
+`/compact' `/clear'。`zellij-send--claude-p' は既定値（普通は claude）で
+代用するので、コマンドを特定できなかったセッションを claude と誤認して
+別の CLI の入力欄に打ち込む（astra のレビューで指摘）。
+
+読むだけの機能（transcript 表示・出力ログ・ヘッダ表示）は
+`zellij-send--claude-p' の推測でよい。外しても実害が無いため。"
+  (let ((name (zellij-send--agent-name)))
+    (and name (string-prefix-p "claude" name))))
 
 ;;; セッション一覧の取得
 
@@ -879,7 +891,10 @@ pane-id が取れれば attach クライアント無しでも送信できる。
           (when (and pane-id (buffer-live-p buf))
             (with-current-buffer buf
               (setq-local zellij-send--pane-id pane-id)
-              (when command (setq-local zellij-send--command command))
+              ;; **nil でも代入する**。`when command' にすると、検出に
+              ;; 失敗したときに前のペインのコマンドが残り、別の CLI を
+              ;; claude だと思い込む（astra のレビューで指摘）
+              (setq-local zellij-send--command command)
               (zellij-send--subscribe-ensure)))
           (when callback (funcall callback buf))))))))
 
@@ -1176,8 +1191,9 @@ claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
                (setq-local zellij-send--pane-id pane-id)
                ;; `--subscribe-start' が先読みを呼ぶので、ここでも
                ;; コマンドを先に入れる。入れ忘れると codex のペインに
-               ;; `/' を打ち込む（`zellij-send--prefetch-allowed-p' 参照）
-               (when command (setq-local zellij-send--command command))
+               ;; `/' を打ち込む（`zellij-send--claude-confirmed-p' 参照）。
+               ;; pane-id を替えるときは **nil でも代入する**
+               (setq-local zellij-send--command command)
                (zellij-send--subscribe-start)))))))))
 
 ;;; Claude Code コマンド
@@ -1202,8 +1218,9 @@ claude と codex はどちらも `/compact' と `/clear' を持つ（codex は�
   :group 'zellij-send)
 
 (defun zellij-send--slash-supported-p (command)
-  "このバッファのエージェントが COMMAND（例: \"/compact\"）を持てば non-nil。"
-  (let ((name (zellij-send--buffer-command)))
+  "このバッファのエージェントが COMMAND（例: \"/compact\"）を持てば non-nil。
+コマンドが確定していないセッションでは nil（既定値で代用しない）。"
+  (let ((name (zellij-send--agent-name)))
     (and name (member name (alist-get command zellij-send-slash-support-alist
                                       nil nil #'equal))
          t)))
@@ -1216,7 +1233,7 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
   (zellij-send--assert-session)
   (unless (zellij-send--slash-supported-p command)
     (user-error "%s に対応しているか判らないので送りません（%s）。本文として送るなら C-c C-c を使ってください"
-                command (or (zellij-send--buffer-command) "コマンド不明")))
+                command (or (zellij-send--agent-name) "コマンド不明")))
   (zellij-send--send zellij-send--session command
                      (lambda (ok) (when ok (message "%s" done-message)))))
 
@@ -2062,9 +2079,9 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
 本文として送るか（C-c C-c）、キー透過モードで直接打つ。"
   (interactive "P")
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--claude-confirmed-p)
     (user-error "スラッシュコマンドの補完は Claude Code 専用です（%s）。本文として送るか C-c C-t のキー透過モードを使ってください"
-                (or (zellij-send--buffer-command) "?")))
+                (or (zellij-send--agent-name) "コマンド不明")))
   (when refresh
     (zellij-send--slash-arg-cache-clear))
   (let ((buf (current-buffer)))
@@ -2090,7 +2107,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
 初回の `zellij-send-slash-command' を待たせないための先読み。"
   (when (and zellij-send-slash-prefetch
              zellij-send--session
-             (zellij-send--prefetch-allowed-p)
+             (zellij-send--claude-confirmed-p)
              (null (zellij-send--slash-cached))
              (not zellij-send--slash-prefetching))
     (run-at-time zellij-send-slash-prefetch-delay nil
@@ -2105,7 +2122,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
       (when (and zellij-send-slash-prefetch
                  zellij-send--session
                  zellij-send--pane-id
-                 (zellij-send--prefetch-allowed-p)
+                 (zellij-send--claude-confirmed-p)
                  (null (zellij-send--slash-cached))
                  (not zellij-send--slash-prefetching)
                  (<= try zellij-send-slash-prefetch-retries))
@@ -2365,9 +2382,9 @@ codex の承認ダイアログは **数字キーを受け付けず Enter で確�
 
 他のエージェントではキー透過モード（\\[zellij-send-keys-mode]）の
 ↑↓ と RET で選ぶ。あれは画面を解釈せず生のキーを送るので確実。"
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--claude-confirmed-p)
     (user-error "数字での回答は Claude Code 専用です（%s）。C-c C-t のキー透過モードで ↑↓ と RET を使ってください"
-                (or (zellij-send--buffer-command) "コマンド不明"))))
+                (or (zellij-send--agent-name) "コマンド不明"))))
 
 (defun zellij-send-reply-number ()
   "数字を入力して zellij セッションに送信する。
@@ -2879,9 +2896,9 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 （\\[zellij-send-keys-mode]）を使う。"
   (interactive)
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--claude-confirmed-p)
     (user-error "AskUserQuestion の解析は Claude Code 専用です（%s）。C-c C-t のキー透過モードを使ってください"
-                (or (zellij-send--buffer-command) "?")))
+                (or (zellij-send--agent-name) "コマンド不明")))
   (let ((q (zellij-send--askq-parse (buffer-string))))
     (unless q
       (user-error "画面に選択肢プロンプトが見つかりません"))
@@ -2930,7 +2947,9 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 読むので、他のコマンド（codex など）のときは何もしない。そちらの選択肢は
 キー透過モード（\\[zellij-send-keys-mode]）で操作する——あれは画面を
 解釈しないのでどの TUI にも効く。"
-  (let ((now (and (zellij-send--claude-p)
+  ;; 自動起動は数字キーの送信やキー透過モードへの切り替えを伴うので、
+  ;; 推測ではなく**確定したコマンド**で判断する
+  (let ((now (and (zellij-send--claude-confirmed-p)
                   (zellij-send--askq-parse (buffer-string)) t)))
     (cond
      ((and now
