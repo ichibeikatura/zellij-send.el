@@ -761,20 +761,28 @@ codex のペインのタイトルがセッション名になっていた。実�
 
 ;;; 選択肢プロンプトの検出（claude の ❯ と codex の ›）
 
+(defun zellij-send-test--prompt-p (marker &optional command)
+  "MARKER を使った選択肢行を COMMAND のバッファで検出できるか返す。"
+  (with-temp-buffer
+    (setq-local zellij-send--command command)
+    (insert "好きな果物はどれですか？\n"
+            "  " marker " 1. りんご\n"
+            "    2. みかん\n")
+    (and (zellij-send--detect-prompt) t)))
+
 (ert-deftest zellij-send-test-detect-prompt ()
-  "`❯ 1.' と `› 1.' の両方を選択肢プロンプトとして拾う。
+  "`❯ 1.' と `› 1.' はどのエージェントでも拾う。
 3 つの CLI で行の形は同じで記号だけが違う（すべて実測）:
 claude `❯ 1. りんご' / codex `› 1. gpt-6-astra (current)' /
 agy `> 1. Yes'（コマンド実行の許可ダイアログ）。"
-  (dolist (marker '("❯" "›" ">"))
-    (with-temp-buffer
-      (insert "好きな果物はどれですか？\n"
-              "  " marker " 1. りんご\n"
-              "    2. みかん\n")
-      (should (zellij-send--detect-prompt))
-      ;; ハイライトの正規表現も同じ行に当たる
-      (goto-char (point-min))
-      (should (re-search-forward (zellij-send--prompt-regexp t) nil t))))
+  (dolist (marker '("❯" "›"))
+    (should (zellij-send-test--prompt-p marker "claude"))
+    (should (zellij-send-test--prompt-p marker "agy")))
+  ;; ハイライトの正規表現も同じ行に当たる
+  (with-temp-buffer
+    (insert "  ❯ 1. りんご\n")
+    (goto-char (point-min))
+    (should (re-search-forward (zellij-send--prompt-regexp t) nil t)))
   ;; 10 番以降も拾う
   (with-temp-buffer
     (insert "  ❯ 12. じゅうにばんめ\n")
@@ -789,6 +797,25 @@ agy `> 1. Yes'（コマンド実行の許可ダイアログ）。"
   ;; 行頭に限定する。本文中に引用された選択肢は拾わない（astra の指摘）
   (with-temp-buffer
     (insert "画面には ❯ 1. りんご のように出ます\n")
+    (should-not (zellij-send--detect-prompt))))
+
+(ert-deftest zellij-send-test-detect-prompt-ascii-marker ()
+  "ASCII の `>' は agy のバッファでだけ選択肢とみなす。
+
+agy の許可ダイアログは `> 1. Yes' なので `>' が要るが、全 CLI で
+有効にすると本文中の markdown 引用（`> 1. …'）を誤検出する。
+誤検出は表示だけの問題ではない——ダッシュボードの数字キーは
+`zellij-send--detect-prompt' を許可条件にしているので、選択のつもりの
+数字がただの入力としてペインに届く（astra のレビューで指摘）。"
+  (should (zellij-send-test--prompt-p ">" "agy"))
+  (should-not (zellij-send-test--prompt-p ">" "claude"))
+  (should-not (zellij-send-test--prompt-p ">" "node /opt/homebrew/bin/codex"))
+  ;; コマンド不明のバッファでも `>' は拾わない
+  (should-not (zellij-send-test--prompt-p ">" nil))
+  ;; markdown 引用が claude の画面に出ても誤検出しない
+  (with-temp-buffer
+    (setq-local zellij-send--command "claude")
+    (insert "> 1. まず依存を入れる\n> 2. 次にビルドする\n")
     (should-not (zellij-send--detect-prompt))))
 
 (ert-deftest zellij-send-test-number-reply ()

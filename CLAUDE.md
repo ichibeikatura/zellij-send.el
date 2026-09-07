@@ -482,9 +482,12 @@ claude のログ）。**「claude 専用」ではなく対応表で持つもの*
   attach --create-background → 320×80 に拡幅 → `zellij run` →
   pane-id 取得（`terminal_1`）→ `--command` に `agy` を保存、まで確認
 - **許可ダイアログは `> 1. Yes` の形**（記号が ASCII の `>`）。
-  行の形は claude / codex と同じなので
-  `zellij-send-prompt-marker-regexp` を `[❯›>]` にして拾う。
-  ただし**信頼確認の画面だけは番号が無い**（`> Yes, I trust this folder` /
+  行の形は claude / codex と同じ。ただし **ASCII の `>` は
+  `zellij-send-prompt-marker-alist` で agy のバッファにだけ効かせる**
+  （全 CLI で有効にすると本文中の markdown 引用 `> 1. …` を誤検出し、
+  ダッシュボードの数字キーが「選択のつもりの入力」を送ってしまう。
+  astra のレビューで指摘）。agy 内での誤検出は残る、という限界つき。
+  また**信頼確認の画面だけは番号が無い**（`> Yes, I trust this folder` /
   `No, exit`）ので検出できない。そこはキー透過モードで操作する
 - **数字キーが直接効き、`paste` + CR の数字でも確定する**（両方実測）。
   だから `zellij-send-number-reply-commands` に入れてある
@@ -501,8 +504,12 @@ claude のログ）。**「claude 専用」ではなく対応表で持つもの*
 - 補完メニューは **5 件 + `↓ 41 more`** の形で残り件数を自分で出す
   （claude の 4 行固定より読みやすい）。全 46 件。ヒント行は
   `↑/↓ Navigate · enter Select · tab Complete`
-- **プロジェクトごとの指示ファイルは `GEMINI.md`**（本人の回答。
-  `AGENTS.md` と `.gemini/rules/*.md` も読むとのこと）
+- **プロジェクトごとの指示ファイルは `GEMINI.md`**。**実機で確認済み**:
+  合言葉を書いた `GEMINI.md` を置いた使い捨てディレクトリで agy を起動し、
+  「規約ファイルを読んだか」と聞いてその合言葉が返ることを確認した。
+  `AGENTS.md` と `.gemini/rules/*.md` も読むというのは本人の申告のみ。
+  **agy の自己申告は当てにならない**（`/compact` の件）ので、
+  対応表に足すときは必ず実機で確かめること
 - 入力欄の記号は `>` 単独。ダッシュボードの「状況」列から外すため
   ノイズ条件の記号にも `>` を足してある
 

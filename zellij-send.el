@@ -68,8 +68,8 @@
   :type '(repeat string)
   :group 'zellij-send)
 
-(defcustom zellij-send-prompt-marker-regexp "[❯›>]"
-  "選択肢プロンプトのカーソル記号にマッチする正規表現。
+(defcustom zellij-send-prompt-marker-regexp "[❯›]"
+  "選択肢プロンプトのカーソル記号にマッチする正規表現（既定値）。
 
 3 つの CLI で**行の形は同じ**（記号 + 空白 + 数字 + ピリオド）で、
 記号だけが違う（すべて実測）:
@@ -81,11 +81,33 @@
 記号を差し替えるだけで、プロンプト検出・ハイライト・ダッシュボードの
 「選択待ち」判定・数字送信がそのまま効く。
 
-**`>' を含めているので、本文中の markdown 引用（`> 1. …'）に
-誤反応しうる**。誤反応しても起きるのは行のハイライトと「選択待ち」表示
-だけだが、気になるなら `\"[❯›]\"' に戻す。"
+`❯' と `›' はまず本文に現れないのでここに入れてある。**ASCII の `>' は
+markdown 引用（`> 1. …'）と衝突する**ので、ここではなく
+`zellij-send-prompt-marker-alist' で agy のバッファに限って有効にする。"
   :type 'regexp
   :group 'zellij-send)
+
+(defcustom zellij-send-prompt-marker-alist '(("agy" . "[❯›>]"))
+  "エージェント名ごとの選択肢プロンプト記号。無い名前は
+`zellij-send-prompt-marker-regexp' を使う。
+
+agy の許可ダイアログは ASCII の `> 1. Yes' なので `>' が要るが、
+**これを全 CLI で有効にすると本文中の markdown 引用（`> 1. …'）を
+選択肢と誤検出する**。誤検出は表示だけの問題ではない——ダッシュボードの
+数字キー（`1' `2' `3'）は `zellij-send--detect-prompt' を許可条件に
+しているので、誤検出した状態でユーザーが押すと、選択のつもりの数字が
+**ただの入力**としてペインに届く（astra のレビューで指摘）。
+
+そのため `>' は agy のバッファでだけ有効にする。**agy 内での誤検出は
+残る**（agy 自身の出力に `> 1. …' があれば拾う）。"
+  :type '(alist :key-type string :value-type regexp)
+  :group 'zellij-send)
+
+(defun zellij-send--prompt-marker ()
+  "このバッファで使う選択肢プロンプトの記号正規表現を返す。"
+  (or (alist-get (zellij-send--agent-name)
+                 zellij-send-prompt-marker-alist nil nil #'equal)
+      zellij-send-prompt-marker-regexp))
 
 (defcustom zellij-send-term "xterm-256color"
   "zellij をサブプロセス起動する際に設定する TERM 環境変数。
@@ -994,7 +1016,8 @@ pane-id が取れれば attach クライアント無しでも送信できる。
 (defun zellij-send--prompt-regexp (&optional whole-line)
   "選択肢プロンプト行にマッチする正規表現を返す。
 WHOLE-LINE が非 nil なら行末までマッチする形にする（ハイライト用）。
-記号は `zellij-send-prompt-marker-regexp'（claude の `❯' と codex の `›'）。
+記号は `zellij-send--prompt-marker'（エージェントごと。agy だけ ASCII の
+`>' も含む）。
 
 **行頭に限定**する（本文中に引用された選択肢を拾わないため）。番号は
 2 桁以上も許す（選択肢が 10 個を超える画面がある）。それでも画面解析なので、
@@ -1002,7 +1025,7 @@ WHOLE-LINE が非 nil なら行末までマッチする形にする（ハイラ�
   ;; 行頭の字下げと記号の後は **[ \t] に限る**。`[[:space:]]' は改行も
   ;; 含むので、`^[[:space:]]*' が直前の行末の改行から一致し、
   ;; ハイライトの overlay が 1 行上から始まってしまう（実測で確認）
-  (let ((core (concat "^[ \t]*" zellij-send-prompt-marker-regexp
+  (let ((core (concat "^[ \t]*" (zellij-send--prompt-marker)
                       "[ \t]+[1-9][0-9]*\\.")))
     (if whole-line (concat core ".*$") core)))
 
@@ -1291,7 +1314,12 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
     ("agy"    . "GEMINI.md"))
   "エージェント名 → `zellij-send-save-progress' が書かせるファイル名。
 一覧に無いエージェントには `zellij-send-progress-file-default' を使う。
-CLAUDE.md を無条件に指定すると codex が読まないファイルに書かせることになる。"
+CLAUDE.md を無条件に指定すると codex が読まないファイルに書かせることになる。
+
+agy の GEMINI.md は**実機で確認済み**（2026-09-07。合言葉を書いた
+GEMINI.md を置いた使い捨てディレクトリで agy を起動し、その合言葉を
+返すことを確認した）。agy は `/compact' の有無について実機と食い違う
+回答をしたので、**自己申告だけで表に足さないこと**。"
   :type '(alist :key-type string :value-type string)
   :group 'zellij-send)
 
