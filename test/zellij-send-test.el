@@ -597,13 +597,113 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     (should (string-match-p "\\[画像 image/png" body))
     (should-not (string-match-p "QUJDREVG" body))))
 
-(ert-deftest zellij-send-test-transcript-claude-p ()
-  "Claude Code のときだけ transcript 経路に入る。"
-  (let ((zellij-send-default-command "claude")) (should (zellij-send--transcript-claude-p)))
-  (let ((zellij-send-default-command "/usr/local/bin/claude --resume"))
-    (should (zellij-send--transcript-claude-p)))
-  (let ((zellij-send-default-command "zsh")) (should-not (zellij-send--transcript-claude-p)))
-  (let ((zellij-send-default-command "")) (should-not (zellij-send--transcript-claude-p))))
+
+;;; セッションのコマンド（多 CLI 対応）
+
+(ert-deftest zellij-send-test-command-name ()
+  "起動コマンドからエージェント名を取り出す。"
+  (should (equal (zellij-send--command-name "claude") "claude"))
+  (should (equal (zellij-send--command-name "/usr/local/bin/claude --resume")
+                 "claude"))
+  ;; インタプリタ経由でも `zellij-send-commands' の名前を拾う
+  ;; （実測: codex は `node /opt/homebrew/bin/codex' として COMMAND 列に出る）
+  (should (equal (zellij-send--command-name "node /opt/homebrew/bin/codex")
+                 "codex"))
+  ;; 一覧に無ければ先頭トークンの実行ファイル名
+  (should (equal (zellij-send--command-name "/bin/zsh -l") "zsh"))
+  (should-not (zellij-send--command-name ""))
+  (should-not (zellij-send--command-name nil)))
+
+(ert-deftest zellij-send-test-claude-p ()
+  "Claude Code のときだけ画面解析・transcript の経路に入る。
+判定はバッファローカルの `zellij-send--command' が優先で、
+空のときだけ `zellij-send-default-command' を使う。"
+  (with-temp-buffer
+    (let ((zellij-send-default-command "claude"))
+      ;; バッファローカルが空なら既定値で判定（従来どおり）
+      (should (zellij-send--claude-p))
+      ;; codex を動かしているバッファでは既定値が claude でも non-claude
+      (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
+      (should-not (zellij-send--claude-p))
+      (should (equal (zellij-send--buffer-command) "codex"))
+      (setq-local zellij-send--command "/usr/local/bin/claude --resume")
+      (should (zellij-send--claude-p)))
+    (let ((zellij-send-default-command "zsh"))
+      ;; 既定値が claude でなくても、このバッファが claude なら claude 扱い
+      (should (zellij-send--claude-p))
+      (setq-local zellij-send--command nil)
+      (should-not (zellij-send--claude-p)))))
+
+(defconst zellij-send-test--panes-all "\
+PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED
+plugin_0  plugin  (.) - zellij:link  zellij:link  -  false  false  false
+terminal_0  terminal  zellij-send  node /opt/homebrew/bin/codex  /tmp/x  true  false  false
+terminal_1  terminal  claude  claude  /tmp/x  false  false  true"
+  "`action list-panes --all' の出力の実例（列は 2 個以上の空白区切り）。
+TITLE（`(.) - zellij:link'）と COMMAND（`node /opt/…'）に単独の空白が入る。")
+
+(ert-deftest zellij-send-test-pane-field ()
+  "ヘッダ行から列位置を求めるので、TITLE や COMMAND の空白に影響されない。"
+  (should (equal (zellij-send--pane-field zellij-send-test--panes-all
+                                          "terminal_0" "COMMAND")
+                 "node /opt/homebrew/bin/codex"))
+  (should (equal (zellij-send--pane-field zellij-send-test--panes-all
+                                          "terminal_1" "EXITED")
+                 "true"))
+  ;; 無い pane-id・無い列・ヘッダの無い出力では nil
+  (should-not (zellij-send--pane-field zellij-send-test--panes-all
+                                       "terminal_9" "COMMAND"))
+  (should-not (zellij-send--pane-field zellij-send-test--panes-all
+                                       "terminal_0" "NOPE"))
+  (should-not (zellij-send--pane-field "" "terminal_0" "COMMAND")))
+
+(ert-deftest zellij-send-test-parse-pane-command ()
+  "COMMAND 列からペインで動いているコマンドを取り出す。
+TITLE は当てにならない（ターミナルから作ったセッションでは
+codex のペインのタイトルがセッション名になっていた。実測）。"
+  (should (equal (zellij-send--parse-pane-command zellij-send-test--panes-all
+                                                  "terminal_0")
+                 "node /opt/homebrew/bin/codex"))
+  (should (equal (zellij-send--parse-pane-command zellij-send-test--panes-all
+                                                  "terminal_1")
+                 "claude"))
+  ;; plugin ペインの COMMAND は `-' ではないが、CWD が `-' の行でも
+  ;; 列位置で読むので取り違えない
+  (should-not (zellij-send--parse-pane-command zellij-send-test--panes-all
+                                               "terminal_9"))
+  (should-not (zellij-send--parse-pane-command "" "terminal_0")))
+
+(ert-deftest zellij-send-test-parse-pane-exited-shared-parser ()
+  "EXITED 列も COMMAND 列と同じ `zellij-send--pane-field' で読む。
+既存の `zellij-send-test-parse-pane-exited' と合わせて、
+共通化しても 3 値（t / nil / :unknown）が変わらないことを確かめる。"
+  (should (eq (zellij-send--parse-pane-exited zellij-send-test--panes-all
+                                              "terminal_1")
+              t))
+  (should (eq (zellij-send--parse-pane-exited zellij-send-test--panes-all
+                                              "terminal_0")
+              nil))
+  (should (eq (zellij-send--parse-pane-exited zellij-send-test--panes-all
+                                              "terminal_9")
+              :unknown))
+  (should (eq (zellij-send--parse-pane-exited "" "terminal_0") :unknown)))
+
+(ert-deftest zellij-send-test-pick-pane ()
+  "既定のコマンドと同名のペインを最優先し、次に他 CLI、最後に最初の端末ペイン。"
+  (let ((zellij-send-default-command "claude")
+        (zellij-send-commands '("claude" "codex")))
+    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
+                                             ("terminal_1" . "claude")))
+                   "terminal_1"))
+    ;; claude が無ければ一覧にある他の CLI を選ぶ
+    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
+                                             ("terminal_1" . "codex")))
+                   "terminal_1"))
+    ;; どれも無ければ最初の端末ペイン
+    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
+                                             ("terminal_1" . "bash")))
+                   "terminal_0"))
+    (should-not (zellij-send--pick-pane nil))))
 
 ;;; セッションの連番（同じプロジェクトで複数エージェント）
 

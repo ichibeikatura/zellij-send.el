@@ -32,8 +32,26 @@
   :group 'zellij-send)
 
 (defcustom zellij-send-default-command "claude"
-  "新規セッションで起動するコマンド。"
+  "新規セッションで起動するコマンドの既定値。
+実際に何が動いているかはセッションごとに違うので、機能の分岐には
+バッファローカルの `zellij-send--command' を使うこと。"
   :type 'string
+  :group 'zellij-send)
+
+(defcustom zellij-send-commands '("claude" "codex" "antigravity")
+  "新規セッションで選べるコマンドの候補。
+
+`[New]' でセッションを作るときにこの中から選ぶ（既定は
+`zellij-send-default-command'。一覧に無いコマンドも入力できる）。
+
+送信・subscribe・キー透過モード・ダッシュボードは画面を解釈しないので
+どのコマンドでも動く。Claude Code の画面や成果物に依存する機能
+（transcript 表示・スラッシュコマンド・AskUserQuestion の解析）だけが
+`zellij-send--claude-p' で分岐する。
+
+`zellij-send--command-name' は `node /opt/homebrew/bin/codex' のような
+起動コマンドからエージェント名を拾うのにもこの一覧を使う。"
+  :type '(repeat string)
   :group 'zellij-send)
 
 (defcustom zellij-send-term "xterm-256color"
@@ -142,6 +160,16 @@ detach が効かなくてもこの時間で必ずプロセスを殺す。"
 このパッケージが `zellij run' で起動したペインのみ判明する。
 nil の場合は focused pane に送る（attach クライアントが必要）。")
 
+(defvar-local zellij-send--command nil
+  "このバッファのペインで動いているコマンド（例: \"claude\"・\"codex\"）。
+新規作成時は選んだコマンド、既存セッションへの接続時は
+`list-panes --all' の COMMAND 列から復元する。判らなければ nil。
+
+エージェント 1 体 = zellij セッション 1 つなので、claude と codex を
+同時に開ける。**Claude Code 専用機能の分岐にはこちらを使い、
+`zellij-send-default-command' を見ないこと**（あれは新規作成時の
+既定値でしかない）。")
+
 (defvar-local zellij-send--subscribe-process nil
   "このバッファに紐づく `zellij subscribe' の常駐プロセス。")
 
@@ -183,6 +211,43 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
   "カレントバッファが zellij-send セッションに紐付いていなければエラーを発する。"
   '(unless zellij-send--session
      (user-error "zellij-send バッファ外では使えません")))
+
+;;; セッションのコマンド（多 CLI 対応）
+
+;; エージェント 1 体 = zellij セッション 1 つなので、動いているコマンドも
+;; 黒板バッファごとに違う。`zellij-send-default-command' は新規作成時の
+;; 既定値でしかないため、機能の分岐には必ずバッファローカルの
+;; `zellij-send--command' を使う（claude と codex を同時に開けるように）。
+;;
+;; 画面を解釈しない機能——送信・subscribe・キー透過モード・ダッシュボード——は
+;; どのコマンドでも動く。Claude Code の画面や成果物に依存する機能だけを
+;; `zellij-send--claude-p' で囲うこと。
+
+(defun zellij-send--command-name (command)
+  "COMMAND 文字列からエージェント名を返す。判らなければ nil。
+
+基本は先頭トークンの実行ファイル名だが、`node /opt/homebrew/bin/codex' の
+ようにインタプリタ経由で起動されることがある（実測: codex はこの形で
+`list-panes --all' の COMMAND 列に出る）。そのため
+`zellij-send-commands' に挙げた名前がトークンのどれかに一致すれば
+そちらを優先する。"
+  (let ((names (mapcar #'file-name-nondirectory
+                       (split-string (or command "") nil t))))
+    (or (seq-find (lambda (n) (member n zellij-send-commands)) names)
+        (car names))))
+
+(defun zellij-send--buffer-command ()
+  "このバッファのペインで動いているエージェント名を返す。
+`zellij-send--command' が空なら `zellij-send-default-command' で代用する
+（コマンドを特定できなかった既存セッションでも従来どおり振る舞うため）。"
+  (zellij-send--command-name (or zellij-send--command
+                                 zellij-send-default-command)))
+
+(defun zellij-send--claude-p ()
+  "このバッファのペインで Claude Code が動いていれば non-nil。
+Claude Code の画面・transcript に依存する機能はこれで分岐する。"
+  (let ((name (zellij-send--buffer-command)))
+    (and name (string-prefix-p "claude" name))))
 
 ;;; セッション一覧の取得
 
@@ -394,8 +459,8 @@ CALLBACK は要求元バッファをカレントにした状態で呼ばれる�
 FULL が非 nil なら `--full' を付けてスクロールバックまで取る。
 **Claude Code には効かない**。alt-screen の TUI には仕様上スクロールバックが
 無いため、`--full' でも viewport と同じ内容しか返らない（2026-07-28 実測）。
-alt-screen でないコマンドを `zellij-send-default-command' に設定した場合の
-ためだけに付けている。流れて消えた Claude の出力は
+alt-screen でないコマンド（`zellij-send--command' 参照）を動かしている
+セッションのためだけに付けている。流れて消えた Claude の出力は
 `zellij-send-log-file'（Stop フックが transcript から追記）で読む。"
   (let ((req-buffer (current-buffer))
         (out-buf (generate-new-buffer " *zellij-dump*"))
@@ -450,11 +515,6 @@ Stop フックは transcript のパスを Emacs に渡していないので現�
                                  (file-attributes b))
                                 (file-attribute-modification-time
                                  (file-attributes a)))))))))
-
-(defun zellij-send--transcript-claude-p ()
-  "`zellij-send-default-command' が Claude Code なら non-nil。"
-  (let ((cmd (car (split-string (or zellij-send-default-command "") nil t))))
-    (and cmd (string-prefix-p "claude" (file-name-nondirectory cmd)))))
 
 (defun zellij-send--transcript-time (entry)
   "ENTRY の timestamp を `MM-DD HH:MM:SS' に整形する。読めなければ空文字。"
@@ -646,6 +706,37 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
            (ignore-errors (kill-buffer err-buf))
            (funcall callback out)))))))
 
+(defun zellij-send--pane-field (raw pane-id column)
+  "`action list-panes --all' の出力 RAW から PANE-ID の行の COLUMN 列を返す。
+COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなければ nil。
+
+列は 2 個以上の空白区切りだが、TITLE や COMMAND 自体に空白が入るため
+位置を決め打ちにせず、ヘッダ行から列位置を求める。フィールド数がヘッダと
+食い違う行は読み飛ばす（TITLE に 2 連空白が入った等）。"
+  (let* ((lines (split-string (or raw "") "\n" t))
+         (header (and lines (split-string (string-trim (car lines)) "[ \t]\\{2,\\}" t)))
+         (pane-col (and header (seq-position header "PANE_ID")))
+         (col (and header (seq-position header column))))
+    (when (and pane-col col)
+      (let (result)
+        (dolist (line (cdr lines) result)
+          (let ((fields (split-string (string-trim (zellij-send--strip-ansi line))
+                                      "[ \t]\\{2,\\}" t)))
+            (when (and (= (length fields) (length header))
+                       (equal (nth pane-col fields) pane-id))
+              (setq result (nth col fields)))))))))
+
+(defun zellij-send--parse-pane-command (raw pane-id)
+  "`action list-panes --all' の出力 RAW から PANE-ID の COMMAND を返す。
+不明なら nil。
+
+`list-panes'（`--all' 無し）の TITLE は当てにならない——ターミナルから
+作ったセッションではペインのタイトルがセッション名になっていることがある
+（実測: codex のペインのタイトルが `zellij-send'）。COMMAND 列には
+`node /opt/homebrew/bin/codex' のように実際の起動コマンドが入る。"
+  (let ((cmd (zellij-send--pane-field raw pane-id "COMMAND")))
+    (unless (member cmd '(nil "-" "")) cmd)))
+
 (defun zellij-send--parse-panes (raw)
   "`action list-panes' の出力 RAW から端末ペインの (ID . TITLE) を順に返す。
 出力は「PANE_ID  TYPE  TITLE」の表。plugin ペインは除外する。"
@@ -661,11 +752,13 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
 
 (defun zellij-send--pick-pane (panes)
   "PANES（(ID . TITLE) のリスト）から送信先として最も妥当なものを選ぶ。
-`zellij-send-default-command' と同名のタイトルを優先し、
+`zellij-send-default-command' と同名のタイトルを最優先し、次に
+`zellij-send-commands' のいずれかと同名のもの（codex などの他 CLI）、
 無ければ最初の端末ペインを使う。"
   (or (car (seq-find (lambda (p)
                        (string= (cdr p) zellij-send-default-command))
                      panes))
+      (car (seq-find (lambda (p) (member (cdr p) zellij-send-commands)) panes))
       (caar panes)))
 
 (defun zellij-send--detect-pane-async (session callback)
@@ -676,6 +769,14 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
      (funcall callback
               (and out (zellij-send--pick-pane
                         (zellij-send--parse-panes out)))))))
+
+(defun zellij-send--detect-command-async (session pane-id callback)
+  "SESSION の PANE-ID で動いているコマンドを CALLBACK に渡す（不明なら nil）。"
+  (zellij-send--zellij-output-async
+   session '("action" "list-panes" "--all")
+   (lambda (out)
+     (funcall callback (and out pane-id
+                            (zellij-send--parse-pane-command out pane-id))))))
 
 (defun zellij-send--parse-layout-cwd (raw)
   "`action dump-layout' の出力 RAW からセッションの cwd を返す（無ければ nil）。"
@@ -691,7 +792,8 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
 
 (defun zellij-send-attach-session-async (session &optional callback)
   "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
-cwd は `dump-layout'、pane-id は `list-panes' から取得して設定する。
+cwd は `dump-layout'、pane-id は `list-panes'、動いているコマンドは
+`list-panes --all' の COMMAND 列から取得して設定する。
 pane-id が取れれば attach クライアント無しでも送信できる。
 用意できたら CALLBACK にバッファを渡す。"
   (let ((buf (zellij-send--get-or-create-buffer session)))
@@ -704,11 +806,20 @@ pane-id が取れれば attach クライアント無しでも送信できる。
        (zellij-send--detect-pane-async
         session
         (lambda (pane-id)
-          (when (and pane-id (buffer-live-p buf))
-            (with-current-buffer buf
-              (setq-local zellij-send--pane-id pane-id)
-              (zellij-send--subscribe-ensure)))
-          (when callback (funcall callback buf))))))))
+          (if (not (and pane-id (buffer-live-p buf)))
+              (when callback (funcall callback buf))
+            ;; コマンドを確定させてから subscribe を張る。subscribe の開始が
+            ;; スラッシュコマンドの先読みを呼ぶので、`zellij-send--command' が
+            ;; 空のままだと claude 以外のペインにも `/' を打ってしまう
+            (zellij-send--detect-command-async
+             session pane-id
+             (lambda (command)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (setq-local zellij-send--pane-id pane-id)
+                   (when command (setq-local zellij-send--command command))
+                   (zellij-send--subscribe-ensure)))
+               (when callback (funcall callback buf)))))))))))
 
 ;;; 送信履歴
 
@@ -1804,9 +1915,16 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
 
 一覧の取得も引数の確認もペインの入力欄を実際に打って行うので、入力欄が
 空でないときは何もしない。`/model' のように送信後に対話画面が出る
-コマンドは、そのままキー透過モード（\\[zellij-send-keys-mode]）で操作する。"
+コマンドは、そのままキー透過モード（\\[zellij-send-keys-mode]）で操作する。
+
+一覧の読み取りは Claude Code の補完メニュー専用。他のコマンドでは入力欄に
+`/' を打ち込んで壊す危険があるので何もしない——そちらのスラッシュコマンドは
+本文として送るか（C-c C-c）、キー透過モードで直接打つ。"
   (interactive "P")
   (zellij-send--assert-session)
+  (unless (zellij-send--claude-p)
+    (user-error "スラッシュコマンドの補完は Claude Code 専用です（%s）。本文として送るか C-c C-t のキー透過モードを使ってください"
+                (or (zellij-send--buffer-command) "?")))
   (when refresh
     (zellij-send--slash-arg-cache-clear))
   (let ((buf (current-buffer)))
@@ -1832,6 +1950,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
 初回の `zellij-send-slash-command' を待たせないための先読み。"
   (when (and zellij-send-slash-prefetch
              zellij-send--session
+             (zellij-send--claude-p)
              (null (zellij-send--slash-cached))
              (not zellij-send--slash-prefetching))
     (run-at-time zellij-send-slash-prefetch-delay nil
@@ -1846,6 +1965,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
       (when (and zellij-send-slash-prefetch
                  zellij-send--session
                  zellij-send--pane-id
+                 (zellij-send--claude-p)
                  (null (zellij-send--slash-cached))
                  (not zellij-send--slash-prefetching)
                  (<= try zellij-send-slash-prefetch-retries))
@@ -1900,7 +2020,7 @@ ARG（\\[universal-argument]）付きのときは、従来どおり zellij ス�
 `zellij-send-show-live'（メニュー `g'）を使う。"
   (interactive "P")
   (zellij-send--assert-session)
-  (let* ((claude (and (not arg) (zellij-send--transcript-claude-p)))
+  (let* ((claude (and (not arg) (zellij-send--claude-p)))
          (file (and claude (zellij-send--transcript-file default-directory))))
     (cond
      (file (zellij-send--transcript-show file))
@@ -1977,23 +2097,11 @@ REASON はユーザーに理由を伝えるための文字列。
 (defun zellij-send--parse-pane-exited (raw pane-id)
   "`action list-panes --all' の出力 RAW から PANE-ID の EXITED 列を返す。
 終了していれば t、動いていれば nil、判定できなければ `:unknown'。
-
-列は 2 個以上の空白区切りだが、TITLE や COMMAND 自体に空白が入るため
-位置を決め打ちにせず、ヘッダ行から PANE_ID と EXITED の列位置を求める。"
-  (let* ((lines (split-string (or raw "") "\n" t))
-         (header (and lines (split-string (string-trim (car lines)) "[ \t]\\{2,\\}" t)))
-         (pane-col (and header (seq-position header "PANE_ID")))
-         (exited-col (and header (seq-position header "EXITED"))))
-    (if (not (and pane-col exited-col))
-        :unknown
-      (let ((result :unknown))
-        (dolist (line (cdr lines) result)
-          (let ((fields (split-string (string-trim (zellij-send--strip-ansi line))
-                                      "[ \t]\\{2,\\}" t)))
-            ;; 列がずれている行は読まない（TITLE に 2 連空白が入った等）
-            (when (and (= (length fields) (length header))
-                       (equal (nth pane-col fields) pane-id))
-              (setq result (string= (nth exited-col fields) "true")))))))))
+判定できないときに **絶対に t を返さないこと**（t は「セッションを消して
+よい」の合図なので、誤検出が最も危険）。列の読み方は
+`zellij-send--pane-field' 参照。"
+  (let ((exited (zellij-send--pane-field raw pane-id "EXITED")))
+    (if exited (string= exited "true") :unknown)))
 
 (defun zellij-send--await-agent-exit (session pane-id main-buf deadline)
   "SESSION のエージェントが終了するのを待ち、確認できたらセッションを削除する。
@@ -2135,6 +2243,8 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
       (setq-local zellij-send--session session)
       (setq-local zellij-send--pane-id
                   (buffer-local-value 'zellij-send--pane-id main-buf))
+      (setq-local zellij-send--command
+                  (buffer-local-value 'zellij-send--command main-buf))
       (setq-local zellij-send--reply-main-buffer main-buf)
       (setq-local zellij-send--reply-window-config wconf)
       (use-local-map zellij-send-reply-mode-map)
@@ -2600,9 +2710,15 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 (defun zellij-send-answer-question ()
   "画面に出ている AskUserQuestion に Emacs 側で答える。
 選択肢をミニバッファで選ぶと、対応する数字キーをペインへ送る。
-質問が複数ある場合は最後の確認画面まで続けて尋ねる。"
+質問が複数ある場合は最後の確認画面まで続けて尋ねる。
+
+画面の読み取りは Claude Code 専用。他のコマンドではキー透過モード
+（\\[zellij-send-keys-mode]）を使う。"
   (interactive)
   (zellij-send--assert-session)
+  (unless (zellij-send--claude-p)
+    (user-error "AskUserQuestion の解析は Claude Code 専用です（%s）。C-c C-t のキー透過モードを使ってください"
+                (or (zellij-send--buffer-command) "?")))
   (let ((q (zellij-send--askq-parse (buffer-string))))
     (unless q
       (user-error "画面に選択肢プロンプトが見つかりません"))
@@ -2645,8 +2761,14 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 
 (defun zellij-send--askq-maybe-auto ()
   "画面更新のたびに呼ばれ、質問が出た瞬間だけ回答 UI を開く。
-質問が消えたときは、自動で入ったキー透過モードを元に戻す。"
-  (let ((now (and (zellij-send--askq-parse (buffer-string)) t)))
+質問が消えたときは、自動で入ったキー透過モードを元に戻す。
+
+`zellij-send--askq-parse' は Claude Code の AskUserQuestion の画面だけを
+読むので、他のコマンド（codex など）のときは何もしない。そちらの選択肢は
+キー透過モード（\\[zellij-send-keys-mode]）で操作する——あれは画面を
+解釈しないのでどの TUI にも効く。"
+  (let ((now (and (zellij-send--claude-p)
+                  (zellij-send--askq-parse (buffer-string)) t)))
     (cond
      ((and now
            (not zellij-send--askq-active)
@@ -2796,14 +2918,24 @@ UTF-8 のバイト列に分解してから送る。"
     map)
   "zellij-send-mode のキーマップ。")
 
+(defun zellij-send--header-command-suffix ()
+  "ヘッダ行に足すコマンド名。Claude Code のときは空文字。
+claude 以外を動かしているセッションを見分けるためだけの表示なので、
+既定の（＝ほとんどの）場合はヘッダを変えない。"
+  (if (zellij-send--claude-p)
+      ""
+    (format " [%s]" (or (zellij-send--buffer-command) "?"))))
+
 (defun zellij-send--mode-setup ()
   "zellij-send-mode の共通セットアップ処理。"
   (setq-local header-line-format
               '(:eval (if zellij-send-keys-mode
-                          (format " Session: %s  |  ⌨ キー透過中: ↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t 解除"
-                                  (or zellij-send--session "?"))
-                        (format " Session: %s  |  C-c C-c: 送信  C-c C-a: メニュー  C-c C-t: キー透過"
-                                (or zellij-send--session "?")))))
+                          (format " Session: %s%s  |  ⌨ キー透過中: ↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t 解除"
+                                  (or zellij-send--session "?")
+                                  (zellij-send--header-command-suffix))
+                        (format " Session: %s%s  |  C-c C-c: 送信  C-c C-a: メニュー  C-c C-t: キー透過"
+                                (or zellij-send--session "?")
+                                (zellij-send--header-command-suffix)))))
   ;; subscribe はセッション名が入ってから張る（`--get-or-create-buffer' が呼ぶ）。
   ;; ここで確実に止めておかないと、常駐プロセスがバッファより長生きする
   ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の
@@ -3002,13 +3134,21 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
        (message "セッション [%s] の拡幅%s" session
                 (if resized "が完了しました" "は行いませんでした"))))))
 
-(defun zellij-send--spawn-session (session dir)
+(defun zellij-send--spawn-session (session dir &optional command)
   "SESSION という名前の detached zellij セッションを DIR に作り、ペインを起動する。
+COMMAND（既定は `zellij-send-default-command'）がそのペインで動く。
 attach クライアント（eat）は使わない: `zellij attach --create-background' で
-セッションを作り、`zellij run' で `zellij-send-default-command' を起動して
-返る pane-id を保持し、以後 --pane-id 指定で送受信する。
-黒板バッファは同期で用意して表示し、cwd・pane-id は後から埋まる。"
-  (let ((buf (zellij-send--setup-session-buffer session dir)))
+セッションを作り、`zellij run' で COMMAND を起動して返る pane-id を保持し、
+以後 --pane-id 指定で送受信する。
+黒板バッファは同期で用意して表示し、cwd・pane-id は後から埋まる。
+
+`zellij-send--command' はバッファを作った直後に入れる。subscribe の開始が
+スラッシュコマンドの先読みを呼ぶので、claude 以外のペインに `/' を
+打たないためにはペイン起動より前に確定していなければならない。"
+  (let* ((command (or command zellij-send-default-command))
+         (buf (zellij-send--setup-session-buffer session dir)))
+    (with-current-buffer buf
+      (setq-local zellij-send--command command))
     (zellij-send--zellij-async
      (list "attach" "--create-background" session)
      (lambda (exit)
@@ -3024,11 +3164,10 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
              0.5 nil
              (lambda ()
                (zellij-send--run-in-session-async
-                session dir zellij-send-default-command
+                session dir command
                 (lambda (pane-id)
                   (if (not pane-id)
-                      (message "%s の起動に失敗しました"
-                               zellij-send-default-command)
+                      (message "%s の起動に失敗しました" command)
                     (when (buffer-live-p buf)
                       (with-current-buffer buf
                         (setq-local zellij-send--pane-id pane-id)
@@ -3040,30 +3179,47 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
                      (list "--session" session "action" "close-pane"
                            "--pane-id" "terminal_0")
                      #'ignore)
-                    (message "セッション [%s] を作成しました (%s)"
-                             session pane-id)))))))))))
+                    (message "セッション [%s] を作成しました (%s / %s)"
+                             session command pane-id)))))))))))
     buf))
 
+(defun zellij-send--prompt-command (&optional default)
+  "起動するコマンドを尋ねる。DEFAULT（既定は `zellij-send-default-command'）が初期値。
+候補は `zellij-send-commands' だが、一覧に無いコマンドも入力できる。
+ミニバッファ入力を含むため、プロセス sentinel の中から呼ばないこと。"
+  (let* ((default (or default zellij-send-default-command))
+         (input (string-trim
+                 (completing-read (format "Command (default %s): " default)
+                                  zellij-send-commands nil nil nil nil default))))
+    (if (string-empty-p input) default input)))
+
 (defun zellij-send--create-new-session (known-sessions)
-  "作業ディレクトリを尋ね、新しい zellij セッションを作る。
+  "作業ディレクトリと起動するコマンドを尋ね、新しい zellij セッションを作る。
 セッション名はディレクトリ名 + 2 桁の連番（`myproj00'）。
 KNOWN-SESSIONS は連番を決めるための既存セッション名リスト。"
   (let* ((dir (zellij-send--prompt-session-dir))
+         (command (zellij-send--prompt-command))
          (session (zellij-send--numbered-session-name
                    (file-name-nondirectory dir)
                    (zellij-send--taken-session-names known-sessions))))
-    (zellij-send--spawn-session session dir)))
+    (zellij-send--spawn-session session dir command)))
 
-(defun zellij-send-add-agent ()
+(defun zellij-send-add-agent (&optional ask)
   "同じディレクトリにもう 1 体エージェントを立ち上げる。
 いまの黒板バッファの作業ディレクトリと基底名を引き継ぎ、空いている
 連番（`myproj00' → `myproj01'）で新しい zellij セッションを作る。
 セッションは 1 体につき 1 つなので、送信・subscribe・`zellij-send-quit'
-はいずれも既存のまま各バッファ単位で効く。"
-  (interactive)
+はいずれも既存のまま各バッファ単位で効く。
+
+コマンドはいまのバッファと同じものを引き継ぐ。ASK
+（\\[universal-argument]）を付けると別のコマンド（codex など）を選べる。"
+  (interactive "P")
   (zellij-send--assert-session)
-  (let ((base (zellij-send--session-base zellij-send--session))
-        (dir (directory-file-name (expand-file-name default-directory))))
+  (let* ((base (zellij-send--session-base zellij-send--session))
+         (dir (directory-file-name (expand-file-name default-directory)))
+         (current (or zellij-send--command zellij-send-default-command))
+         ;; ミニバッファは sentinel に入る前に済ませる
+         (command (if ask (zellij-send--prompt-command current) current)))
     (message "セッション一覧を取得中...")
     (zellij-send--list-sessions-async
      (lambda (sessions)
@@ -3072,7 +3228,7 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
          (let ((session (zellij-send--numbered-session-name
                          base (zellij-send--taken-session-names sessions))))
            ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
-           (run-at-time 0 nil #'zellij-send--spawn-session session dir)))))))
+           (run-at-time 0 nil #'zellij-send--spawn-session session dir command)))))))
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。

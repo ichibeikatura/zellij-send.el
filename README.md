@@ -198,6 +198,28 @@ The new session takes the current session's base name plus the lowest free count
 
 Known limitation: `a` (transcript view) locates the transcript by working directory, so with several agents in one directory it may pick the wrong one (it takes the most recently modified).
 
+### Multiple CLIs (Claude Code / Codex / …)
+
+**Each session can run a different command.** When you create a session with `[New]`, you are asked for the command right after the working directory (the default is `zellij-send-default-command`, so `RET` keeps the old behaviour). Completion offers `zellij-send-commands` (default `("claude" "codex" "antigravity")`), but any other command can be typed in.
+
+`+` (add an agent) **inherits the command of the current buffer**. Use `C-u C-c C-a +` to pick a different one.
+
+When connecting to an existing session, the running command is recovered from the COMMAND column of `zellij action list-panes --all`, so a codex session started from a terminal is picked up automatically.
+
+Buffers running something other than claude show the command in the header line (`Session: myproj00 [codex]`).
+
+| Feature | claude | codex / others |
+|---|---|---|
+| Sending (`C-c C-c`), history, reply buffer | yes | yes |
+| Live screen (auto-receive), dashboard | yes | yes |
+| **Key passthrough mode (`C-c C-t`)** | yes | yes |
+| Interrupt (`C-c C-k`), quit (`q`) | yes | yes |
+| Replay the conversation (`a`), output log (`l`) | yes | — |
+| Slash-command completion (`/`) | yes | — |
+| Answering AskUserQuestion (`u` / automatic) | yes | — |
+
+The last three read the **shape of Claude Code's screen** or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
+
 ### Send history
 
 Every message you send is remembered per session (`zellij-send-history-max`, default 50). `M-p` walks back through it and `M-n` forward; going past the newest entry restores whatever you had typed before you started browsing. `C-c C-a` → `h` picks an entry with completion. The history is shared between the blackboard and the reply buffer, and survives closing either.
@@ -336,7 +358,7 @@ Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij
 
 The bindings follow Emacs convention: `g` refreshes (`revert-buffer-function` is replaced too, so `M-x revert-buffer` and mouse-driven reverts run the same refresh), the stronger `G` connects, and `?` lists the keys in `*zellij-dashboard-help*` (`q` closes it). `C-h m` works as well.
 
-Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, otherwise the first terminal pane). Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
+Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, then one titled after any entry of `zellij-send-commands`, otherwise the first terminal pane); the running command comes from the COMMAND column of `list-panes --all`. Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
 
 Connecting is not a one-shot at startup: the list is rescanned every `zellij-send-dashboard-scan-interval` seconds (default 15), so **a zellij session you start in the terminal while Emacs is already running shows up on its own** (press `G` if you want it immediately). The same scan kills the blackboard buffer of any session that has disappeared from `zellij list-sessions`, removing its row (`zellij-send-dashboard-prune-gone`, default `t`). Buffers you are editing (`buffer-modified-p`) are kept so unsent text is never lost, and a `list-sessions` timeout is not treated as "no sessions", so rows are never pruned on a hiccup. This scan is the only thing that calls `zellij`; the 3-second redraw just reads buffer contents.
 
@@ -474,6 +496,13 @@ The Claude output log location (relative to the session's working directory; kee
 
 ```elisp
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
+```
+
+The commands offered when creating a session (any other command can still be typed in):
+
+```elisp
+(setq zellij-send-commands '("claude" "codex" "antigravity"))
+(setq zellij-send-default-command "claude")  ; the default, chosen by RET
 ```
 
 Question answering (see [Answering questions](#answering-questions-askuserquestion)):

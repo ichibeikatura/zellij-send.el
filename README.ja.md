@@ -201,6 +201,28 @@ Claude Code なら、Claude Code 自身が書いている transcript（JSONL）�
 
 既知の制約: `a`（transcript 表示）は作業ディレクトリから transcript を探すため、同じディレクトリで複数エージェントを動かしていると取り違えることがあります（最終更新の新しい方を拾う）。
 
+### 複数の CLI（Claude Code / Codex / …）
+
+**セッションごとに違うコマンドを動かせます。** `[New]` でセッションを作るとき、作業ディレクトリの次に起動コマンドを聞かれます（既定は `zellij-send-default-command` なので `RET` でこれまでどおり）。候補は `zellij-send-commands`（既定 `("claude" "codex" "antigravity")`）ですが、一覧に無いコマンドも入力できます。
+
+`+`（エージェントを増やす）は**いまのバッファと同じコマンド**を引き継ぎます。別のコマンドで増やしたいときは `C-u C-c C-a +`。
+
+既存のセッションに接続したときは、`zellij action list-panes --all` の COMMAND 列から動いているコマンドを復元します。ターミナルで立ち上げた codex のセッションにも自動で追随します。
+
+claude 以外を動かしているバッファでは、ヘッダ行にコマンド名が出ます（`Session: myproj00 [codex]`）。
+
+| 機能 | claude | codex / その他 |
+|---|---|---|
+| 送信（`C-c C-c`）・送信履歴・返信バッファ | ○ | ○ |
+| 画面表示（自動受信）・ダッシュボード | ○ | ○ |
+| **キー透過モード（`C-c C-t`）** | ○ | ○ |
+| 中断（`C-c C-k`）・終了（`q`） | ○ | ○ |
+| 会話を最初から読む（`a`）・出力ログ（`l`） | ○ | — |
+| スラッシュコマンド補完（`/`） | ○ | — |
+| AskUserQuestion への回答（`u` / 自動起動） | ○ | — |
+
+下 3 つは Claude Code の**画面の形**や transcript を読むので、他の CLI では動きません（`user-error` でその旨を出して止まります）。選択肢・権限ダイアログ・設定画面は**キー透過モード**で操作してください。あれは画面を解釈しないので、どの TUI にも効きます。
+
 ### 送信履歴
 
 送信したテキストはセッションごとに記憶されます（`zellij-send-history-max`、既定 50）。`M-p` で遡り、`M-n` で戻ります。最新より先に戻ると、履歴を辿り始める前の下書きに復帰します。`C-c C-a` → `h` は補完で選べます。履歴は黒板バッファと返信バッファで共有され、どちらを閉じても残ります。
@@ -325,7 +347,7 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 
 キーは Emacs の作法に合わせてあります。`g` が更新（`revert-buffer-function` も差し替えてあるので `M-x revert-buffer` やマウス経由でも同じ更新になります）、その強い版の `G` が接続、`?` がキー一覧です。`?` は `*zellij-dashboard-help*` を開き、`q` で閉じます。`C-h m` でも一覧を見られます。
 
-ダッシュボードを開くと、**まだバッファの無い起動中の zellij セッションすべてに自動接続します**（`zellij-send-dashboard-auto-connect`、既定 `t`）。何も尋ねません: 作業ディレクトリは `zellij action dump-layout` から、pane-id は `zellij action list-panes` から取得します（`zellij-send-default-command` と同名のタイトルのペインを優先、無ければ最初の端末ペイン）。pane-id が復元できるので、**Emacs を再起動した後でも attach クライアント無しで送信できます**。
+ダッシュボードを開くと、**まだバッファの無い起動中の zellij セッションすべてに自動接続します**（`zellij-send-dashboard-auto-connect`、既定 `t`）。何も尋ねません: 作業ディレクトリは `zellij action dump-layout` から、pane-id は `zellij action list-panes` から取得します（`zellij-send-default-command` と同名のタイトルのペインを優先、次に `zellij-send-commands` のいずれかと同名のもの、無ければ最初の端末ペイン）。動いているコマンドは `list-panes --all` の COMMAND 列から復元します。pane-id が復元できるので、**Emacs を再起動した後でも attach クライアント無しで送信できます**。
 
 接続は起動時だけでなく `zellij-send-dashboard-scan-interval` 秒ごと（既定 15 秒）にも行います。そのため **Emacs を起動したままターミナルで `zellij` を立ち上げても、放っておけば一覧に増えます**（すぐ欲しいときは `G`）。同時に、zellij 側で終了したセッションの黒板バッファは kill して行を消します（`zellij-send-dashboard-prune-gone`、既定 `t`）。ただし**編集中のバッファ（`buffer-modified-p`）は残します** — 書きかけの入力を失わないためです。`list-sessions` がタイムアウトしたときは「セッション 0 件」とはみなさず、行を消しません。`zellij` を呼ぶのはこの検出だけで、3 秒ごとの再描画はバッファ内容を読むだけです。
 
@@ -463,13 +485,22 @@ Claude 出力ログの場所（セッション作業ディレクトリからの�
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 ```
 
+新規セッションで選べるコマンドの候補（`[New]` と `C-u +` の補完に出ます。一覧に無いコマンドも入力できます）:
+
+```elisp
+(setq zellij-send-commands '("claude" "codex" "antigravity"))
+(setq zellij-send-default-command "claude")  ; 既定値（RET で選ばれる）
+```
+
 新しく作るセッションの大きさ（既定 320 桁 × 80 行）:
 
 ```elisp
 (setq zellij-send-session-size '(320 . 80))  ; nil なら zellij 任せ
 ```
 
-zellij は tty が無いとき環境変数 `COLUMNS` / `LINES` を見ます。Emacs のサブプロセスにはどちらも渡らないため、**この設定が無いと `attach --create-background` で作ったセッションは 25 桁 × 24 行**になります。Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、狭いペインだと本文が細切れに折り返されて読めません。広く取っておけば長い行のまま届き、Emacs 側の幅で視覚的に折り返されます（`truncate-lines` が `nil` の場合）。
+`attach --create-background` で作ったセッションは **50 桁 × 48 行**に固定され、環境変数 `COLUMNS` / `LINES` では変えられません（zellij 0.44.3 で実測）。唯一効くのが「目的の大きさの pty を持つクライアントで一瞬 attach して detach する」方法で、`zellij-send-session-size` が非 nil ならセッション作成時に自動で行います。
+
+Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、狭いペインだと本文が細切れに折り返されて読めません。広く取っておけば長い行のまま届き、Emacs 側の幅で視覚的に折り返されます（`truncate-lines` が `nil` の場合）。
 
 ターミナルから `zellij attach` すると、zellij の仕様でそのクライアントの大きさまでセッションが縮みます。広いまま使いたいときは attach しないでください。
 

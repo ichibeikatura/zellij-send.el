@@ -390,6 +390,63 @@ SPEC を受け取るだけで中身は 1 つ。
   `zellij-send-cc-clear` は M-x 用に残す（前者はダッシュボードの `c` が呼ぶ。
   依存は dashboard → 本体の一方向なので消してはいけない）
 
+## 複数の CLI に対応する（claude / codex / …）
+
+**エージェント 1 体 = zellij セッション 1 つ**なので、動いているコマンドも
+セッション（＝黒板バッファ）ごとに違う。`zellij-send-default-command` は
+**新規作成時の既定値でしかない**。機能の分岐には必ずバッファローカルの
+`zellij-send--command` を使うこと。
+
+```
+zellij-send--command        ← このバッファのペインで動いているコマンド（生の文字列）
+  └─ --command-name         ← エージェント名を取り出す（純関数・テストあり）
+       └─ --buffer-command  ← 空なら --default-command で代用
+            └─ --claude-p   ← Claude Code 専用機能はこれで囲う
+```
+
+- **`--command-name` は全トークンを見る**。codex は
+  `node /opt/homebrew/bin/codex` として COMMAND 列に出る（実測）ので、
+  先頭トークンだけ見ると `node` になる。`zellij-send-commands` に挙げた
+  名前がトークンのどれかに一致すればそれを優先し、無ければ先頭トークンの
+  実行ファイル名を返す
+- **既存セッションのコマンドは `list-panes --all` の COMMAND 列から復元する**。
+  `list-panes`（`--all` 無し）の **TITLE は当てにならない**——ターミナルから
+  作ったセッションではペインのタイトルがセッション名になっていることがある
+  （実測: codex のペインのタイトルが `zellij-send`）
+- 列の読み方は `zellij-send--pane-field`（ヘッダ行から列位置を求める）に
+  一本化してある。`--parse-pane-exited` と `--parse-pane-command` の共通基盤。
+  TITLE・COMMAND・CWD に空白が入るので**位置の決め打ちは禁止**
+- **コマンドは subscribe を張る前に確定させる**。`--subscribe-start` が
+  スラッシュコマンドの先読みを呼ぶので、`zellij-send--command` が空のままだと
+  claude 以外のペインに `/` を打ち込んでしまう
+  （`zellij-send-attach-session-async` と `--spawn-session` の両方でこの順序）
+
+### どの機能がどこまで効くか
+
+| | claude | codex / その他 |
+|---|---|---|
+| 送信（paste + write 13）・履歴・返信バッファ | ○ | ○ |
+| subscribe による画面表示・ダッシュボード | ○ | ○ |
+| **キー透過モード（`C-c C-t`）** | ○ | ○ |
+| 中断（Esc）・セッション終了 | ○ | ○ |
+| transcript 表示（`a`）・出力ログ（`l`） | ○ | — |
+| スラッシュコマンド補完（`/`）・先読み | ○ | — |
+| AskUserQuestion の解析（`u`・自動起動） | ○ | — |
+
+**画面を解釈しない機能はどのコマンドでも動く**。選択肢・権限ダイアログ・
+設定画面は、claude 以外ではキー透過モードで操作する（あれは画面を読まないので
+どの TUI にも効く）。claude 専用機能は `user-error` でその旨を伝えて止まる。
+
+### 新規セッションのコマンド選択
+
+- `[New]`: ディレクトリの後にコマンドを聞く（`--prompt-command`。既定は
+  `zellij-send-default-command` なので RET で従来どおり）
+- `zellij-send-add-agent`（メニュー `+`）: **いまのバッファと同じコマンドを
+  引き継ぐ**。`C-u` を付けたときだけ聞く
+- **ミニバッファは sentinel に入る前に済ませる**。`add-agent` は
+  `list-sessions` の前にコマンドを確定させてある（sentinel 内の
+  `completing-read` は C-g が効かない。この約束はファイル全体で共通）
+
 ## キー透過モード（`zellij-send-keys-mode` / `C-c C-t`）
 
 黒板バッファは既にペインの生画面を映しているので、足りないのは打つ側だけ、という発想。
@@ -519,7 +576,9 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
   `--user-cleared` は nil に戻るが、取り直しはしない）
 - 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
   `--transcript-trim` / `--transcript-clip` / `--transcript-block` /
-  `--transcript-claude-p`。テストが `test/` にある
+  `--claude-p`（旧 `--transcript-claude-p`。多 CLI 対応で
+  バッファローカルの `zellij-send--command` を見るようになった）。
+  テストが `test/` にある
 
 ## スクリーン取得の限界（調査済み・再調査不要）
 
