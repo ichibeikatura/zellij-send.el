@@ -629,6 +629,10 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       (should (zellij-send--slash-supported-p "/clear"))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
       (should (zellij-send--slash-supported-p "/compact"))
+      ;; agy に /compact は無い（実測: 補完メニューで `No matches'）
+      (setq-local zellij-send--command "agy")
+      (should (zellij-send--slash-supported-p "/clear"))
+      (should-not (zellij-send--slash-supported-p "/compact"))
       ;; 対応が判らない CLI には送らない
       (setq-local zellij-send--command "/bin/zsh")
       (should-not (zellij-send--slash-supported-p "/compact"))
@@ -647,6 +651,8 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       (should (equal (zellij-send--progress-file) "CLAUDE.md"))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
       (should (equal (zellij-send--progress-file) "AGENTS.md"))
+      (setq-local zellij-send--command "agy")
+      (should (equal (zellij-send--progress-file) "GEMINI.md"))
       ;; 知らないエージェントには既定値
       (setq-local zellij-send--command "/bin/zsh")
       (should (equal (zellij-send--progress-file)
@@ -757,9 +763,10 @@ codex のペインのタイトルがセッション名になっていた。実�
 
 (ert-deftest zellij-send-test-detect-prompt ()
   "`❯ 1.' と `› 1.' の両方を選択肢プロンプトとして拾う。
-codex の `Select Model and Effort' は `› 1. gpt-6-astra (current)' の形
-（実測）で、記号以外は claude と同じ。"
-  (dolist (marker '("❯" "›"))
+3 つの CLI で行の形は同じで記号だけが違う（すべて実測）:
+claude `❯ 1. りんご' / codex `› 1. gpt-6-astra (current)' /
+agy `> 1. Yes'（コマンド実行の許可ダイアログ）。"
+  (dolist (marker '("❯" "›" ">"))
     (with-temp-buffer
       (insert "好きな果物はどれですか？\n"
               "  " marker " 1. りんご\n"
@@ -783,6 +790,21 @@ codex の `Select Model and Effort' は `› 1. gpt-6-astra (current)' の形
   (with-temp-buffer
     (insert "画面には ❯ 1. りんご のように出ます\n")
     (should-not (zellij-send--detect-prompt))))
+
+(ert-deftest zellij-send-test-number-reply ()
+  "数字での回答は実測で確認できたエージェントにだけ許す。
+codex は数字キーを選択として受け付けない（実測）ので一覧に入れない。"
+  (with-temp-buffer
+    (let ((zellij-send-default-command "claude"))
+      (setq-local zellij-send--command "claude")
+      (should-not (zellij-send--assert-number-reply))
+      (setq-local zellij-send--command "agy")
+      (should-not (zellij-send--assert-number-reply))
+      (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
+      (should-error (zellij-send--assert-number-reply) :type 'user-error)
+      ;; コマンド不明でも既定値（claude）で代用しない
+      (setq-local zellij-send--command nil)
+      (should-error (zellij-send--assert-number-reply) :type 'user-error))))
 
 (ert-deftest zellij-send-test-claude-confirmed-p ()
   "ペインに打ち込む機能は、コマンドが確定している claude のときだけ許す。

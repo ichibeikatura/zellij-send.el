@@ -203,7 +203,7 @@ Claude Code なら、Claude Code 自身が書いている transcript（JSONL）�
 
 ### 複数の CLI（Claude Code / Codex / …）
 
-**セッションごとに違うコマンドを動かせます。** `[New]` でセッションを作るとき、作業ディレクトリの次に起動コマンドを聞かれます（既定は `zellij-send-default-command` なので `RET` でこれまでどおり）。候補は `zellij-send-commands`（既定 `("claude" "codex" "antigravity")`）ですが、一覧に無いコマンドも入力できます。
+**セッションごとに違うコマンドを動かせます。** `[New]` でセッションを作るとき、作業ディレクトリの次に起動コマンドを聞かれます（既定は `zellij-send-default-command` なので `RET` でこれまでどおり）。候補は `zellij-send-commands`（既定 `("claude" "codex" "agy")`）ですが、一覧に無いコマンドも入力できます。`agy` は Antigravity CLI の実行ファイル名です。
 
 `+`（エージェントを増やす）は**いまのバッファと同じコマンド**を引き継ぎます。別のコマンドで増やしたいときは `C-u C-c C-a +`。
 
@@ -211,25 +211,26 @@ Claude Code なら、Claude Code 自身が書いている transcript（JSONL）�
 
 claude 以外を動かしているバッファでは、ヘッダ行にコマンド名が出ます（`Session: myproj00 [codex]`）。
 
-| 機能 | claude | codex | その他 |
-|---|---|---|---|
-| 送信（`C-c C-c`）・送信履歴・返信バッファ | ○ | ○ | ○ |
-| 画面表示（自動受信）・ダッシュボード | ○ | ○ | ○ |
-| **キー透過モード（`C-c C-t`）** | ○ | ○ | ○ |
-| 中断（`C-c C-k`）・終了（`q`） | ○ | ○ | ○ |
-| 選択肢の検出・ハイライト | ○ | ○ | 記号次第 |
-| `/compact` `/clear` | ○ | ○ | — |
-| 会話を最初から読む（`a`）・出力ログ（`l`） | ○ | — | — |
-| スラッシュコマンド補完（`/`） | ○ | — | — |
-| AskUserQuestion への回答（`u` / 自動起動） | ○ | — | — |
-| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | — | — |
-| Remote Control の QR・使用状況バー | ○ | — | — |
+| 機能 | claude | codex | agy | その他 |
+|---|---|---|---|---|
+| 送信（`C-c C-c`）・送信履歴・返信バッファ | ○ | ○ | ○ | ○ |
+| 画面表示（自動受信）・ダッシュボード | ○ | ○ | ○ | ○ |
+| **キー透過モード（`C-c C-t`）** | ○ | ○ | ○ | ○ |
+| 中断（`C-c C-k`）・終了（`q`） | ○ | ○ | ○ | ○ |
+| 選択肢の検出・ハイライト | ○ | ○ | ○ | 記号次第 |
+| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | **×** | ○ | — |
+| `/clear` | ○ | ○ | ○ | — |
+| `/compact` | ○ | ○ | **×** | — |
+| 会話を最初から読む（`a`）・出力ログ（`l`） | ○ | — | — | — |
+| スラッシュコマンド補完（`/`） | ○ | — | — | — |
+| AskUserQuestion への回答（`u` / 自動起動） | ○ | — | — | — |
+| Remote Control の QR・使用状況バー | ○ | — | — | — |
 
-下半分は Claude Code の**画面の形**や transcript を読むので、他の CLI では動きません（`user-error` でその旨を出して止まります）。選択肢・権限ダイアログ・設定画面は**キー透過モード**で操作してください。あれは画面を解釈しないので、どの TUI にも効きます。
+下の 4 行は Claude Code の**画面の形**や transcript を読むので、他の CLI では動きません（`user-error` でその旨を出して止まります）。選択肢・権限ダイアログ・設定画面は**キー透過モード**で操作してください。あれは画面を解釈しないので、どの TUI にも効きます。
 
-数字での回答が Claude Code 限定なのは、**codex が数字キーを選択として受け付けない**ためです（2026-09-07 実測。信頼確認の画面に `1` を送っても動かず、Enter で確定しました）。Claude Code は数字が直接効きます。
+表の `×` は 2026-09-07 の実測です。**codex は数字キーを選択として受け付けません**（信頼確認の画面に `1` を送っても動かず、Enter で確定しました）。**agy に `/compact` はありません**（補完メニューで `/comp` と打つと `No matches`。本人は「ある」と答えましたが実機が否定しました）。どちらも `zellij-send-number-reply-commands` と `zellij-send-slash-support-alist` で管理しています——**未確認の CLI をここに足さないでください**。送り方は本文と同じ貼り付け＋Enter なので、受け手が選択として扱わなければ別の操作になります。
 
-`antigravity` は候補リストに名前があるだけで**未検証**です（手元に未インストール）。起動・COMMAND 復元・日本語複数行の送信・選択操作・中断・終了・再接続を確認するまでは動作を保証しません。
+選択肢の検出は `zellij-send-prompt-marker-regexp`（既定 `[❯›>]`）で、claude の `❯ 1.`、codex の `› 1.`、agy の `> 1.` を拾います。`>` を含むので本文中の markdown 引用（`> 1. …`）に誤反応しうります（起きるのは行のハイライトと「選択待ち」表示だけです）。気になる場合は `[❯›]` に戻してください。
 
 ### 送信履歴
 
@@ -496,8 +497,22 @@ Claude 出力ログの場所（セッション作業ディレクトリからの�
 新規セッションで選べるコマンドの候補（`[New]` と `C-u +` の補完に出ます。一覧に無いコマンドも入力できます）:
 
 ```elisp
-(setq zellij-send-commands '("claude" "codex" "antigravity"))
+(setq zellij-send-commands '("claude" "codex" "agy"))
 (setq zellij-send-default-command "claude")  ; 既定値（RET で選ばれる）
+```
+
+CLI ごとの実測にもとづく対応表です。**未確認の CLI を足さないでください**:
+
+```elisp
+;; 数字を送って選択肢に答えられると確認済みのエージェント
+(setq zellij-send-number-reply-commands '("claude" "agy"))
+;; 共通スラッシュコマンドの対応表
+(setq zellij-send-slash-support-alist
+      '(("/compact" . ("claude" "codex"))
+        ("/clear"   . ("claude" "codex" "agy"))))
+;; 作業内容を書かせるファイル
+(setq zellij-send-progress-file-alist
+      '(("claude" . "CLAUDE.md") ("codex" . "AGENTS.md") ("agy" . "GEMINI.md")))
 ```
 
 新しく作るセッションの大きさ（既定 320 桁 × 80 行）:

@@ -50,8 +50,10 @@
   :type '(repeat string)
   :group 'zellij-send)
 
-(defcustom zellij-send-commands '("claude" "codex" "antigravity")
+(defcustom zellij-send-commands '("claude" "codex" "agy")
   "新規セッションで選べるコマンドの候補。
+
+`agy' は Antigravity CLI の実行ファイル名（`antigravity' ではない）。
 
 `[New]' でセッションを作るときにこの中から選ぶ（既定は
 `zellij-send-default-command'。一覧に無いコマンドも入力できる）。
@@ -66,14 +68,22 @@
   :type '(repeat string)
   :group 'zellij-send)
 
-(defcustom zellij-send-prompt-marker-regexp "[❯›]"
+(defcustom zellij-send-prompt-marker-regexp "[❯›>]"
   "選択肢プロンプトのカーソル記号にマッチする正規表現。
 
-Claude Code は `❯'、codex は `›' を使うが、**行の形は同じ**
-（記号 + 空白 + 数字 + ピリオド）。実測: codex の `Select Model and Effort'
-画面は `› 1. gpt-6-astra (current)' の形。記号だけを差し替えれば
-プロンプト検出・ハイライト・ダッシュボードの「選択待ち」判定・
-数字送信（メニュー `n' / ダッシュボードの `1' `2' `3'）がそのまま効く。"
+3 つの CLI で**行の形は同じ**（記号 + 空白 + 数字 + ピリオド）で、
+記号だけが違う（すべて実測）:
+
+  claude  `❯ 1. りんご'
+  codex   `› 1. gpt-6-astra (current)'   （Select Model / 信頼確認）
+  agy     `> 1. Yes'                     （コマンド実行の許可）
+
+記号を差し替えるだけで、プロンプト検出・ハイライト・ダッシュボードの
+「選択待ち」判定・数字送信がそのまま効く。
+
+**`>' を含めているので、本文中の markdown 引用（`> 1. …'）に
+誤反応しうる**。誤反応しても起きるのは行のハイライトと「選択待ち」表示
+だけだが、気になるなら `\"[❯›]\"' に戻す。"
   :type 'regexp
   :group 'zellij-send)
 
@@ -1204,16 +1214,21 @@ claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
 
 (defcustom zellij-send-slash-support-alist
   '(("/compact" . ("claude" "codex"))
-    ("/clear"   . ("claude" "codex")))
+    ("/clear"   . ("claude" "codex" "agy")))
   "共通スラッシュコマンドを受け付けるエージェント名の対応表。
 
 `zellij-send-compact' / `zellij-send-cc-clear' はこの表を見て、
 対応が判っていないコマンドのときは送らない。「テキストを送るだけだから
 どの CLI でも許可」は妥当ではない——受け取った側は本文として解釈し、
-そのまま作業を始めてしまう（astra のレビューで指摘）。
+そのまま作業を始めてしまう。
 
-claude と codex はどちらも `/compact' と `/clear' を持つ（codex は公式
-ドキュメントで確認。ただし実行中は無効）。"
+- claude / codex: `/compact' と `/clear' の両方を持つ
+  （codex は公式ドキュメントで確認。ただし実行中は無効）
+- agy（Antigravity CLI）: **`/compact' は無い**。2026-09-07 に
+  ペインの補完メニューで `/comp' と打って `No matches' を確認した
+  （本人は「ある」と答えたが実機は否定した。自己申告を信用しないこと）。
+  `/clear'（Clear conversation and start a new one）はある。
+  近いのは `/context'（Visualize current context usage）だが別物"
   :type '(alist :key-type string :value-type (repeat string))
   :group 'zellij-send)
 
@@ -1272,7 +1287,8 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
 
 (defcustom zellij-send-progress-file-alist
   '(("claude" . "CLAUDE.md")
-    ("codex"  . "AGENTS.md"))
+    ("codex"  . "AGENTS.md")
+    ("agy"    . "GEMINI.md"))
   "エージェント名 → `zellij-send-save-progress' が書かせるファイル名。
 一覧に無いエージェントには `zellij-send-progress-file-default' を使う。
 CLAUDE.md を無条件に指定すると codex が読まないファイルに書かせることになる。"
@@ -2371,20 +2387,31 @@ claude のログが開けてしまい、自分の出力だと誤解する（astr
              (pop-to-buffer main-buf)))
          (message "送信しました → [%s]" session))))))
 
+(defcustom zellij-send-number-reply-commands '("claude" "agy")
+  "選択肢に数字を送って答えられると**実測で確認した**エージェントの一覧。
+
+送り方は本文と同じ `paste' + CR なので、受け手が貼り付けられた数字を
+選択として扱うかどうかは CLI ごとに違う（2026-09-07 実測）:
+
+  claude  ○  選択肢は数字キーが直接効く
+  agy     ○  許可ダイアログ `> 1. Yes' に `paste' + CR の `1' で確定した
+  codex   ×  **数字キーを受け付けない**。信頼確認の画面に `1' を送っても
+             何も起きず `Press enter to continue' のままで、Enter で確定した
+
+一覧に無いエージェントではキー透過モード（\\[zellij-send-keys-mode]）の
+↑↓ と RET で選ぶ。あれは画面を解釈せず生のキーを送るのでどこでも効く。
+**未確認の CLI をここに足さないこと**——選択ではない別の操作になりうる。"
+  :type '(repeat string)
+  :group 'zellij-send)
+
 (defun zellij-send--assert-number-reply ()
   "数字の送信（本文として `paste' + CR）が通じるエージェントか確かめる。
-
-**Claude Code 専用**。Claude Code の選択肢は数字キーが直接効くが、
-codex の承認ダイアログは **数字キーを受け付けず Enter で確定する**
-（2026-09-07 実測: 信頼確認の画面に `1' を送っても何も起きず、
-`Press enter to continue' のままだった）。そこへ本文として `1' を
-`paste' して CR を送ると、選択ではなく別の操作になりかねない。
-
-他のエージェントではキー透過モード（\\[zellij-send-keys-mode]）の
-↑↓ と RET で選ぶ。あれは画面を解釈せず生のキーを送るので確実。"
-  (unless (zellij-send--claude-confirmed-p)
-    (user-error "数字での回答は Claude Code 専用です（%s）。C-c C-t のキー透過モードで ↑↓ と RET を使ってください"
-                (or (zellij-send--agent-name) "コマンド不明"))))
+可否は `zellij-send-number-reply-commands'。コマンドが確定していない
+セッションでは既定値で代用せずに断る。"
+  (let ((name (zellij-send--agent-name)))
+    (unless (and name (member name zellij-send-number-reply-commands))
+      (user-error "数字での回答は %s では確認できていません。C-c C-t のキー透過モードで ↑↓ と RET を使ってください"
+                  (or name "コマンド不明")))))
 
 (defun zellij-send-reply-number ()
   "数字を入力して zellij セッションに送信する。

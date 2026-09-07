@@ -73,13 +73,18 @@
   :type 'integer
   :group 'zellij-send-dashboard)
 
-(defcustom zellij-send-dashboard-working-regexp "esc to interrupt"
+(defcustom zellij-send-dashboard-working-regexp "esc to \\(?:interrupt\\|cancel\\)"
   "AI が処理中であることを示す、画面上のスピナー行の正規表現。
-Claude Code は考え中・ツール実行中に
-`✳ Frobnicating… (12s · esc to interrupt)' のような行を出す。
-ただし**本文をそのまま流し込んでいる間はこの行が出ない**ため、
-これだけでは処理中を取りこぼす（`zellij-send-dashboard-active-window'
-による画面変化の検出と併用する）。"
+
+CLI ごとの文言（すべて実測）:
+
+  claude  `✳ Frobnicating… (12s · esc to interrupt)'
+  codex   `• Working (2s • esc to interrupt)'
+  agy     `esc to cancel'（`⣾ Generating...' などのスピナーと同時に出る）
+
+**agy だけ cancel** なので両方を拾う。ただし**本文をそのまま流し込んで
+いる間はこの行が出ない**ため、これだけでは処理中を取りこぼす
+（`zellij-send-dashboard-active-window' による画面変化の検出と併用する）。"
   :type 'regexp
   :group 'zellij-send-dashboard)
 
@@ -98,7 +103,7 @@ Claude Code は本文を流している間スピナー行を出さないので�
 (defcustom zellij-send-dashboard-noise-regexps
   '("\\`[[:space:]]*\\'"
     "\\`[─│╭╮╰╯━┃┏┓┗┛[:space:]]*\\'"
-    "\\`[❯›][[:space:]]*\\'"
+    "\\`[❯›>][[:space:]]*\\'"
     "\\`›[[:space:]]*Ask Codex to do anything[[:space:]]*\\'"
     "shortcuts"
     "bypass permissions"
@@ -107,7 +112,7 @@ Claude Code は本文を流している間スピナー行を出さないので�
 入力ボックスやフッタ行を除外し、スピナー行
 （例: `✳ Frobnicating… (12s · esc to interrupt)'）を拾うため。
 
-記号は claude の `❯' と codex の `›' の両方を外す。ただし
+記号は claude の `❯'、codex の `›'、agy の `>' を外す。ただし
 **空のプロンプト行を外すだけでは足りない**——codex の入力欄には
 プレースホルダ `› Ask Codex to do anything' が入るので、その行だけを
 狭く指定して外す（astra の指摘）。`›' で始まる行を全部捨てると

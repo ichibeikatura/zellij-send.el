@@ -200,7 +200,7 @@ Known limitation: `a` (transcript view) locates the transcript by working direct
 
 ### Multiple CLIs (Claude Code / Codex / …)
 
-**Each session can run a different command.** When you create a session with `[New]`, you are asked for the command right after the working directory (the default is `zellij-send-default-command`, so `RET` keeps the old behaviour). Completion offers `zellij-send-commands` (default `("claude" "codex" "antigravity")`), but any other command can be typed in.
+**Each session can run a different command.** When you create a session with `[New]`, you are asked for the command right after the working directory (the default is `zellij-send-default-command`, so `RET` keeps the old behaviour). Completion offers `zellij-send-commands` (default `("claude" "codex" "agy")`), but any other command can be typed in. `agy` is the Antigravity CLI executable.
 
 `+` (add an agent) **inherits the command of the current buffer**. Use `C-u C-c C-a +` to pick a different one.
 
@@ -208,25 +208,26 @@ When connecting to an existing session, the running command is recovered from th
 
 Buffers running something other than claude show the command in the header line (`Session: myproj00 [codex]`).
 
-| Feature | claude | codex | others |
-|---|---|---|---|
-| Sending (`C-c C-c`), history, reply buffer | yes | yes | yes |
-| Live screen (auto-receive), dashboard | yes | yes | yes |
-| **Key passthrough mode (`C-c C-t`)** | yes | yes | yes |
-| Interrupt (`C-c C-k`), quit (`q`) | yes | yes | yes |
-| Detecting/highlighting numbered choices | yes | yes | marker-dependent |
-| `/compact`, `/clear` | yes | yes | — |
-| Replay the conversation (`a`), output log (`l`) | yes | — | — |
-| Slash-command completion (`/`) | yes | — | — |
-| Answering AskUserQuestion (`u` / automatic) | yes | — | — |
-| Answering by number (`n`, dashboard `1` `2` `3`) | yes | — | — |
-| Remote Control QR, usage bars | yes | — | — |
+| Feature | claude | codex | agy | others |
+|---|---|---|---|---|
+| Sending (`C-c C-c`), history, reply buffer | yes | yes | yes | yes |
+| Live screen (auto-receive), dashboard | yes | yes | yes | yes |
+| **Key passthrough mode (`C-c C-t`)** | yes | yes | yes | yes |
+| Interrupt (`C-c C-k`), quit (`q`) | yes | yes | yes | yes |
+| Detecting/highlighting numbered choices | yes | yes | yes | marker-dependent |
+| Answering by number (`n`, dashboard `1` `2` `3`) | yes | **no** | yes | — |
+| `/clear` | yes | yes | yes | — |
+| `/compact` | yes | yes | **no** | — |
+| Replay the conversation (`a`), output log (`l`) | yes | — | — | — |
+| Slash-command completion (`/`) | yes | — | — | — |
+| Answering AskUserQuestion (`u` / automatic) | yes | — | — | — |
+| Remote Control QR, usage bars | yes | — | — | — |
 
-The lower half reads the **shape of Claude Code's screen** or its transcript, so it stops with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
+The bottom four rows read the **shape of Claude Code's screen** or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
 
-Answering by number is Claude-only because **codex does not accept digit keys as a selection** (measured 2026-09-07: sending `1` to its trust dialog did nothing; Enter confirmed it). Claude Code responds to digits directly.
+The `no` cells were measured on 2026-09-07. **codex does not accept digit keys as a selection** (sending `1` to its trust dialog did nothing; Enter confirmed it), and **agy has no `/compact`** (typing `/comp` in its completion menu gives `No matches` — it claimed otherwise, the pane disagreed). Both live in `zellij-send-number-reply-commands` and `zellij-send-slash-support-alist`; **do not add an unverified CLI to either** — these are sent as ordinary text plus Enter, so a receiver that does not treat them as a selection will do something else.
 
-`antigravity` is only a name in the candidate list — it is **untested** (not installed here). Nothing about it is guaranteed until launching, command recovery, multi-line Japanese input, choices, interrupt, quit and reconnect have been verified.
+Choice detection uses `zellij-send-prompt-marker-regexp` (default `[❯›>]`), matching claude's `❯ 1.`, codex's `› 1.` and agy's `> 1.`. Because `>` is included it can false-positive on a markdown blockquote (`> 1. …`) in the output; the only effects are line highlighting and a "waiting" status. Set it back to `[❯›]` if that bothers you.
 
 ### Send history
 
@@ -509,8 +510,19 @@ The Claude output log location (relative to the session's working directory; kee
 The commands offered when creating a session (any other command can still be typed in):
 
 ```elisp
-(setq zellij-send-commands '("claude" "codex" "antigravity"))
+(setq zellij-send-commands '("claude" "codex" "agy"))
 (setq zellij-send-default-command "claude")  ; the default, chosen by RET
+```
+
+Per-CLI capability tables, based on measurement. **Do not add an unverified CLI:**
+
+```elisp
+(setq zellij-send-number-reply-commands '("claude" "agy"))
+(setq zellij-send-slash-support-alist
+      '(("/compact" . ("claude" "codex"))
+        ("/clear"   . ("claude" "codex" "agy"))))
+(setq zellij-send-progress-file-alist
+      '(("claude" . "CLAUDE.md") ("codex" . "AGENTS.md") ("agy" . "GEMINI.md")))
 ```
 
 Question answering (see [Answering questions](#answering-questions-askuserquestion)):

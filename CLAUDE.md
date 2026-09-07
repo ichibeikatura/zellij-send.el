@@ -447,24 +447,64 @@ zellij-send--command        ← このバッファのペインで動いている
 | subscribe による画面表示・ダッシュボード | ○ | ○ |
 | **キー透過モード（`C-c C-t`）** | ○ | ○ |
 | 中断（Esc）・セッション終了 | ○ | ○ |
-| 選択肢の検出・ハイライト（`❯` と `›`） | ○ | ○ |
+| 選択肢の検出・ハイライト（`❯` `›` `>`） | ○ | ○ |
 | transcript 表示（`a`）・出力ログ（`l`） | ○ | — |
 | スラッシュコマンド補完（`/`）・先読み | ○ | — |
 | AskUserQuestion の解析（`u`・自動起動） | ○ | — |
-| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | — |
+| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | agy ○ / codex × |
 | Remote Control の QR（ダッシュボードの `r`） | ○ | — |
 | 使用状況バー（`/usage` 相当） | ○ | — |
-| `/compact` `/clear`（`zellij-send-slash-support-alist`） | ○ | codex ○ |
+| `/compact` `/clear`（`zellij-send-slash-support-alist`） | ○ | codex ○ / agy は `/clear` のみ |
 
 **画面を解釈しない機能はどのコマンドでも動く**。選択肢・権限ダイアログ・
 設定画面は、claude 以外ではキー透過モードで操作する（あれは画面を読まないので
 どの TUI にも効く）。claude 専用機能は `user-error` でその旨を伝えて止まる。
 
 claude 専用にしてあるのは上の表の 3 つに加えて、Remote Control の QR
-（`/remote-control` を打ち込む）、出力ログ（`l`。Stop フックが書くのは
-claude のログ）、**数字での回答**（`n` / ダッシュボードの `1` `2` `3`。
-理由は下記）。`/compact` と `/clear` は「claude 専用」ではなく
-`zellij-send-slash-support-alist` の**対応表**で持つ（codex も両方持つ）。
+（`/remote-control` を打ち込む）と出力ログ（`l`。Stop フックが書くのは
+claude のログ）。**「claude 専用」ではなく対応表で持つもの**が 2 つある:
+
+- `zellij-send-number-reply-commands`（既定 `("claude" "agy")`）——
+  数字での回答。codex は数字キーを受け付けないので入れない
+- `zellij-send-slash-support-alist`——`/compact` は claude と codex、
+  `/clear` は 3 つとも
+
+**未確認の CLI をこれらの一覧に足さないこと。** 送り方は本文と同じ
+`paste` + CR なので、受け手が選択として扱わなければ別の操作になる。
+
+### agy（Antigravity CLI）の実測（2026-09-07 / agy 1.1.27 + zellij 0.45.1）
+
+**同じ調査を繰り返さないこと。** 実行ファイル名は `agy`（`antigravity` ではない）。
+`~/.local/bin/agy` は 169 MB のネイティブバイナリなので、COMMAND 列には
+インタプリタを介さず `agy` とだけ出る。
+
+- **新規作成フローがそのまま通る**。`--spawn-session` で
+  attach --create-background → 320×80 に拡幅 → `zellij run` →
+  pane-id 取得（`terminal_1`）→ `--command` に `agy` を保存、まで確認
+- **許可ダイアログは `> 1. Yes` の形**（記号が ASCII の `>`）。
+  行の形は claude / codex と同じなので
+  `zellij-send-prompt-marker-regexp` を `[❯›>]` にして拾う。
+  ただし**信頼確認の画面だけは番号が無い**（`> Yes, I trust this folder` /
+  `No, exit`）ので検出できない。そこはキー透過モードで操作する
+- **数字キーが直接効き、`paste` + CR の数字でも確定する**（両方実測）。
+  だから `zellij-send-number-reply-commands` に入れてある
+- **Esc 1 回で中断できる**（許可ダイアログごとターンが取り消され、
+  入力欄に戻った）
+- **Ctrl+U で入力欄が 1 回で空になる**（codex は 1 行ずつしか消えない）
+- **処理中の表示は `esc to cancel`**。claude と codex の
+  `esc to interrupt` と違うので、`zellij-send-dashboard-working-regexp`
+  の既定を `esc to \(?:interrupt\|cancel\)` にしてある
+- **`/compact` は無い**。補完メニューで `/comp` と打つと `No matches`。
+  **本人は「ある」と答えたが実機は否定した**（自己申告を信用しないこと）。
+  `/clear`（Clear conversation and start a new one）はある。近いのは
+  `/context`（Visualize current context usage）だが別物
+- 補完メニューは **5 件 + `↓ 41 more`** の形で残り件数を自分で出す
+  （claude の 4 行固定より読みやすい）。全 46 件。ヒント行は
+  `↑/↓ Navigate · enter Select · tab Complete`
+- **プロジェクトごとの指示ファイルは `GEMINI.md`**（本人の回答。
+  `AGENTS.md` と `.gemini/rules/*.md` も読むとのこと）
+- 入力欄の記号は `>` 単独。ダッシュボードの「状況」列から外すため
+  ノイズ条件の記号にも `>` を足してある
 
 ### codex の実測（2026-09-07 / codex CLI + zellij 0.45.1）
 
@@ -473,7 +513,7 @@ claude のログ）、**数字での回答**（`n` / ダッシュボードの `1
 - **選択 UI の行の形は claude と同じ**。記号だけが違う
   （claude `❯ 1. …` / codex `› 1. …`）。信頼確認ダイアログ
   （`Do you trust the contents of this directory?`）でも同じ形だった。
-  `zellij-send-prompt-marker-regexp`（`[❯›]`）で両方拾える
+  `zellij-send-prompt-marker-regexp`（`[❯›>]`）で拾える
 - **ただし codex は数字キーを選択として受け付けない**。信頼確認の画面に
   `write -- 49`（`1`）を送っても何も起きず `Press enter to continue` の
   ままで、Enter で確定した。**claude の AskUserQuestion は数字が直接効く**
