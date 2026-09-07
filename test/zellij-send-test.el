@@ -609,10 +609,45 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   ;; （実測: codex は `node /opt/homebrew/bin/codex' として COMMAND 列に出る）
   (should (equal (zellij-send--command-name "node /opt/homebrew/bin/codex")
                  "codex"))
+  ;; **インタプリタ以外の引数は見ない**。全トークンを見ていた頃は
+  ;; `cat /tmp/claude' が claude 判定になっていた（astra の指摘）
+  (should (equal (zellij-send--command-name "cat /tmp/claude") "cat"))
+  (should (equal (zellij-send--command-name "grep claude foo.txt") "grep"))
+  ;; インタプリタでも既知の名前が無ければインタプリタ自身の名前
+  (should (equal (zellij-send--command-name "node server.js") "node"))
   ;; 一覧に無ければ先頭トークンの実行ファイル名
   (should (equal (zellij-send--command-name "/bin/zsh -l") "zsh"))
   (should-not (zellij-send--command-name ""))
   (should-not (zellij-send--command-name nil)))
+
+(ert-deftest zellij-send-test-slash-supported-p ()
+  "共通スラッシュコマンドは対応表にあるエージェントにだけ送る。"
+  (with-temp-buffer
+    (let ((zellij-send-default-command "claude"))
+      (setq-local zellij-send--command "claude")
+      (should (zellij-send--slash-supported-p "/compact"))
+      (should (zellij-send--slash-supported-p "/clear"))
+      (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
+      (should (zellij-send--slash-supported-p "/compact"))
+      ;; 対応が判らない CLI には送らない
+      (setq-local zellij-send--command "/bin/zsh")
+      (should-not (zellij-send--slash-supported-p "/compact"))
+      ;; 表に無いコマンドはどのエージェントでも送らない
+      (setq-local zellij-send--command "claude")
+      (should-not (zellij-send--slash-supported-p "/doctor")))))
+
+(ert-deftest zellij-send-test-progress-file ()
+  "作業内容を書かせる先はエージェントごとに変える。"
+  (with-temp-buffer
+    (let ((zellij-send-default-command "claude"))
+      (setq-local zellij-send--command "claude")
+      (should (equal (zellij-send--progress-file) "CLAUDE.md"))
+      (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
+      (should (equal (zellij-send--progress-file) "AGENTS.md"))
+      ;; 知らないエージェントには既定値
+      (setq-local zellij-send--command "/bin/zsh")
+      (should (equal (zellij-send--progress-file)
+                     zellij-send-progress-file-default)))))
 
 (ert-deftest zellij-send-test-claude-p ()
   "Claude Code のときだけ画面解析・transcript の経路に入る。
@@ -657,21 +692,18 @@ TITLE（`(.) - zellij:link'）と COMMAND（`node /opt/…'）に単独の空白
                                        "terminal_0" "NOPE"))
   (should-not (zellij-send--pane-field "" "terminal_0" "COMMAND")))
 
-(ert-deftest zellij-send-test-parse-pane-command ()
-  "COMMAND 列からペインで動いているコマンドを取り出す。
+(ert-deftest zellij-send-test-parse-terminal-panes ()
+  "端末ペインだけを (ID COMMAND EXITED-P) で拾う。
 TITLE は当てにならない（ターミナルから作ったセッションでは
-codex のペインのタイトルがセッション名になっていた。実測）。"
-  (should (equal (zellij-send--parse-pane-command zellij-send-test--panes-all
-                                                  "terminal_0")
-                 "node /opt/homebrew/bin/codex"))
-  (should (equal (zellij-send--parse-pane-command zellij-send-test--panes-all
-                                                  "terminal_1")
-                 "claude"))
-  ;; plugin ペインの COMMAND は `-' ではないが、CWD が `-' の行でも
-  ;; 列位置で読むので取り違えない
-  (should-not (zellij-send--parse-pane-command zellij-send-test--panes-all
-                                               "terminal_9"))
-  (should-not (zellij-send--parse-pane-command "" "terminal_0")))
+codex のペインのタイトルがセッション名になっていた。実測）ので COMMAND を見る。"
+  (should (equal (zellij-send--parse-terminal-panes zellij-send-test--panes-all)
+                 '(("terminal_0" "node /opt/homebrew/bin/codex" nil)
+                   ("terminal_1" "claude" t))))
+  ;; plugin ペインは落ちる（CWD が `-' でも列位置で読むので取り違えない）
+  (should-not (assoc "plugin_0"
+                     (zellij-send--parse-terminal-panes zellij-send-test--panes-all)))
+  (should-not (zellij-send--parse-terminal-panes ""))
+  (should-not (zellij-send--parse-terminal-panes "ヘッダの無い出力")))
 
 (ert-deftest zellij-send-test-parse-pane-exited-shared-parser ()
   "EXITED 列も COMMAND 列と同じ `zellij-send--pane-field' で読む。
@@ -689,21 +721,79 @@ codex のペインのタイトルがセッション名になっていた。実�
   (should (eq (zellij-send--parse-pane-exited "" "terminal_0") :unknown)))
 
 (ert-deftest zellij-send-test-pick-pane ()
-  "既定のコマンドと同名のペインを最優先し、次に他 CLI、最後に最初の端末ペイン。"
+  "既定のコマンド → 一覧にある他 CLI → 先頭、の順。生きているペインを優先。"
   (let ((zellij-send-default-command "claude")
         (zellij-send-commands '("claude" "codex")))
-    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
-                                             ("terminal_1" . "claude")))
+    ;; デフォルト shell ペインが残っていてもエージェントのペインを選ぶ
+    (should (equal (zellij-send--pick-pane '(("terminal_0" "/bin/zsh" nil)
+                                             ("terminal_1" "claude" nil)))
                    "terminal_1"))
-    ;; claude が無ければ一覧にある他の CLI を選ぶ
-    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
-                                             ("terminal_1" . "codex")))
+    ;; claude が無ければ一覧にある他の CLI（インタプリタ経由でも拾う）
+    (should (equal (zellij-send--pick-pane
+                    '(("terminal_0" "/bin/zsh" nil)
+                      ("terminal_1" "node /opt/homebrew/bin/codex" nil)))
                    "terminal_1"))
     ;; どれも無ければ最初の端末ペイン
-    (should (equal (zellij-send--pick-pane '(("terminal_0" . "zsh")
-                                             ("terminal_1" . "bash")))
+    (should (equal (zellij-send--pick-pane '(("terminal_0" "/bin/zsh" nil)
+                                             ("terminal_1" "bash" nil)))
                    "terminal_0"))
+    ;; 終了済みの claude より、生きている shell を先に選ぶ
+    (should (equal (zellij-send--pick-pane '(("terminal_0" "claude" t)
+                                             ("terminal_1" "/bin/zsh" nil)))
+                   "terminal_1"))
+    ;; 全部終了していれば同じ順で終了済みから選ぶ（最後の画面を読むため）
+    (should (equal (zellij-send--pick-pane '(("terminal_0" "/bin/zsh" t)
+                                             ("terminal_1" "claude" t)))
+                   "terminal_1"))
+    ;; COMMAND が読めなかったペイン（nil）でも落ちない
+    (should (equal (zellij-send--pick-pane '(("terminal_0" nil nil))) "terminal_0"))
     (should-not (zellij-send--pick-pane nil))))
+
+
+;;; 選択肢プロンプトの検出（claude の ❯ と codex の ›）
+
+(ert-deftest zellij-send-test-detect-prompt ()
+  "`❯ 1.' と `› 1.' の両方を選択肢プロンプトとして拾う。
+codex の `Select Model and Effort' は `› 1. gpt-6-astra (current)' の形
+（実測）で、記号以外は claude と同じ。"
+  (dolist (marker '("❯" "›"))
+    (with-temp-buffer
+      (insert "好きな果物はどれですか？\n"
+              "  " marker " 1. りんご\n"
+              "    2. みかん\n")
+      (should (zellij-send--detect-prompt))
+      ;; ハイライトの正規表現も同じ行に当たる
+      (goto-char (point-min))
+      (should (re-search-forward (zellij-send--prompt-regexp t) nil t))))
+  ;; 10 番以降も拾う
+  (with-temp-buffer
+    (insert "  ❯ 12. じゅうにばんめ\n")
+    (should (zellij-send--detect-prompt)))
+  ;; 入力欄（記号のあとに数字が来ない）はプロンプトではない
+  (with-temp-buffer
+    (insert "› Ask Codex to do anything\n")
+    (should-not (zellij-send--detect-prompt)))
+  (with-temp-buffer
+    (insert "❯ /effort high\n")
+    (should-not (zellij-send--detect-prompt)))
+  ;; 行頭に限定する。本文中に引用された選択肢は拾わない（astra の指摘）
+  (with-temp-buffer
+    (insert "画面には ❯ 1. りんご のように出ます\n")
+    (should-not (zellij-send--detect-prompt))))
+
+(ert-deftest zellij-send-test-prefetch-allowed-p ()
+  "先読みはコマンドが確定している claude のときだけ許す。
+`zellij-send--command' が nil のときに既定値で代用すると、
+codex のペインに `/' を打ち込む。"
+  (with-temp-buffer
+    (let ((zellij-send-default-command "claude"))
+      ;; コマンド不明: `--claude-p' は t でも先読みはしない
+      (should (zellij-send--claude-p))
+      (should-not (zellij-send--prefetch-allowed-p))
+      (setq-local zellij-send--command "claude")
+      (should (zellij-send--prefetch-allowed-p))
+      (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
+      (should-not (zellij-send--prefetch-allowed-p)))))
 
 ;;; セッションの連番（同じプロジェクトで複数エージェント）
 

@@ -98,13 +98,22 @@ Claude Code は本文を流している間スピナー行を出さないので�
 (defcustom zellij-send-dashboard-noise-regexps
   '("\\`[[:space:]]*\\'"
     "\\`[─│╭╮╰╯━┃┏┓┗┛[:space:]]*\\'"
-    "\\`❯[[:space:]]*\\'"
+    "\\`[❯›][[:space:]]*\\'"
+    "\\`›[[:space:]]*Ask Codex to do anything[[:space:]]*\\'"
     "shortcuts"
     "bypass permissions"
     "^[[:space:]]*⏵⏵")
   "「状況」列を拾うときに読み飛ばす行の正規表現。
-Claude Code の入力ボックスやフッタ行を除外し、
-スピナー行（例: `✳ Frobnicating… (12s · esc to interrupt)'）を拾うため。"
+入力ボックスやフッタ行を除外し、スピナー行
+（例: `✳ Frobnicating… (12s · esc to interrupt)'）を拾うため。
+
+記号は claude の `❯' と codex の `›' の両方を外す。ただし
+**空のプロンプト行を外すだけでは足りない**——codex の入力欄には
+プレースホルダ `› Ask Codex to do anything' が入るので、その行だけを
+狭く指定して外す（astra の指摘）。`›' で始まる行を全部捨てると
+`› 1. …' の選択肢まで消える。処理中の検出
+\(`zellij-send-dashboard-working-regexp' の既定 `esc to interrupt')は
+codex も同じ文言を出すのでそのまま効く（実測: `• Working (2s • esc to interrupt)'）。"
   :type '(repeat regexp)
   :group 'zellij-send-dashboard)
 
@@ -133,7 +142,9 @@ zellij 側で終了したセッションの行を消すために使う。
   :group 'zellij-send-dashboard)
 
 (defcustom zellij-send-dashboard-show-usage t
-  "non-nil ならダッシュボードに Claude の使用状況（/usage 相当）を表示する。"
+  "non-nil ならダッシュボードに Claude の使用状況（/usage 相当）を表示する。
+**Claude Code 専用の情報**なので、見出しにも「Claude」と明記する
+（他の CLI の残量だと誤解させないため。astra の指摘）。"
   :type 'boolean
   :group 'zellij-send-dashboard)
 
@@ -597,13 +608,13 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
     (if (null limits)
         (insert (propertize
                  (if data
-                     "使用状況: レート制限の情報がありません（Claude サブスク以外、または API 応答前）\n"
-                   (format "使用状況: %s がありません（README の statusLine フック設定を参照）\n"
+                     "Claude 使用状況: レート制限の情報がありません（Claude サブスク以外、または API 応答前）\n"
+                   (format "Claude 使用状況: %s がありません（README の statusLine フック設定を参照）\n"
                            (abbreviate-file-name
                             zellij-send-dashboard-usage-file)))
                  'face 'shadow))
       (insert (propertize
-               (format "── 使用状況 ─ %s前の記録 %s\n"
+               (format "── Claude 使用状況 ─ %s前の記録 %s\n"
                        (zellij-send-dashboard--fmt-elapsed
                         (float-time (time-since (cdr cache))))
                        (make-string 13 ?─))
@@ -673,8 +684,11 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
     (zellij-send-show-response)))
 
 (defun zellij-send-dashboard--send-choice (n)
-  "カーソル行のセッションが選択肢待ちなら N を送る。"
+  "カーソル行のセッションが選択肢待ちなら N を送る。
+数字が選択として効くのは Claude Code だけ
+（`zellij-send--assert-number-reply' 参照）。"
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
+    (zellij-send--assert-number-reply)
     (unless (zellij-send--detect-prompt)
       (user-error "[%s] は選択肢待ちではありません" zellij-send--session))
     (let ((session zellij-send--session))
@@ -964,13 +978,20 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
 (defun zellij-send-dashboard-remote-control ()
   "カーソル行のセッションを Remote Control に接続し、QR コードを表示する。
 セッションが claude.ai / Claude モバイルアプリから操作できるようになる。
-対象ペインに `/remote-control' を打ち込むため、待機中のセッションのみ
-許可する（作業中に割り込まないようにするため）。"
+対象ペインに `/remote-control' を打ち込むため、**Claude Code の**
+待機中のセッションのみ許可する（作業中に割り込まないため）。"
   (interactive)
   (let* ((buf (zellij-send-dashboard--buffer-at-point))
          (session (buffer-local-value 'zellij-send--session buf))
          (status (plist-get (gethash session zellij-send-dashboard--state)
                             :status)))
+    ;; `/remote-control' も、その後のメニュー解析（`❯' 行）も Claude Code の
+    ;; 機能。他の CLI に打ち込むと本文として解釈される（astra の指摘）
+    (unless (with-current-buffer buf (zellij-send--claude-p))
+      (user-error "Remote Control は Claude Code 専用です（[%s] は %s）"
+                  session
+                  (or (with-current-buffer buf (zellij-send--buffer-command))
+                      "コマンド不明")))
     (unless (eq status 'idle)
       (user-error "[%s] は待機中ではありません。作業が終わってから実行してください"
                   session))

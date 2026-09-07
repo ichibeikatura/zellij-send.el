@@ -404,11 +404,12 @@ zellij-send--command        ← このバッファのペインで動いている
             └─ --claude-p   ← Claude Code 専用機能はこれで囲う
 ```
 
-- **`--command-name` は全トークンを見る**。codex は
-  `node /opt/homebrew/bin/codex` として COMMAND 列に出る（実測）ので、
-  先頭トークンだけ見ると `node` になる。`zellij-send-commands` に挙げた
-  名前がトークンのどれかに一致すればそれを優先し、無ければ先頭トークンの
-  実行ファイル名を返す
+- **`--command-name` は先頭トークンを見るが、それが
+  `zellij-send-interpreters` のときだけ残りを探す**。codex は
+  `node /opt/homebrew/bin/codex` として COMMAND 列に出る（実測）ので
+  インタプリタ対応は要るが、**全トークンを無条件に見ると
+  `cat /tmp/claude` も claude と判定する**（astra のレビューで指摘）。
+  この判定は先読みの許可条件に使うので、誤って claude と読む方が危険
 - **既存セッションのコマンドは `list-panes --all` の COMMAND 列から復元する**。
   `list-panes`（`--all` 無し）の **TITLE は当てにならない**——ターミナルから
   作ったセッションではペインのタイトルがセッション名になっていることがある
@@ -418,8 +419,18 @@ zellij-send--command        ← このバッファのペインで動いている
   TITLE・COMMAND・CWD に空白が入るので**位置の決め打ちは禁止**
 - **コマンドは subscribe を張る前に確定させる**。`--subscribe-start` が
   スラッシュコマンドの先読みを呼ぶので、`zellij-send--command` が空のままだと
-  claude 以外のペインに `/` を打ち込んでしまう
-  （`zellij-send-attach-session-async` と `--spawn-session` の両方でこの順序）
+  claude 以外のペインに `/` を打ち込んでしまう。経路は 3 つあり
+  （`zellij-send-attach-session-async` / `--spawn-session` /
+  `--subscribe-ensure` の pane-id 不明時）、**どれもこの順序を守ること**
+- **先読みだけは `--claude-p` ではなく `--prefetch-allowed-p` で守る**。
+  前者はコマンド不明時に既定値（普通は claude）で代用するので、
+  「不明 = claude」になって codex のペインに `/` を打つ。ユーザーが自分で
+  呼ぶ `zellij-send-slash-command` と違い先読みは黙って走るため、
+  **コマンドが確定しているときだけ**許す
+- **ペインは TITLE ではなく COMMAND 列で選ぶ**（`--parse-terminal-panes` →
+  `--pick-pane`）。`list-panes --all` を 1 回だけ叩いて pane-id と
+  コマンドを同時に決める。生きているペインを優先し、全部 EXITED なら
+  同じ順で終了済みから選ぶ（最後の画面を読めるように）
 
 ### どの機能がどこまで効くか
 
@@ -429,13 +440,57 @@ zellij-send--command        ← このバッファのペインで動いている
 | subscribe による画面表示・ダッシュボード | ○ | ○ |
 | **キー透過モード（`C-c C-t`）** | ○ | ○ |
 | 中断（Esc）・セッション終了 | ○ | ○ |
+| 選択肢の検出・ハイライト（`❯` と `›`） | ○ | ○ |
 | transcript 表示（`a`）・出力ログ（`l`） | ○ | — |
 | スラッシュコマンド補完（`/`）・先読み | ○ | — |
 | AskUserQuestion の解析（`u`・自動起動） | ○ | — |
+| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | — |
+| Remote Control の QR（ダッシュボードの `r`） | ○ | — |
+| 使用状況バー（`/usage` 相当） | ○ | — |
+| `/compact` `/clear`（`zellij-send-slash-support-alist`） | ○ | codex ○ |
 
 **画面を解釈しない機能はどのコマンドでも動く**。選択肢・権限ダイアログ・
 設定画面は、claude 以外ではキー透過モードで操作する（あれは画面を読まないので
 どの TUI にも効く）。claude 専用機能は `user-error` でその旨を伝えて止まる。
+
+claude 専用にしてあるのは上の表の 3 つに加えて、Remote Control の QR
+（`/remote-control` を打ち込む）、出力ログ（`l`。Stop フックが書くのは
+claude のログ）、**数字での回答**（`n` / ダッシュボードの `1` `2` `3`。
+理由は下記）。`/compact` と `/clear` は「claude 専用」ではなく
+`zellij-send-slash-support-alist` の**対応表**で持つ（codex も両方持つ）。
+
+### codex の実測（2026-09-07 / codex CLI + zellij 0.45.1）
+
+**同じ調査を繰り返さないこと。**
+
+- **選択 UI の行の形は claude と同じ**。記号だけが違う
+  （claude `❯ 1. …` / codex `› 1. …`）。信頼確認ダイアログ
+  （`Do you trust the contents of this directory?`）でも同じ形だった。
+  `zellij-send-prompt-marker-regexp`（`[❯›]`）で両方拾える
+- **ただし codex は数字キーを選択として受け付けない**。信頼確認の画面に
+  `write -- 49`（`1`）を送っても何も起きず `Press enter to continue` の
+  ままで、Enter で確定した。**claude の AskUserQuestion は数字が直接効く**
+  ので、ここが最大の差。だから `zellij-send-reply-number` と
+  ダッシュボードの数字キーは claude 限定にしてある
+  （`--assert-number-reply`）。他の CLI はキー透過モードの ↑↓ + RET
+- **`paste` + `write 13` で送信は確定する**（実測: 1565 字の 1 行が
+  1 メッセージとして届き、返答があった）
+- **複数行の日本語も 1 つの入力として入る**。行ごとに実行されない
+  （bracketed paste が効いている）。`--` を置いてあるので
+  `3行目 -- ハイフン始まりの行` もそのまま通った
+- **長文は `[Pasted Content N chars]` に畳まれる**（claude の
+  `[Pasted text #1 +59 lines]` と同じ症状）。実測: 2399 字（80 行）と
+  1565 字（1 行）は畳まれ、1000 字（1 行）と 59 字（30 行）は畳まれなかった。
+  **黒板バッファには本文ではなくプレースホルダが映る**
+- **Ctrl+U は 1 行ずつしか消さない**（claude は入力欄ごと消える）。
+  codex の入力欄を片付ける実装を書くならここに注意。いまは
+  スラッシュコマンドの経路が claude 限定なので影響しない
+- **処理中の表示は `• Working (2s • esc to interrupt)`** で、
+  `zellij-send-dashboard-working-regexp` の既定 `esc to interrupt` が
+  そのまま一致する。ただし入力欄のプレースホルダは
+  `› Ask Codex to do anything` なので、ダッシュボードの「状況」列から
+  外すノイズ条件に**その行だけを狭く**足してある（`›` で始まる行を
+  全部捨てると `› 1. …` の選択肢まで消える）
 
 ### 新規セッションのコマンド選択
 

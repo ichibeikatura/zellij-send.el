@@ -208,17 +208,25 @@ When connecting to an existing session, the running command is recovered from th
 
 Buffers running something other than claude show the command in the header line (`Session: myproj00 [codex]`).
 
-| Feature | claude | codex / others |
-|---|---|---|
-| Sending (`C-c C-c`), history, reply buffer | yes | yes |
-| Live screen (auto-receive), dashboard | yes | yes |
-| **Key passthrough mode (`C-c C-t`)** | yes | yes |
-| Interrupt (`C-c C-k`), quit (`q`) | yes | yes |
-| Replay the conversation (`a`), output log (`l`) | yes | — |
-| Slash-command completion (`/`) | yes | — |
-| Answering AskUserQuestion (`u` / automatic) | yes | — |
+| Feature | claude | codex | others |
+|---|---|---|---|
+| Sending (`C-c C-c`), history, reply buffer | yes | yes | yes |
+| Live screen (auto-receive), dashboard | yes | yes | yes |
+| **Key passthrough mode (`C-c C-t`)** | yes | yes | yes |
+| Interrupt (`C-c C-k`), quit (`q`) | yes | yes | yes |
+| Detecting/highlighting numbered choices | yes | yes | marker-dependent |
+| `/compact`, `/clear` | yes | yes | — |
+| Replay the conversation (`a`), output log (`l`) | yes | — | — |
+| Slash-command completion (`/`) | yes | — | — |
+| Answering AskUserQuestion (`u` / automatic) | yes | — | — |
+| Answering by number (`n`, dashboard `1` `2` `3`) | yes | — | — |
+| Remote Control QR, usage bars | yes | — | — |
 
-The last three read the **shape of Claude Code's screen** or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
+The lower half reads the **shape of Claude Code's screen** or its transcript, so it stops with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
+
+Answering by number is Claude-only because **codex does not accept digit keys as a selection** (measured 2026-09-07: sending `1` to its trust dialog did nothing; Enter confirmed it). Claude Code responds to digits directly.
+
+`antigravity` is only a name in the candidate list — it is **untested** (not installed here). Nothing about it is guaranteed until launching, command recovery, multi-line Japanese input, choices, interrupt, quit and reconnect have been verified.
 
 ### Send history
 
