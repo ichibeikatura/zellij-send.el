@@ -663,6 +663,18 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
 - transcript は初回に明示選択し、バッファローカルの `zellij-send--transcript-path` に保持する。
   更新日時による所属の推測は禁止。選択済みファイルが消えたらエラーとし、別ファイルへ
   自動で切り替えない。`zellij-send-select-transcript` で選び直せる。
+- **選択の候補は `MM-DD HH:MM  サイズ  題名` の行にする**（UUID のパスは出さない）。
+  題名は JSONL の **`ai-title` 行**（`{"type":"ai-title","aiTitle":"…"}`）から取る。
+  2026-09-09 に手元の 86 本で実測: 会話が進むたび追記されるので**末尾側にあり、
+  末尾から最も遠いもので 47 KB**。だから全文は読まず
+  `zellij-send-transcript-peek-bytes`（既定 128 KB）だけ両端を読む
+  （14 本で 26 ms）。`ai-title` が無い履歴（実測 86 本中 4 本。どれも
+  スラッシュコマンドだけのセッション）は最初のユーザー発言で代用し、
+  それも無ければ `(題名なし)`。**`<local-command-caveat>` の行は飛ばす**——
+  中身が毎回同じ英文なので題名にならない
+- 候補は**更新日時の新しい順**。並べるだけで、自動では選ばない。補完 UI に
+  五十音順へ崩されないよう `display-sort-function` を `identity` にした
+  補完表（`--transcript-table`）を渡す。候補行が重なったものにだけ UUID を足す
 - 出すのは `user` / `assistant` 行のみ。ブロックは
   **text / thinking / tool_use / tool_result を全部出す**。
   `mode` / `ai-title` / `file-history-snapshot` などの行は会話ではないので捨てる
@@ -685,6 +697,7 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
   `--user-cleared` は nil に戻るが、取り直しはしない）
 - 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
   `--transcript-trim` / `--transcript-clip` / `--transcript-block` /
+  `--transcript-ai-title` / `--transcript-first-user` / `--transcript-label` /
   `--claude-p`（旧 `--transcript-claude-p`。多 CLI 対応で
   バッファローカルの `zellij-send--command` を見るようになった）。
   テストが `test/` にある

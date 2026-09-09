@@ -907,6 +907,99 @@ codex のペインに `/' を打ち込む。"
                                (and ok '("送信本文")))))
             (when (buffer-live-p buf) (kill-buffer buf))))))))
 
+;;; transcript の候補行
+
+(ert-deftest zellij-send-test-transcript-ai-title ()
+  "ai-title 行から題名を取り、末尾に近いものを選ぶ。"
+  (let ((text (concat
+               "{\"type\":\"user\",\"message\":{\"content\":\"やあ\"}}\n"
+               "{\"type\":\"ai-title\",\"aiTitle\":\"古い題名\"}\n"
+               "{\"type\":\"assistant\"}\n"
+               "{\"type\":\"ai-title\",\"aiTitle\":\"新しい題名\"}\n")))
+    (should (equal (zellij-send--transcript-ai-title text) "新しい題名")))
+  ;; 壊れた行は読み飛ばして、その手前の ai-title を使う
+  (should (equal (zellij-send--transcript-ai-title
+                  (concat "{\"type\":\"ai-title\",\"aiTitle\":\"生き残り\"}\n"
+                          "{\"type\":\"ai-title\",\"aiTit"))
+                 "生き残り"))
+  (should-not (zellij-send--transcript-ai-title
+               "{\"type\":\"assistant\",\"message\":{}}\n")))
+
+(ert-deftest zellij-send-test-transcript-first-user ()
+  "ai-title が無いときの代わりに最初の発言を 1 行で返す。"
+  (should (equal (zellij-send--transcript-first-user
+                  "{\"type\":\"user\",\"message\":{\"content\":\"一行目\\n二行目\"}}\n")
+                 "一行目 二行目"))
+  ;; スラッシュコマンドの注意書きは毎回同じ英文なので題名にしない
+  (should (equal (zellij-send--transcript-first-user
+                  (concat "{\"type\":\"user\",\"message\":"
+                          "{\"content\":\"<local-command-caveat>Caveat: ...</local-command-caveat>\"}}\n"
+                          "{\"type\":\"user\",\"message\":"
+                          "{\"content\":\"<command-name>/model</command-name>\"}}\n"))
+                 "/model"))
+  ;; ツールの結果は発言ではない
+  (should (equal (zellij-send--transcript-first-user
+                  (concat "{\"type\":\"user\",\"message\":{\"content\":"
+                          "[{\"type\":\"tool_result\",\"content\":\"出力\"}]}}\n"
+                          "{\"type\":\"user\",\"message\":{\"content\":\"本題\"}}\n"))
+                 "本題"))
+  (should-not (zellij-send--transcript-first-user "{\"type\":\"assistant\"}\n")))
+
+(ert-deftest zellij-send-test-transcript-label ()
+  "候補行は 日時・サイズ・題名 の順で、長い題名は切り詰める。"
+  (let ((line (zellij-send--transcript-label
+               "会話履歴の選択肢が読めない"
+               (encode-time 0 33 17 9 9 2026) 380000)))
+    (should (string-prefix-p "09-09 17:33" line))
+    (should (string-match-p "371 KB" line))
+    (should (string-suffix-p "会話履歴の選択肢が読めない" line)))
+  (should (string-suffix-p "…" (zellij-send--transcript-label
+                                (make-string 200 ?a) (current-time) 10))))
+
+(ert-deftest zellij-send-test-transcript-candidates ()
+  "新しい順に並び、題名が同じものには UUID が付く。"
+  (let* ((root (make-temp-file "zjs-cand-" t))
+         (old-file (expand-file-name "aaaa-old.jsonl" root))
+         (new-file (expand-file-name "bbbb-new.jsonl" root)))
+    (unwind-protect
+        (progn
+          (write-region "{\"type\":\"ai-title\",\"aiTitle\":\"同じ題名\"}\n"
+                        nil old-file nil 'silent)
+          (write-region "{\"type\":\"ai-title\",\"aiTitle\":\"同じ題名\"}\n"
+                        nil new-file nil 'silent)
+          (set-file-times old-file (encode-time 0 0 12 1 9 2026))
+          (set-file-times new-file (encode-time 0 0 12 8 9 2026))
+          (let ((cands (zellij-send--transcript-candidates
+                        (list old-file new-file))))
+            (should (equal (mapcar #'cdr cands) (list new-file old-file)))
+            (should (string-match-p "同じ題名" (car (nth 0 cands)))))
+          ;; 日時・サイズ・題名がすべて同じなら UUID（ここではファイル名）が付く
+          (set-file-times old-file (encode-time 0 0 12 8 9 2026))
+          (let ((cands (zellij-send--transcript-candidates
+                        (list old-file new-file))))
+            (should-not (equal (car (nth 0 cands)) (car (nth 1 cands))))
+            (should (string-match-p "\\[" (car (nth 1 cands))))))
+      (delete-directory root t))))
+
+(ert-deftest zellij-send-test-transcript-title-fallback ()
+  "ai-title が無ければ最初の発言、それも無ければ (題名なし)。"
+  (let* ((root (make-temp-file "zjs-title-" t))
+         (titled (expand-file-name "a.jsonl" root))
+         (plain (expand-file-name "b.jsonl" root))
+         (empty (expand-file-name "c.jsonl" root)))
+    (unwind-protect
+        (progn
+          (write-region (concat "{\"type\":\"user\",\"message\":{\"content\":\"発言\"}}\n"
+                                "{\"type\":\"ai-title\",\"aiTitle\":\"題名\"}\n")
+                        nil titled nil 'silent)
+          (write-region "{\"type\":\"user\",\"message\":{\"content\":\"発言だけ\"}}\n"
+                        nil plain nil 'silent)
+          (write-region "" nil empty nil 'silent)
+          (should (equal (zellij-send--transcript-title titled) "題名"))
+          (should (equal (zellij-send--transcript-title plain) "発言だけ"))
+          (should (equal (zellij-send--transcript-title empty) "(題名なし)")))
+      (delete-directory root t))))
+
 (ert-deftest zellij-send-test-transcript-session-binding ()
   (let* ((root (make-temp-file "zjs-transcripts-" t))
          (zellij-send-transcript-dir root)
@@ -920,7 +1013,12 @@ codex のペインに `/' を打ち込む。"
           (write-region "" nil first nil 'silent)
           (write-region "" nil second nil 'silent)
           (cl-letf (((symbol-function 'completing-read)
-                     (lambda (&rest _) (cl-incf prompts) choice)))
+                     ;; 候補は「日時 サイズ 題名」の行なので、パスから引き直す
+                     (lambda (&rest _)
+                       (cl-incf prompts)
+                       (car (rassoc choice
+                                    (zellij-send--transcript-candidates
+                                     (list first second)))))))
             (with-temp-buffer
               (setq-local zellij-send--session "project00")
               (should (equal (zellij-send--transcript-file "/project") first))

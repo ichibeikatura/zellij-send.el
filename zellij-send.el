@@ -185,6 +185,14 @@ detach が効かなくてもこの時間で必ずプロセスを殺す。"
   :type 'directory
   :group 'zellij-send)
 
+(defcustom zellij-send-transcript-peek-bytes 131072
+  "transcript の題名を探すときに読むファイル両端のバイト数。
+ai-title 行は会話が進むたび追記されるので末尾側にある（実測 86 本で
+末尾から最も遠いもので 47 KB）。1 本 2 MB の履歴が何十本もあるため
+全文は読まず、末尾（ai-title）と先頭（最初の発言）だけを読む。"
+  :type 'integer
+  :group 'zellij-send)
+
 (defcustom zellij-send-transcript-max-block-lines nil
   "transcript の 1 ブロックを表示する最大行数。nil なら省略しない。
 ツールの出力（tool_result）はファイル全文を含むことがあるため、
@@ -592,9 +600,110 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
 (defvar-local zellij-send--transcript-path nil
   "このバッファのセッションにユーザーが対応付けた transcript。")
 
+(defun zellij-send--transcript-ai-title (text)
+  "TEXT（JSONL の断片）にある最後の ai-title を返す。無ければ nil。
+Claude Code は会話が進むたび ai-title 行を追記するので、
+末尾に近いものほど今の題名に近い。壊れた行は読み飛ばす。"
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-max))
+    (let (title)
+      (while (and (null title)
+                  (re-search-backward "^{.*\"type\":\"ai-title\"" nil t))
+        (let ((obj (ignore-errors
+                     (json-parse-string
+                      (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))
+                      :object-type 'alist :array-type 'list
+                      :null-object nil :false-object nil))))
+          (setq title (and obj (alist-get 'aiTitle obj)))))
+      (and (stringp title) (not (string-empty-p title)) title))))
+
+(defun zellij-send--transcript-first-user (text)
+  "TEXT（JSONL の断片）にある最初のユーザー発言を 1 行にして返す。
+タグ（`<command-name>' など）と改行は落とす。ツールの結果（role が
+user でも発言ではない）と、スラッシュコマンドの注意書き
+（`<local-command-caveat>' の行。中身は毎回同じ英文）は飛ばす。
+無ければ nil。"
+  (let (found)
+    (dolist (line (split-string text "\n" t))
+      (when (and (null found)
+                 (string-match-p "\"type\":\"user\"" line)
+                 (not (string-match-p "\"tool_result\"" line))
+                 (not (string-match-p "local-command-caveat" line)))
+        (let* ((obj (ignore-errors
+                      (json-parse-string line :object-type 'alist
+                                         :array-type 'list
+                                         :null-object nil :false-object nil)))
+               (body (and obj (zellij-send--transcript-text
+                               (alist-get 'content
+                                          (alist-get 'message obj))))))
+          (when (stringp body)
+            (setq body (string-trim
+                        (replace-regexp-in-string
+                         "[ \t\n\r]+" " "
+                         (replace-regexp-in-string "<[^>]*>" " " body))))
+            (unless (string-empty-p body) (setq found body))))))
+    found))
+
+(defun zellij-send--transcript-label (title time bytes)
+  "transcript 1 本の候補行を作る。TITLE は長ければ切り詰める。"
+  (format "%s  %8s  %s"
+          (format-time-string "%m-%d %H:%M" time)
+          (zellij-send--transcript-size bytes)
+          (truncate-string-to-width title 60 nil nil "…")))
+
+(defun zellij-send--transcript-peek (file tail)
+  "FILE の先頭（TAIL が nil）または末尾（非 nil）を文字列で返す。
+読む長さは `zellij-send-transcript-peek-bytes'。"
+  (let* ((size (or (file-attribute-size (file-attributes file)) 0))
+         (n zellij-send-transcript-peek-bytes)
+         (beg (if tail (max 0 (- size n)) 0))
+         (end (if tail size (min size n))))
+    (with-temp-buffer
+      (ignore-errors (insert-file-contents file nil beg end))
+      (buffer-string))))
+
+(defun zellij-send--transcript-title (file)
+  "FILE の会話の題名を返す。ai-title → 最初の発言 → `(題名なし)' の順。"
+  (or (zellij-send--transcript-ai-title (zellij-send--transcript-peek file t))
+      (zellij-send--transcript-first-user (zellij-send--transcript-peek file nil))
+      "(題名なし)"))
+
+(defun zellij-send--transcript-candidates (files)
+  "FILES を新しい順に並べ、(候補行 . パス) の alist にする。
+候補行が重なると選べないので、重なったものには UUID を足す。"
+  (let ((rows (sort (mapcar (lambda (f)
+                              (let ((a (file-attributes f)))
+                                (list f
+                                      (file-attribute-modification-time a)
+                                      (or (file-attribute-size a) 0))))
+                            files)
+                    (lambda (a b) (time-less-p (nth 1 b) (nth 1 a)))))
+        out)
+    (dolist (row rows)
+      (let ((label (zellij-send--transcript-label
+                    (zellij-send--transcript-title (nth 0 row))
+                    (nth 1 row) (nth 2 row))))
+        (when (assoc label out)
+          (setq label (format "%s  [%s]" label (file-name-base (nth 0 row)))))
+        (push (cons label (nth 0 row)) out)))
+    (nreverse out)))
+
+(defun zellij-send--transcript-table (cands)
+  "CANDS（(候補行 . パス)）を並べ替えない補完表にする。
+新しい順に並べてあるので、補完 UI の五十音順に崩されないようにする。"
+  (lambda (str pred action)
+    (if (eq action 'metadata)
+        '(metadata (display-sort-function . identity)
+                   (cycle-sort-function . identity))
+      (complete-with-action action cands str pred))))
+
 (defun zellij-send--transcript-file (dir &optional reselect)
   "DIR 内の transcript を明示的に選び、バッファごとに保持する。
-RESELECT が非 nil なら選び直す。更新日時から所属を推測しない。"
+RESELECT が非 nil なら選び直す。候補は更新日時の新しい順に並べ、
+`MM-DD HH:MM  サイズ  題名' の形で見せる（題名は JSONL の ai-title）。
+並べるだけで、更新日時から所属を推測して自動で選ぶことはしない。"
   (if (and (not reselect) zellij-send--transcript-path)
       (if (file-readable-p zellij-send--transcript-path)
           zellij-send--transcript-path
@@ -604,22 +713,23 @@ RESELECT が非 nil なら選び直す。更新日時から所属を推測しな
            (files (and (file-directory-p proj)
                        (directory-files proj t "\\.jsonl\\'"))))
       (when files
-        (setq zellij-send--transcript-path
-              (completing-read
-               (format "Transcript for %s (Claude session UUID): "
-                       zellij-send--session)
-               files nil t))))))
+        (let* ((cands (zellij-send--transcript-candidates files))
+               (choice (completing-read
+                        (format "%s の会話履歴（新しい順）: "
+                                (or zellij-send--session "このセッション"))
+                        (zellij-send--transcript-table cands)
+                        nil t)))
+          (setq zellij-send--transcript-path (cdr (assoc choice cands))))))))
 
 (defun zellij-send-select-transcript ()
   "現在のセッションに対応する Claude transcript を選び直す。
-Claude Code の session ID と JSONL の名前を照合する。
-対応付けはこのバッファが生きている間保持する。"
+候補は会話の題名で選ぶ。対応付けはこのバッファが生きている間保持する。"
   (interactive)
   (zellij-send--assert-session)
   (unless (zellij-send--claude-p)
     (user-error "Claude Code のセッションで使用してください"))
   (unless (zellij-send--transcript-file default-directory t)
-    (user-error "このディレクトリの transcript がありません")))
+    (user-error "履歴を選べませんでした（このディレクトリに transcript が無いか、選択を中止しました）")))
 
 (defun zellij-send--transcript-time (entry)
   "ENTRY の timestamp を `MM-DD HH:MM:SS' に整形する。読めなければ空文字。"
