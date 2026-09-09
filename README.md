@@ -129,7 +129,11 @@ For **existing** sessions (not created by this package), the pane id is unknown,
 
 ### 2. Send text
 
-Type your message in the buffer and press `C-c C-c` to send. The buffer is cleared automatically after sending.
+Type your message in the buffer and press `C-c C-c` to send.
+
+Sending only clears the buffer (or closes a reply buffer) if it has not been edited
+since the send started. Edits during sending preserve the entire buffer, including
+the already sent text. Failed sends preserve the text as well.
 
 ### 3. Read the AI's response
 
@@ -196,7 +200,7 @@ The new session takes the current session's base name plus the lowest free count
 
 **One zellij session per agent**, so sending, auto-receiving and `q` (quit) keep working per buffer as before — quitting one agent leaves the others alone. The dashboard (`d`) lists each of them on its own row.
 
-Known limitation: `a` (transcript view) locates the transcript by working directory, so with several agents in one directory it may pick the wrong one (it takes the most recently modified).
+`a` (transcript view) asks you to select the JSONL on first use and retains that association in each session buffer. It never chooses another agent’s history by modification time.
 
 ### Multiple CLIs (Claude Code / Codex / …)
 
@@ -268,8 +272,10 @@ the screen look frozen. `g` warns before discarding a non-empty draft. `C-u g` i
 the scrollback (only meaningful for commands that are not full-screen TUIs).
 
 - Non-Claude commands, and `C-u a`, keep the old behaviour: dump the zellij screen.
-- The transcript is picked by most-recent modification time within the project
-  directory, so running two sessions in the same working directory can pick the wrong one.
+- On first use, select the JSONL named for the Claude session ID, even if there is only
+  one candidate. The association lasts until the buffer is closed. After switching
+  conversations in Claude, use `M-x zellij-send-select-transcript` to choose again.
+  A missing selected file raises an error instead of switching to another history.
 - Images are never printed as base64. An image in a tool result becomes a one-line summary
   (`[画像 image/png 66 KB]`) — the data is megabytes long and unreadable anyway.
 - Any line longer than `zellij-send-transcript-max-line-length` (default 2000 characters)

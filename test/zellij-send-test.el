@@ -880,6 +880,63 @@ codex のペインに `/' を打ち込む。"
   ;; 1 桁しかなければ連番ではない
   (should (equal (zellij-send--session-base "myproj1") "myproj1")))
 
+(ert-deftest zellij-send-test-send-preserves-inflight-edits ()
+  (dolist (reply '(nil t))
+    (dolist (edit '(nil t))
+      (dolist (ok '(nil t))
+        (let ((buf (generate-new-buffer " *zjs-send-test*")) callback
+              (zellij-send--history-table (make-hash-table :test #'equal)))
+          (unwind-protect
+              (cl-letf (((symbol-function 'zellij-send--send)
+                         (lambda (_session _text cb) (setq callback cb))))
+                (with-current-buffer buf
+                  (setq-local zellij-send--session "test00")
+                  (insert "送信本文")
+                  (if reply (zellij-send--reply-send) (zellij-send-send))
+                  (when edit (insert "追記")))
+                ;; 実際の非同期コールバック同様、別バッファから完了させる。
+                (with-temp-buffer (funcall callback ok))
+                (if (and reply ok (not edit))
+                    (should-not (buffer-live-p buf))
+                  (should (buffer-live-p buf))
+                  (with-current-buffer buf
+                    (should (equal (buffer-string)
+                                   (cond (edit "送信本文追記")
+                                         (ok "") (t "送信本文"))))))
+                (should (equal (zellij-send-history "test00")
+                               (and ok '("送信本文")))))
+            (when (buffer-live-p buf) (kill-buffer buf))))))))
+
+(ert-deftest zellij-send-test-transcript-session-binding ()
+  (let* ((root (make-temp-file "zjs-transcripts-" t))
+         (zellij-send-transcript-dir root)
+         (proj (expand-file-name (zellij-send--transcript-slug "/project") root))
+         (first (expand-file-name "session-a.jsonl" proj))
+         (second (expand-file-name "session-b.jsonl" proj))
+         (choice first) (prompts 0))
+    (unwind-protect
+        (progn
+          (make-directory proj)
+          (write-region "" nil first nil 'silent)
+          (write-region "" nil second nil 'silent)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (cl-incf prompts) choice)))
+            (with-temp-buffer
+              (setq-local zellij-send--session "project00")
+              (should (equal (zellij-send--transcript-file "/project") first))
+              (setq choice second)
+              (should (equal (zellij-send--transcript-file "/project") first))
+              (should (= prompts 1))
+              (with-temp-buffer
+                (setq-local zellij-send--session "project01")
+                (should (equal (zellij-send--transcript-file "/project") second)))
+              (should (equal (zellij-send--transcript-file "/project") first))
+              (should (equal (zellij-send--transcript-file "/project" t) second))
+              (delete-file second)
+              (should-error (zellij-send--transcript-file "/project")
+                            :type 'user-error))))
+      (delete-directory root t))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

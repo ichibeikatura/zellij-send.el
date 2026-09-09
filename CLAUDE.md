@@ -44,7 +44,7 @@ Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
 - スクリーン取得: `(zellij-send--dump-screen-async session callback)` — STDOUT 直読み（zellij 0.44+、tmpfile 不使用）。コールバックは要求元バッファをカレントにした状態で呼ばれる
 - ペイン起動: `(zellij-send--run-in-session-async session dir command callback)` — `zellij run` の STDOUT から pane-id を抽出して callback に渡す
 
-**送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。
+**送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。成功時も送信開始時の `buffer-chars-modified-tick` と比較し、途中で編集されていたらクリア・クローズ・ウィンドウ復元を行わない。
 
 **sentinel の中でミニバッファ入力をしない**: sentinel / プロセスフィルタは quit が抑止された状態で走ることがあり、その中で `completing-read` や `read-directory-name` を呼ぶと C-g が効かない・入力が壊れる。非同期結果を受けてユーザーに質問する場合は `(run-at-time 0 nil #'FUNC ARGS)` で sentinel を抜けてから行う（`zellij-send` → `zellij-send--select-session` がこの形）。
 
@@ -660,9 +660,9 @@ Claude Code 以外（`zellij-send-default-command` が claude で始まらない
 - transcript の場所は `~/.claude/projects/SLUG/*.jsonl`。SLUG は cwd の
   **英数字以外をすべて `-` に置換**したもの（`/Users/mck/.claude` →
   `-Users-mck--claude`。2026-08-02 に実在ディレクトリ名で確認）
-- 同じ cwd に複数の jsonl があるので**最終更新が最新のものを選ぶ**。
-  Stop フックは transcript のパスを Emacs に渡していないため、これ以上は絞れない。
-  同一ディレクトリで 2 セッション動かすと取り違えうる（既知の制約）
+- transcript は初回に明示選択し、バッファローカルの `zellij-send--transcript-path` に保持する。
+  更新日時による所属の推測は禁止。選択済みファイルが消えたらエラーとし、別ファイルへ
+  自動で切り替えない。`zellij-send-select-transcript` で選び直せる。
 - 出すのは `user` / `assistant` 行のみ。ブロックは
   **text / thinking / tool_use / tool_result を全部出す**。
   `mode` / `ai-title` / `file-history-snapshot` などの行は会話ではないので捨てる

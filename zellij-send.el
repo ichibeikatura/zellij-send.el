@@ -589,19 +589,37 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
   (replace-regexp-in-string
    "[^A-Za-z0-9]" "-" (directory-file-name (expand-file-name dir))))
 
-(defun zellij-send--transcript-file (dir)
-  "DIR に対応する transcript のうち最終更新が最も新しいものを返す。無ければ nil。
-同じディレクトリで複数のセッションを動かしていると取り違えうるが、
-Stop フックは transcript のパスを Emacs に渡していないので現状はこれで選ぶ。"
-  (let ((proj (expand-file-name (zellij-send--transcript-slug dir)
-                                zellij-send-transcript-dir)))
-    (when (file-directory-p proj)
-      (car (sort (directory-files proj t "\\.jsonl\\'")
-                 (lambda (a b)
-                   (time-less-p (file-attribute-modification-time
-                                 (file-attributes b))
-                                (file-attribute-modification-time
-                                 (file-attributes a)))))))))
+(defvar-local zellij-send--transcript-path nil
+  "このバッファのセッションにユーザーが対応付けた transcript。")
+
+(defun zellij-send--transcript-file (dir &optional reselect)
+  "DIR 内の transcript を明示的に選び、バッファごとに保持する。
+RESELECT が非 nil なら選び直す。更新日時から所属を推測しない。"
+  (if (and (not reselect) zellij-send--transcript-path)
+      (if (file-readable-p zellij-send--transcript-path)
+          zellij-send--transcript-path
+        (user-error "選択済みの履歴がありません。M-x zellij-send-select-transcript で選び直してください"))
+    (let* ((proj (expand-file-name (zellij-send--transcript-slug dir)
+                                   zellij-send-transcript-dir))
+           (files (and (file-directory-p proj)
+                       (directory-files proj t "\\.jsonl\\'"))))
+      (when files
+        (setq zellij-send--transcript-path
+              (completing-read
+               (format "Transcript for %s (Claude session UUID): "
+                       zellij-send--session)
+               files nil t))))))
+
+(defun zellij-send-select-transcript ()
+  "現在のセッションに対応する Claude transcript を選び直す。
+Claude Code の session ID と JSONL の名前を照合する。
+対応付けはこのバッファが生きている間保持する。"
+  (interactive)
+  (zellij-send--assert-session)
+  (unless (zellij-send--claude-p)
+    (user-error "Claude Code のセッションで使用してください"))
+  (unless (zellij-send--transcript-file default-directory t)
+    (user-error "このディレクトリの transcript がありません")))
 
 (defun zellij-send--transcript-time (entry)
   "ENTRY の timestamp を `MM-DD HH:MM:SS' に整形する。読めなければ空文字。"
@@ -2191,6 +2209,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
   (zellij-send--assert-session)
   (let* ((session zellij-send--session)
          (buf (current-buffer))
+         (tick (buffer-chars-modified-tick))
          (text (string-trim (buffer-string))))
     (when (string-empty-p text)
       (user-error "送信するテキストが空です"))
@@ -2201,12 +2220,13 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
        (when (and ok (buffer-live-p buf))
          (zellij-send--history-add session text)
          (with-current-buffer buf
-           (erase-buffer)
-           (set-buffer-modified-p nil)
-           (setq zellij-send--user-cleared nil)
-           ;; 送信し終えたら履歴を辿る位置はリセットする
-           (setq zellij-send--history-index nil)
-           (setq zellij-send--history-draft nil))
+           ;; 送信中に編集された下書きは、そのまま残す。
+           (when (= tick (buffer-chars-modified-tick))
+             (erase-buffer)
+             (set-buffer-modified-p nil)
+             (setq zellij-send--user-cleared nil)
+             (setq zellij-send--history-index nil)
+             (setq zellij-send--history-draft nil)))
          (message "送信しました → [%s]" session))))))
 
 (defun zellij-send-show-response (&optional arg)
@@ -2397,6 +2417,7 @@ claude のログが開けてしまい、自分の出力だと誤解する（astr
   (let ((session zellij-send--session)
         (text (string-trim (buffer-string)))
         (reply-buf (current-buffer))
+        (tick (buffer-chars-modified-tick))
         (main-buf zellij-send--reply-main-buffer)
         (wconf zellij-send--reply-window-config))
     (when (string-empty-p text)
@@ -2407,12 +2428,14 @@ claude のログが開けてしまい、自分の出力だと誤解する（astr
      (lambda (ok)
        (when ok
          (zellij-send--history-add session text)
-         (when (buffer-live-p reply-buf)
-           (kill-buffer reply-buf))
-         (if (window-configuration-p wconf)
-             (set-window-configuration wconf)
-           (when (and main-buf (buffer-live-p main-buf))
-             (pop-to-buffer main-buf)))
+         (when (and (buffer-live-p reply-buf)
+                    (with-current-buffer reply-buf
+                      (= tick (buffer-chars-modified-tick))))
+           (kill-buffer reply-buf)
+           (if (window-configuration-p wconf)
+               (set-window-configuration wconf)
+             (when (and main-buf (buffer-live-p main-buf))
+               (pop-to-buffer main-buf))))
          (message "送信しました → [%s]" session))))))
 
 (defcustom zellij-send-number-reply-commands '("claude" "agy")
