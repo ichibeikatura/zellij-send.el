@@ -264,6 +264,11 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 (defvar-local zellij-send--user-cleared nil
   "ユーザーが意図してクリアした場合 non-nil。自動更新・Stop フックの上書きを防ぐ。")
 
+(defvar-local zellij-send--pending-content nil
+  "選択中に届き、反映を保留している画面内容（最新の 1 つだけ）。
+`erase-buffer' はマークを point-min に潰すので、region が有効な間は
+黒板を書き換えない。選択が解けたら `zellij-send--pending-resume' が反映する。")
+
 (defvar-local zellij-send--reply-main-buffer nil
   "返信バッファを開いた元の zellij-send バッファ。")
 
@@ -890,6 +895,7 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
         (erase-buffer)
         (insert body))
       (set-buffer-modified-p nil)
+      (zellij-send--pending-drop)
       ;; 自動更新に上書きされないよう、クリアと同じ扱いにする
       (setq zellij-send--user-cleared t)
       (zellij-send--clear-prompt-highlight)
@@ -1181,26 +1187,83 @@ claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
 
 ;;; バッファ更新（共通処理）
 
+;; 選択中の書き換えは保留する。`erase-buffer' はマーク（marker）を point-min に
+;; 潰すので、C-SPC で置いたマークが受信のたびに先頭へ飛び、選択範囲が壊れる
+;; （`emacs -Q' の実機再現で確認）。保留するのは最新の 1 つだけで、選択が
+;; 解けたら反映する。解ける合図は 3 つ拾う:
+;; - `deactivate-mark-hook': C-g やコマンド終了時の解除。コマンドループが
+;;   解除するのは `post-command-hook' より後なので、これが無いと次の
+;;   コマンドまで反映が遅れる
+;; - `post-command-hook': `deactivate-mark' を通らずに `mark-active' が落ちた場合
+;; - `window-selection-change-functions': 選択を残したまま別ウィンドウへ移った場合
+
+(defun zellij-send--defer-update-p ()
+  "いま黒板を書き換えると選択を壊すなら non-nil。
+region が有効で、しかもこのバッファが選択ウィンドウに出ているときだけ保留する。
+`mark-active' 単独で見ないのは、`transient-mark-mode' が無効だと一度マークを
+置いただけで真のままになり、更新が永久に止まるため。選択ウィンドウに限るのは、
+region を残したまま別のウィンドウへ移ったときに表示を固めないため。"
+  (and (region-active-p)
+       (eq (current-buffer) (window-buffer (selected-window)))))
+
+(defun zellij-send--pending-drop ()
+  "保留中の画面内容を捨てる。
+送信・クリアなどで黒板の中身が決まったときに呼ぶ。捨てないと、後で選択を
+解いた瞬間に古い画面が復活する。"
+  (setq zellij-send--pending-content nil))
+
+(defun zellij-send--pending-resume (buf)
+  "BUF で保留していた画面内容を、選択が解けていれば反映する。
+保留中に編集・クリアされていたら反映せずに捨てる（入力を上書きしない）。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and zellij-send--pending-content
+                 (not (zellij-send--defer-update-p)))
+        (let ((content zellij-send--pending-content))
+          (zellij-send--pending-drop)
+          (when (and (not (buffer-modified-p))
+                     (not zellij-send--user-cleared))
+            (zellij-send--update-buffer content)))))))
+
+(defun zellij-send--pending-schedule (&rest _)
+  "選択が解けていれば、保留分の反映を予約する。
+`deactivate-mark-hook' はコマンドの途中からも呼ばれ、ウィンドウの変化フックは
+再描画の中で走るので、その場では書き換えず `run-at-time' で抜けてから行う。"
+  (when (and zellij-send--pending-content
+             (not (zellij-send--defer-update-p)))
+    (run-at-time 0 nil #'zellij-send--pending-resume (current-buffer))))
+
 (defun zellij-send--update-buffer (content)
   "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。
-カーソル位置とウィンドウの表示開始位置は可能な範囲で復元する
-（ポーリング更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。"
-  (let* ((win (get-buffer-window (current-buffer) t))
-         (pos (point))
-         (wstart (and (window-live-p win) (window-start win))))
-    (with-silent-modifications
-      (erase-buffer)
-      (insert content))
-    (goto-char (min pos (point-max)))
-    (when (window-live-p win)
-      (set-window-point win (point))
-      (when wstart
-        (set-window-start win (min wstart (point-max)) t))))
-  (set-buffer-modified-p nil)
-  (if (zellij-send--detect-prompt)
-      (zellij-send--highlight-prompt)
-    (zellij-send--clear-prompt-highlight))
-  (zellij-send--askq-maybe-auto))
+カーソル位置・マーク・ウィンドウの表示開始位置は可能な範囲で復元する
+（ポーリング更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。
+選択中（`zellij-send--defer-update-p'）は書き換えず、最新の内容だけを
+`zellij-send--pending-content' に取っておく。"
+  (if (zellij-send--defer-update-p)
+      ;; 画面と同じ内容に戻ったなら、保留するものは無い
+      (setq zellij-send--pending-content
+            (unless (string= content (buffer-string)) content))
+    (zellij-send--pending-drop)
+    (let* ((win (get-buffer-window (current-buffer) t))
+           (pos (point))
+           (mark (mark t))
+           (wstart (and (window-live-p win) (window-start win))))
+      (with-silent-modifications
+        (erase-buffer)
+        (insert content))
+      (goto-char (min pos (point-max)))
+      ;; `erase-buffer' はマークも point-min に潰す。point と同じく位置で戻す
+      (when mark
+        (set-marker (mark-marker) (min mark (point-max))))
+      (when (window-live-p win)
+        (set-window-point win (point))
+        (when wstart
+          (set-window-start win (min wstart (point-max)) t))))
+    (set-buffer-modified-p nil)
+    (if (zellij-send--detect-prompt)
+        (zellij-send--highlight-prompt)
+      (zellij-send--clear-prompt-highlight))
+    (zellij-send--askq-maybe-auto)))
 
 ;;; 自動受信（zellij subscribe）
 
@@ -1250,10 +1313,13 @@ claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
             (unless (equal content zellij-send--last-content)
               (setq zellij-send--last-content content
                     zellij-send--last-change-time (float-time)))
-            ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ
+            ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ。
+            ;; 保留があるときは画面と同じ内容でも渡す（A → 保留 B → A と
+            ;; 戻ったときに、古い B を保留したままにしないため）
             (when (and (not (buffer-modified-p))
                        (not zellij-send--user-cleared)
-                       (not (string= content (buffer-string))))
+                       (or zellij-send--pending-content
+                           (not (string= content (buffer-string)))))
               (zellij-send--update-buffer content))))))))
 
 (defun zellij-send--subscribe-filter (buf out)
@@ -2334,6 +2400,7 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
            (when (= tick (buffer-chars-modified-tick))
              (erase-buffer)
              (set-buffer-modified-p nil)
+             (zellij-send--pending-drop)
              (setq zellij-send--user-cleared nil)
              (setq zellij-send--history-index nil)
              (setq zellij-send--history-draft nil)))
@@ -2390,6 +2457,8 @@ ARG（\\[universal-argument]）付きならスクロールバックまで取る�
   ;; `--update-buffer' が書き込みを拒むため、コールバックが空振りする。
   (set-buffer-modified-p nil)
   (setq zellij-send--user-cleared nil)
+  ;; 取り直す画面の方が新しいので、選択中に保留した分は要らない
+  (zellij-send--pending-drop)
   (let ((buf (current-buffer)))
     (zellij-send--dump-screen-async
      zellij-send--session
@@ -2408,6 +2477,7 @@ ARG（\\[universal-argument]）付きならスクロールバックまで取る�
   (interactive)
   (erase-buffer)
   (set-buffer-modified-p nil)
+  (zellij-send--pending-drop)
   (setq zellij-send--user-cleared t)
   (message "クリアしました"))
 
@@ -3310,7 +3380,12 @@ claude 以外を動かしているセッションを見分けるためだけの�
   ;; ここで確実に止めておかないと、常駐プロセスがバッファより長生きする
   ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の
   ;; 確実な後始末になる。
-  (add-hook 'kill-buffer-hook #'zellij-send--subscribe-stop nil t))
+  (add-hook 'kill-buffer-hook #'zellij-send--subscribe-stop nil t)
+  ;; 選択中に保留した画面を、選択が解けたら反映する（`--update-buffer' の前の注記）
+  (add-hook 'deactivate-mark-hook #'zellij-send--pending-schedule nil t)
+  (add-hook 'post-command-hook #'zellij-send--pending-schedule nil t)
+  (add-hook 'window-selection-change-functions
+            #'zellij-send--pending-schedule nil t))
 
 (if (require 'markdown-mode nil t)
     (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"

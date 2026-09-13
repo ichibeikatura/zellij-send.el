@@ -585,6 +585,22 @@ UTF-8 バイト列に分解して送る）。画面を解釈しないので、As
 - ユーザーが編集中（`buffer-modified-p` = t）は自動更新で上書きしない
 - `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・自動更新の上書きを防ぐ
 - 更新時は point と `window-start` を復元する（`zellij-send--update-buffer`）。毎回 `point-min` に飛ばすと更新のたびに読んでいる位置が失われる
+- **選択中（region が有効で、黒板が選択ウィンドウに出ている間）は書き換えない**。
+  `erase-buffer` はマーク（marker）を point-min に潰すので、C-SPC で置いたマークが
+  受信のたびに先頭へ飛ぶ（2026-09-14 に `emacs -Q -nw` の実機再現で確認）。最新の
+  1 つだけ `zellij-send--pending-content` に保留し、選択が解けたら反映する。
+  - 判定は `region-active-p`。**`mark-active` 単独で見てはいけない**
+    （`transient-mark-mode` 無効だと真のまま残り、更新が永久に止まる）
+  - 解除の合図は `deactivate-mark-hook` / `post-command-hook` /
+    `window-selection-change-functions`（どれもバッファローカル、`--mode-setup` で登録）。
+    **`deactivate-mark-hook` を外さないこと**: コマンドループが mark を解除するのは
+    `post-command-hook` より後なので、それだけだと C-g の後も次のコマンドまで反映されない
+  - 反映は `run-at-time 0` で抜けてから（`deactivate-mark` はコマンドの途中からも呼ばれる）
+  - 保留中に編集・クリアされたら反映せず捨てる。送信成功・クリア・transcript 表示・
+    `show-live` も `--pending-drop` で捨てる（捨てないと選択を解いた瞬間に古い画面が復活する）
+  - subscribe の「画面と同じなら書かない」分岐は、保留があるときは素通しする
+    （A → 保留 B → A と戻ったときに B を残さないため）
+  - 保留しない通常の更新でも、マークの位置は point と同じく数値で戻す
 - **モードライン通知は持たない**（2026-07-27 撤去）。`global-mode-string` への `:eval` 登録は再描画のたびに全バッファを走査するうえ、状態表示は別途 `zellij-send-dashboard.el` で扱う。作業中/完了の検知（`zellij-send-ready-regexp` / `--is-ready` / `--notifying` / `--was-busy`）も併せて削除済み
 - 数字キー（`1`/`2`/`3`）の即送信も撤去。プロンプト表示後にバッファへ本文を書くと数字が誤送信されるため。選択肢の送信は `C-c C-a` → `n`（`zellij-send-reply-number`）。プロンプト行のハイライトは維持
 

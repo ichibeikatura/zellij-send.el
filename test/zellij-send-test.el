@@ -1035,6 +1035,134 @@ codex のペインに `/' を打ち込む。"
                             :type 'user-error))))
       (delete-directory root t))))
 
+;;; 選択中の更新保留（--update-buffer / --pending-*）
+
+(defmacro zellij-send-test--with-board (&rest body)
+  "選択ウィンドウに黒板バッファを出した状態で BODY を実行する。
+`transient-mark-mode' は batch では無効なので有効にして束縛する。"
+  (declare (indent 0) (debug t))
+  `(let ((buf (generate-new-buffer "*ai-test00*"))
+         (transient-mark-mode t))
+     (unwind-protect
+         (save-window-excursion
+           (switch-to-buffer buf)
+           (zellij-send-mode)
+           (setq-local zellij-send--session "test00")
+           ,@body)
+       (kill-buffer buf))))
+
+(defun zellij-send-test--run-timers ()
+  "`run-at-time' 0 で予約した処理を走らせる。"
+  (accept-process-output nil 0.05))
+
+(ert-deftest zellij-send-test-update-defers-while-selecting ()
+  "選択中は書き換えず、最新の内容だけを保留する。
+旧実装は `erase-buffer' でマークが point-min に潰れていた。"
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "line one\nline two")
+    (goto-char 6)
+    (push-mark (point) t t)
+    (forward-char 3)
+    (should (region-active-p))
+    (zellij-send--update-buffer "B")
+    (should (equal (buffer-string) "line one\nline two"))
+    (should (= (mark) 6))
+    (should (= (point) 9))
+    (should (equal zellij-send--pending-content "B"))
+    ;; さらに届いたら最新に差し替える
+    (zellij-send--update-buffer "C")
+    (should (equal zellij-send--pending-content "C"))
+    ;; 画面と同じ内容に戻ったら保留は無い
+    (zellij-send--update-buffer "line one\nline two")
+    (should-not zellij-send--pending-content)))
+
+(ert-deftest zellij-send-test-pending-resumes-on-deactivate ()
+  "選択を解くと保留していた最新の内容を反映する。"
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "A")
+    (push-mark (point-min) t t)
+    (zellij-send--update-buffer "B")
+    (zellij-send--update-buffer "C")
+    (should (equal (buffer-string) "A"))
+    (deactivate-mark)
+    (zellij-send-test--run-timers)
+    (should (equal (buffer-string) "C"))
+    (should-not zellij-send--pending-content)
+    (should-not (buffer-modified-p))))
+
+(ert-deftest zellij-send-test-pending-dropped-after-edit-or-clear ()
+  "保留中に入力・クリアされたら、選択を解いても古い画面を復活させない。"
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "A")
+    (push-mark (point-min) t t)
+    (zellij-send--update-buffer "B")
+    (goto-char (point-max))
+    (insert "draft")
+    (deactivate-mark)
+    (zellij-send-test--run-timers)
+    (should (equal (buffer-string) "Adraft"))
+    (should-not zellij-send--pending-content))
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "A")
+    (push-mark (point-min) t t)
+    (zellij-send--update-buffer "B")
+    (zellij-send-clear-buffer)
+    (should-not zellij-send--pending-content)
+    ;; クリア後に user-cleared が解除されても（送信成功時など）復活しない
+    (setq zellij-send--user-cleared nil)
+    (deactivate-mark)
+    (zellij-send-test--run-timers)
+    (should (equal (buffer-string) ""))))
+
+(ert-deftest zellij-send-test-pending-per-buffer ()
+  "保留はバッファごと。選択ウィンドウに出ていないバッファは保留しない。"
+  (zellij-send-test--with-board
+    (let ((other (generate-new-buffer "*ai-test01*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer other
+              (zellij-send-mode)
+              (zellij-send--update-buffer "X")
+              ;; region を残したまま別ウィンドウへ移った状態
+              (push-mark (point-min) t t)
+              (zellij-send--update-buffer "Y")
+              (should (equal (buffer-string) "Y"))
+              (should-not zellij-send--pending-content))
+            (zellij-send--update-buffer "A")
+            (push-mark (point-min) t t)
+            (zellij-send--update-buffer "B")
+            (should (equal zellij-send--pending-content "B"))
+            (should-not (buffer-local-value 'zellij-send--pending-content other)))
+        (kill-buffer other)))))
+
+(ert-deftest zellij-send-test-update-without-transient-mark-mode ()
+  "`transient-mark-mode' が無効なら保留しない（`mark-active' は真のまま残るため）。
+マークの位置は書き換えの前後で保つ。"
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "line one\nline two")
+    (let ((transient-mark-mode nil))
+      (push-mark 6 t t)
+      (should mark-active)
+      (zellij-send--update-buffer "line ONE\nline two")
+      (should (equal (buffer-string) "line ONE\nline two"))
+      (should (= (mark t) 6))
+      (should-not zellij-send--pending-content))))
+
+(ert-deftest zellij-send-test-subscribe-refreshes-stale-pending ()
+  "subscribe で A → 保留 B → A と戻ったら、保留の B を捨てる。
+画面と同じ内容は書き換えを省く分岐があり、そこで B が残っていた。"
+  (zellij-send-test--with-board
+    (zellij-send--subscribe-handle-line "{\"viewport\":[\"A\"]}")
+    (should (equal (buffer-string) "A"))
+    (push-mark (point-min) t t)
+    (zellij-send--subscribe-handle-line "{\"viewport\":[\"B\"]}")
+    (should (equal zellij-send--pending-content "B"))
+    (zellij-send--subscribe-handle-line "{\"viewport\":[\"A\"]}")
+    (should-not zellij-send--pending-content)
+    (deactivate-mark)
+    (zellij-send-test--run-timers)
+    (should (equal (buffer-string) "A"))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
