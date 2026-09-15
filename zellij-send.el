@@ -144,8 +144,18 @@ zellij は罫線 `─' や矢印 `←' などの曖昧幅の文字を 1 桁で�
 - `char-width-table' を Unicode 本来の幅に戻す
 - GUI で 1 桁に収まらない記号を、`zellij-send-grid-symbol-families' の
   字形を縮めたものに差し替える
-- 画面を映している間は折り返さない（`truncate-lines'）。書き始めたら、
-  または transcript を表示したら折り返しに戻す"
+折り返すかどうかは別の設定（`zellij-send-wrap-screen'）で決める。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(defcustom zellij-send-wrap-screen t
+  "非 nil なら、黒板がペインの画面を映している間も窓の幅で折り返す。
+新しい黒板を開いたときの既定値で、黒板ごとに `zellij-send-toggle-wrap'
+（メニュー `w'）で切り替えられる。切り替えは受信しても戻らない。
+
+折り返すと、ペインの幅（320 桁）いっぱいに引かれた罫線や窓より広い表が
+何行にも折れる。表を見るときだけ切る、という使い方を想定している。
+下書きと transcript はこの設定に関わらず折り返す。"
   :type 'boolean
   :group 'zellij-send)
 
@@ -257,6 +267,11 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 同時に開ける。**Claude Code 専用機能の分岐にはこちらを使い、
 `zellij-send-default-command' を見ないこと**（あれは新規作成時の
 既定値でしかない）。")
+
+(defvar-local zellij-send--wrap t
+  "非 nil なら、この黒板は画面を映している間も折り返す。
+黒板を開いたときに `zellij-send-wrap-screen' で初期化し、
+`zellij-send-toggle-wrap' で切り替える。")
 
 (defvar-local zellij-send--subscribe-process nil
   "このバッファに紐づく `zellij subscribe' の常駐プロセス。")
@@ -1331,19 +1346,34 @@ display-table の字形にはフェイスの名前しか付けられないので
 
 (defun zellij-send--grid-apply (screen &optional content)
   "黒板の折り返しと記号の差し替えを、いまの中身に合わせて切り替える。
-SCREEN が非 nil ならペインの画面（CONTENT）を映しているので折り返さず、
-CONTENT の記号を 1 桁に収める。nil なら下書きや transcript の文章なので
-折り返す。"
-  (when zellij-send-grid-align
-    (setq truncate-lines (and screen t))
-    (when (and screen content)
-      (zellij-send--grid-fit-symbols content))))
+SCREEN が非 nil ならペインの画面（CONTENT）を映しているので、
+`zellij-send--wrap' が nil のときだけ折り返しを切り、CONTENT の記号を
+1 桁に収める。nil なら下書きや transcript の文章なので必ず折り返す。"
+  (setq truncate-lines (and screen (not zellij-send--wrap)))
+  (when (and zellij-send-grid-align screen content)
+    (zellij-send--grid-fit-symbols content)))
 
 (defun zellij-send--grid-editing ()
   "書き始めたら折り返しに戻す（`first-change-hook'）。
 黒板は入力欄も兼ねるので、長い下書きが右に隠れないようにする。
 `--update-buffer' は `with-silent-modifications' で書くのでここを通らない。"
   (zellij-send--grid-apply nil))
+
+(defun zellij-send-toggle-wrap ()
+  "この黒板で、画面を折り返すかどうかを切り替える。
+既定は `zellij-send-wrap-screen'。切り替えは受信しても戻らない。
+表を見たいときに折り返しを切り、読み終えたら戻す、という使い方を想定する。
+押した時点の表示にもすぐ効かせる（下書きの途中でも切れる）。"
+  (interactive)
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません"))
+  (setq-local zellij-send--wrap (not zellij-send--wrap))
+  (setq truncate-lines (not zellij-send--wrap))
+  (when zellij-send--wrap
+    ;; 横にずらしたまま折り返すと左端が隠れる（`toggle-truncate-lines' と同じ）
+    (dolist (win (get-buffer-window-list nil nil t))
+      (set-window-hscroll win 0)))
+  (message "黒板の折り返し: %s" (if zellij-send--wrap "する" "しない")))
 
 ;; 選択中の書き換えは保留する。`erase-buffer' はマーク（marker）を point-min に
 ;; 潰すので、C-SPC で置いたマークが受信のたびに先頭へ飛び、選択範囲が壊れる
@@ -3488,7 +3518,8 @@ UTF-8 のバイト列に分解してから送る。"
     ("a" "会話の履歴を表示 (transcript)" zellij-send-show-response)
     ("g" "いまの画面に戻す（自動更新を再開）" zellij-send-show-live)
     ("l" "出力ログを開く (markdown)" zellij-send-open-log)
-    ("x" "表示内容をクリア"         zellij-send-clear-buffer)]
+    ("x" "表示内容をクリア"         zellij-send-clear-buffer)
+    ("w" "折り返しを切り替える（表を見るとき）" zellij-send-toggle-wrap)]
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
     ("n" "答える（数字を送る）"         zellij-send-reply-number)
@@ -3543,6 +3574,7 @@ claude 以外を動かしているセッションを見分けるためだけの�
   ;; 桁数の数え方を zellij に合わせる（`zellij-send-grid-align'）
   (when zellij-send-grid-align
     (setq-local char-width-table (zellij-send--root-char-width-table)))
+  (setq-local zellij-send--wrap zellij-send-wrap-screen)
   (add-hook 'first-change-hook #'zellij-send--grid-editing nil t)
   ;; 選択中に保留した画面を、選択が解けたら反映する（`--update-buffer' の前の注記）
   (add-hook 'deactivate-mark-hook #'zellij-send--pending-schedule nil t)

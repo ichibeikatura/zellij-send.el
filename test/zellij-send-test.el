@@ -1216,16 +1216,31 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
     (should-not (zellij-send--grid-pick-face ?─ 7 '("NoGlyph" "Wide") measure))))
 
 (ert-deftest zellij-send-test-grid-truncates-only-screen ()
-  "画面を映している間だけ折り返さず、書き始めたら折り返しに戻す。"
+  "折り返しを切った黒板でも、書き始めたら折り返しに戻す。"
+  (let ((zellij-send-wrap-screen nil))
+    (zellij-send-test--with-board
+      (zellij-send--update-buffer "─────")
+      (should truncate-lines)
+      (goto-char (point-max))
+      (insert "下書き")
+      (should-not truncate-lines)
+      (set-buffer-modified-p nil)
+      (zellij-send--update-buffer "─────")
+      (should truncate-lines))))
+
+(ert-deftest zellij-send-test-grid-toggle-wrap ()
+  "既定では画面も折り返す。切り替えは受信しても戻らない。"
   (zellij-send-test--with-board
     (zellij-send--update-buffer "─────")
-    (should truncate-lines)
-    (goto-char (point-max))
-    (insert "下書き")
     (should-not truncate-lines)
-    (set-buffer-modified-p nil)
+    (zellij-send-toggle-wrap)
+    (should truncate-lines)
+    (zellij-send--update-buffer "─────┐")
+    (should truncate-lines)
+    (zellij-send-toggle-wrap)
+    (should-not truncate-lines)
     (zellij-send--update-buffer "─────")
-    (should truncate-lines)))
+    (should-not truncate-lines)))
 
 (provide 'zellij-send-test)
 

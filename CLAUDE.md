@@ -646,7 +646,12 @@ GUI の字形の直し方で分かったこと:
 
 折り返しの切り替え:
 
-- 画面を映している間（`--update-buffer`）だけ `truncate-lines` を t にする
+- **既定は折り返す**（`zellij-send-wrap-screen`、既定 t。2026-09-15 に変更）。
+  表が出るより文章を読む方が多いため。表を見るときだけ `zellij-send-toggle-wrap`
+  （メニュー `w`）で切る。切り替えはバッファローカルの `zellij-send--wrap` に
+  持つので、受信（`--update-buffer`）しても戻らない
+- 折り返しを切った黒板では、画面を映している間（`--update-buffer`）だけ
+  `truncate-lines` を t にする。この切り替えは `zellij-send-grid-align` とは独立
 - **書き始めたら nil に戻す**（`first-change-hook`）。黒板は入力欄も兼ねるので、
   長い下書きが右に隠れないようにする。`--update-buffer` は
   `with-silent-modifications` で書くのでこのフックを通らない
