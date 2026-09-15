@@ -604,6 +604,54 @@ UTF-8 バイト列に分解して送る）。画面を解釈しないので、As
 - **モードライン通知は持たない**（2026-07-27 撤去）。`global-mode-string` への `:eval` 登録は再描画のたびに全バッファを走査するうえ、状態表示は別途 `zellij-send-dashboard.el` で扱う。作業中/完了の検知（`zellij-send-ready-regexp` / `--is-ready` / `--notifying` / `--was-busy`）も併せて削除済み
 - 数字キー（`1`/`2`/`3`）の即送信も撤去。プロンプト表示後にバッファへ本文を書くと数字が誤送信されるため。選択肢の送信は `C-c C-a` → `n`（`zellij-send-reply-number`）。プロンプト行のハイライトは維持
 
+## 黒板の桁揃え（調査済み・再調査不要）
+
+2026-09-15 に Emacs 32.0.50（GUI、`set-language-environment 'Japanese`、
+既定フォント `Mplus 1 code-14`）で実測。**同じ調査を繰り返さないこと。**
+`zellij-send-grid-align`（既定 t）で切り替える。
+
+表示がずれていた原因は 2 つ:
+
+- **曖昧幅の文字（`─` `←` `●` `█` `…` など）を Emacs は 2 桁で数える**。zellij は 1 桁。
+  日本語環境は `char-width-table` の上に「JIS X 0208 を 2 にする表」と
+  「曖昧幅を 2 にする表」を親子で積む（`use-cjk-char-width-table`）。
+  **一番下の親が Unicode 本来の幅**で zellij と一致するので、黒板でだけそれを
+  `setq-local` する（`--root-char-width-table`）
+- **GUI の描画幅は `char-width-table` では変わらない**。字形の幅で決まる。
+  既定フォントに無い記号は代わりのフォントで描かれ、`─` が Hiragino Sans の 14px、
+  `❯` が JetBrainsMono の 8px、`✻` が 10px、`⎿` が 14px とばらばらだった（ASCII は 7px）
+- ほかに、320 桁の画面が窓の幅で**折り返されていた**（`truncate-lines` が nil）
+
+GUI の字形の直し方で分かったこと:
+
+- **フォントセットはバッファごとに持てない**。`face-remap-add-relative` の `:fontset` も効かなかった
+- **`buffer-display-table` の字形にフェイスを付ける方法はバッファ単位で効く**。
+  文字側のフェイス（太字・選択肢ハイライトの overlay）に重ねても幅は崩れない。
+  フェイスは名前しか付けられないので、(字体 . 倍率) ごとに作る（`--grid-face`）
+- 日本語等幅フォント（PlemolJP35 / HackGen35）は ASCII も 8px なので、等倍では揃わない。
+  **字体を縮めて 1 桁の px に合わせる**（`--grid-pick-face`、倍率 1.0〜0.65）。
+  実測では Menlo 0.875 で罫線・矢印の大半、STIX Two Math で `⏺`（0.8）と
+  `⎿`（1.0）、`※` は STIX Two Math 0.7 で揃った
+- `:family` が無視されて代わりのフォントのまま縮むことがある（`❯` は Menlo を
+  指定しても JetBrainsMono で描かれた）。**px が合えばよい**ので、字体名ではなく
+  測った幅で判定する
+- **先に全範囲（約 1000 文字）を測ってはいけない**。字体の読み込みで初回 0.64 秒
+  固まり、subscribe のプロセスフィルタの中で起きる。画面に出た記号だけを測って
+  共有の display-table に足していく（`--grid-fit-symbols`）。それでも**初回だけ
+  約 0.4 秒**かかる（`emacs -Q` の起動直後。字体の読み込み）。2 回目以降は 0.05 ms
+- 検証は**別の GUI Emacs を `-Q` で起動して**行う（普段の Emacs に読み込まない）。
+  このとき既定フォントは `:font "Mplus 1 code-14"` で指定すること。
+  `:family` + `:height` だと `-Q` では効かず Helvetica（プロポーショナル）になり、
+  ずれを誤検出する（実際に踏んだ）
+
+折り返しの切り替え:
+
+- 画面を映している間（`--update-buffer`）だけ `truncate-lines` を t にする
+- **書き始めたら nil に戻す**（`first-change-hook`）。黒板は入力欄も兼ねるので、
+  長い下書きが右に隠れないようにする。`--update-buffer` は
+  `with-silent-modifications` で書くのでこのフックを通らない
+- transcript を表示したら nil（文章なので折り返す）
+
 ## 自動受信（zellij subscribe）
 
 セッションごとに `zellij subscribe` の常駐プロセスを 1 本持つ。**2 秒ポーリングは廃止**

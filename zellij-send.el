@@ -133,6 +133,31 @@ Emacs 側で好きなように折り返せる。"
                  (cons (integer :tag "桁") (integer :tag "行")))
   :group 'zellij-send)
 
+(defcustom zellij-send-grid-align t
+  "非 nil なら黒板バッファの桁を zellij の画面に揃える。
+
+zellij は罫線 `─' や矢印 `←' などの曖昧幅の文字を 1 桁で数えるが、
+日本語環境の Emacs は 2 桁で数え、GUI では全角の字形で描く
+（2026-09-15 実測: `─' が Hiragino Sans の 14px、ASCII は 7px）。
+有効にすると、このバッファの中だけ次の 3 つを切り替える:
+
+- `char-width-table' を Unicode 本来の幅に戻す
+- GUI で 1 桁に収まらない記号を、`zellij-send-grid-symbol-families' の
+  字形を縮めたものに差し替える
+- 画面を映している間は折り返さない（`truncate-lines'）。書き始めたら、
+  または transcript を表示したら折り返しに戻す"
+  :type 'boolean
+  :group 'zellij-send)
+
+(defcustom zellij-send-grid-symbol-families
+  '("Menlo" "DejaVu Sans Mono" "STIX Two Math" "Apple Symbols" "Symbola")
+  "黒板バッファで記号を 1 桁の幅に収めるために使う字体（先頭から試す）。
+既定フォントで 1 桁の幅にならない記号だけ、この字体の字形を縮めて描く。
+入っていない字体は飛ばす。実測では Menlo で罫線・矢印の大半が、
+STIX Two Math で `⏺' `⎿' が、Apple Symbols で残りの一部が収まった。"
+  :type '(repeat string)
+  :group 'zellij-send)
+
 (defcustom zellij-send-resize-detach-delay 2.0
   "拡幅用の attach クライアントを detach するまでの待ち時間（秒）。
 クライアントが繋がって pty の大きさがセッションに伝わるのを待つ。"
@@ -894,6 +919,8 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
       (with-silent-modifications
         (erase-buffer)
         (insert body))
+      ;; 画面ではなく文章なので折り返す
+      (zellij-send--grid-apply nil)
       (set-buffer-modified-p nil)
       (zellij-send--pending-drop)
       ;; 自動更新に上書きされないよう、クリアと同じ扱いにする
@@ -1187,6 +1214,137 @@ claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
 
 ;;; バッファ更新（共通処理）
 
+;; 黒板の桁揃え（`zellij-send-grid-align'）。320 桁の画面をそのまま映すので、
+;; 罫線が 2 桁に伸びたり窓の幅で折り返したりすると形が崩れる。
+;; どれもバッファローカルに切り替え、他のバッファの日本語表示には触らない。
+
+(defconst zellij-send--grid-symbol-ranges
+  '((#x2010 . #x205E) (#x2190 . #x21FF) (#x2300 . #x23FF)
+    (#x2500 . #x25FF) (#x2600 . #x26FF) (#x2700 . #x27BF))
+  "GUI で字形の幅を確かめる文字の範囲。
+一般句読点・矢印・その他の技術用記号・罫線とブロックと幾何学図形・
+その他の記号・装飾記号。TUI が描く記号（`─' `❯' `⏺' `⎿' `✔' `☐' `※'）は
+ここに入る。
+
+範囲は約 1000 文字あるが、**先に全部は測らない**。画面に出てきた文字だけを
+その場で測る（`zellij-send--grid-fit-symbols'）。全部測ると初回に
+0.64 秒かかり（字体の読み込み。2026-09-15 実測）、subscribe の
+プロセスフィルタの中で Emacs が固まる。")
+
+(defconst zellij-send--grid-heights '(1.0 0.95 0.9 0.875 0.85 0.8 0.75 0.7 0.65)
+  "記号の字形を 1 桁に収めるために試す高さの倍率（大きい順）。")
+
+(defvar zellij-send--grid-tables nil
+  "記号を差し替える display-table の控え。
+要素は (KEY DISPLAY-TABLE CHECKED)。KEY は (既定フォント名 . 1 桁の px)、
+CHECKED は測り終えた文字のハッシュ表。中身は既定フォントだけで決まるので、
+黒板バッファ同士で同じ display-table を共有し、見つけた記号を足していく。")
+
+(defun zellij-send--root-char-width-table ()
+  "言語環境が積み重ねる前の `char-width-table' を返す。
+日本語環境は「曖昧幅を 2 にする表」と「JIS X 0208 を 2 にする表」を
+親子にして上に載せる（`use-cjk-char-width-table'）。一番下の親が
+Unicode 本来の幅で、zellij の数え方と一致する。"
+  (let ((table char-width-table))
+    (while (char-table-parent table)
+      (setq table (char-table-parent table)))
+    table))
+
+(defun zellij-send--grid-pick-face (char cell families measure)
+  "CHAR を CELL px で描ける (FAMILY . HEIGHT) を返す。見つからなければ nil。
+FAMILIES を順に、`zellij-send--grid-heights' の大きい倍率から試す。
+MEASURE は (CHAR FAMILY HEIGHT) を受けて px を返す関数で、その字体に
+字形が無ければ nil を返す（その字体はそこで打ち切る）。"
+  (cl-loop for family in families
+           thereis (cl-loop for height in zellij-send--grid-heights
+                            for px = (funcall measure char family height)
+                            while px
+                            when (= px cell) return (cons family height))))
+
+(defun zellij-send--grid-face (family height)
+  "FAMILY を HEIGHT 倍で描くフェイスを返す（無ければ作る）。
+display-table の字形にはフェイスの名前しか付けられないので、組み合わせごとに作る。
+高さは倍率なので、字形は元の文字のフェイス（太字など）に重ねて効く。"
+  (let ((face (intern (format "zellij-send--grid-%s-%s" family height))))
+    (unless (facep face)
+      (make-face face)
+      (set-face-attribute face nil :family family :height height))
+    face))
+
+(defun zellij-send--grid-symbols (content)
+  "CONTENT に現れる、幅を確かめる対象の記号を重複なしで返す。
+対象は `zellij-send--grid-symbol-ranges' の文字。"
+  (let ((re (rx-to-string `(any ,@zellij-send--grid-symbol-ranges) t))
+        (start 0)
+        chars)
+    (while (string-match re content start)
+      (cl-pushnew (aref content (match-beginning 0)) chars)
+      (setq start (match-end 0)))
+    (nreverse chars)))
+
+(defun zellij-send--grid-fit-symbols (content)
+  "CONTENT の記号のうち、GUI で 1 桁に収まらないものを差し替える。
+カレントバッファの既定フォントで測り、`buffer-display-table' に設定する。
+字形の幅を測れない端末では何もしない。
+
+`char-width-table' を変えても GUI の描画幅は変わらない（字形の幅で決まる）
+ので、この差し替えが要る。フォントセットはバッファごとに持てず、
+`face-remap' の `:fontset' も効かなかった（実測）ため display-table を使う。
+一度測った文字は覚えておき、測り直さない。"
+  (when (display-graphic-p)
+    (let* ((cell (default-font-width))
+           (key (cons (face-font 'default) cell))
+           (entry (or (assoc key zellij-send--grid-tables)
+                      (car (push (list key (make-display-table)
+                                       (make-hash-table))
+                                 zellij-send--grid-tables))))
+           (table (nth 1 entry))
+           (checked (nth 2 entry))
+           (chars (seq-remove (lambda (c) (gethash c checked))
+                              (zellij-send--grid-symbols content))))
+      (when chars
+        (let* ((root (zellij-send--root-char-width-table))
+               (buf (current-buffer))
+               (fonts (delq nil (mapcar
+                                 (lambda (family)
+                                   (let ((font (find-font (font-spec :family family))))
+                                     (and font (cons family font))))
+                                 zellij-send-grid-symbol-families)))
+               (measure
+                (lambda (char family height)
+                  (when (font-has-char-p (cdr (assoc family fonts)) char)
+                    (string-pixel-width
+                     (propertize (string char)
+                                 'face (list :family family :height height))
+                     buf)))))
+          (dolist (char chars)
+            (puthash char t checked)
+            (when (and (eql (aref root char) 1)
+                       (/= (string-pixel-width (string char) buf) cell))
+              (pcase (zellij-send--grid-pick-face
+                      char cell (mapcar #'car fonts) measure)
+                (`(,family . ,height)
+                 (aset table char
+                       (vector (make-glyph-code
+                                char (zellij-send--grid-face family height))))))))))
+      (setq buffer-display-table table))))
+
+(defun zellij-send--grid-apply (screen &optional content)
+  "黒板の折り返しと記号の差し替えを、いまの中身に合わせて切り替える。
+SCREEN が非 nil ならペインの画面（CONTENT）を映しているので折り返さず、
+CONTENT の記号を 1 桁に収める。nil なら下書きや transcript の文章なので
+折り返す。"
+  (when zellij-send-grid-align
+    (setq truncate-lines (and screen t))
+    (when (and screen content)
+      (zellij-send--grid-fit-symbols content))))
+
+(defun zellij-send--grid-editing ()
+  "書き始めたら折り返しに戻す（`first-change-hook'）。
+黒板は入力欄も兼ねるので、長い下書きが右に隠れないようにする。
+`--update-buffer' は `with-silent-modifications' で書くのでここを通らない。"
+  (zellij-send--grid-apply nil))
+
 ;; 選択中の書き換えは保留する。`erase-buffer' はマーク（marker）を point-min に
 ;; 潰すので、C-SPC で置いたマークが受信のたびに先頭へ飛び、選択範囲が壊れる
 ;; （`emacs -Q' の実機再現で確認）。保留するのは最新の 1 つだけで、選択が
@@ -1251,6 +1409,7 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
       (with-silent-modifications
         (erase-buffer)
         (insert content))
+      (zellij-send--grid-apply t content)
       (goto-char (min pos (point-max)))
       ;; `erase-buffer' はマークも point-min に潰す。point と同じく位置で戻す
       (when mark
@@ -3381,6 +3540,10 @@ claude 以外を動かしているセッションを見分けるためだけの�
   ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の
   ;; 確実な後始末になる。
   (add-hook 'kill-buffer-hook #'zellij-send--subscribe-stop nil t)
+  ;; 桁数の数え方を zellij に合わせる（`zellij-send-grid-align'）
+  (when zellij-send-grid-align
+    (setq-local char-width-table (zellij-send--root-char-width-table)))
+  (add-hook 'first-change-hook #'zellij-send--grid-editing nil t)
   ;; 選択中に保留した画面を、選択が解けたら反映する（`--update-buffer' の前の注記）
   (add-hook 'deactivate-mark-hook #'zellij-send--pending-schedule nil t)
   (add-hook 'post-command-hook #'zellij-send--pending-schedule nil t)

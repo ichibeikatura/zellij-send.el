@@ -1163,6 +1163,70 @@ codex のペインに `/' を打ち込む。"
     (zellij-send-test--run-timers)
     (should (equal (buffer-string) "A"))))
 
+;;; 黒板の桁揃え
+
+(ert-deftest zellij-send-test-grid-root-char-width-table ()
+  "言語環境が上に積んだ表をたどって、一番下の親を返す。"
+  ;; batch の `char-width-table' 自体が親を持つことがあるので、表は自前で積む
+  (let* ((root (make-char-table nil))
+         (jis (make-char-table nil))
+         (ambiguous (make-char-table nil)))
+    (set-char-table-parent jis root)
+    (set-char-table-parent ambiguous jis)
+    (let ((char-width-table ambiguous))
+      (should (eq (zellij-send--root-char-width-table) root)))))
+
+(ert-deftest zellij-send-test-grid-board-uses-unicode-width ()
+  "黒板バッファの中だけ曖昧幅を 1 桁で数える。全角は 2 桁のまま。
+日本語環境では `─' が 2 桁になり、zellij の画面と桁がずれていた。"
+  (let ((saved char-width-table)
+        (wide (make-char-table nil)))
+    (set-char-table-range wide ?─ 2)
+    (set-char-table-parent wide char-width-table)
+    (unwind-protect
+        (progn
+          (setq char-width-table wide)
+          (zellij-send-test--with-board
+            (should (= (char-width ?─) 1))
+            (should (= (char-width ?あ) 2)))
+          ;; 他のバッファは言語環境の幅のまま
+          (with-temp-buffer
+            (should (= (char-width ?─) 2))))
+      (setq char-width-table saved))))
+
+(ert-deftest zellij-send-test-grid-symbols ()
+  "画面から対象の記号だけを、出てきた順に重複なしで拾う。
+ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まった）。"
+  (should (equal (zellij-send--grid-symbols
+                  "╭──╮\n❯ 1. 日本語 ⏺ ⎿ ※…\n  ✻ Thinking")
+                 '(?╭ ?─ ?╮ ?❯ ?⏺ ?⎿ ?※ ?… ?✻)))
+  (should-not (zellij-send--grid-symbols "plain ascii と日本語")))
+
+(ert-deftest zellij-send-test-grid-pick-face ()
+  "字形の無い字体はすぐ飛ばし、1 桁に収まる最大の倍率を選ぶ。"
+  (let* ((calls 0)
+         (measure (lambda (_char family height)
+                    (pcase family
+                      ("NoGlyph" (cl-incf calls) nil)
+                      ("Wide" 14)
+                      ("Menlo" (round (* 8 height)))))))
+    (should (equal (zellij-send--grid-pick-face ?─ 7 '("NoGlyph" "Menlo") measure)
+                   '("Menlo" . 0.9)))
+    (should (= calls 1))
+    (should-not (zellij-send--grid-pick-face ?─ 7 '("NoGlyph" "Wide") measure))))
+
+(ert-deftest zellij-send-test-grid-truncates-only-screen ()
+  "画面を映している間だけ折り返さず、書き始めたら折り返しに戻す。"
+  (zellij-send-test--with-board
+    (zellij-send--update-buffer "─────")
+    (should truncate-lines)
+    (goto-char (point-max))
+    (insert "下書き")
+    (should-not truncate-lines)
+    (set-buffer-modified-p nil)
+    (zellij-send--update-buffer "─────")
+    (should truncate-lines)))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
