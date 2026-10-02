@@ -365,8 +365,7 @@ Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij
 | `i`     | Interrupt what the session is doing (Esc)  |
 | `c`     | Send `/compact`                            |
 | `r`     | Connect to Remote Control and show its QR  |
-| `Q`     | End the session — only if it is idle       |
-| `k`     | Delete the session (any state)             |
+| `Q`/`k` | End the session (same as `C-c C-a q`)      |
 | `g`     | Refresh now (`revert-buffer`)              |
 | `G`     | Connect to any zellij session not yet listed |
 | `?`     | Show the key list                          |
@@ -379,7 +378,7 @@ Connecting is not a one-shot at startup: the list is rescanned every `zellij-sen
 
 State is derived from each session buffer's contents — no extra `zellij` calls are made. A session counts as **working** when the spinner line is present (`zellij-send-dashboard-working-regexp`, default `esc to \(?:interrupt\|cancel\)` — agy says cancel) **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). The screen check matters: while Claude Code streams plain prose it shows no spinner at all, so spinner-only detection reports an actively answering session as idle. When neither holds, the session flips to **done**, which clears once you look at that buffer.
 
-`Q` refuses to act on a session that is working, waiting for a choice, or freshly done, so a stray keypress cannot kill a session mid-task; `k` has no such guard.
+`Q` and `k` do the same thing as `C-c C-a q` in the blackboard buffer: they ask for confirmation, send `/exit`, wait for the agent to exit, and delete the zellij session, in any state. If the agent has not exited within `zellij-send-quit-timeout` seconds (default 10) — or `/exit` could not be sent — the session is force-deleted. The state column is inferred from screen changes and can lag by a few seconds, so refusing to quit a session that merely *looks* busy only got in the way.
 
 ### Remote Control QR (`r`)
 
@@ -387,7 +386,7 @@ State is derived from each session buffer's contents — no extra `zellij` calls
 
 Claude Code draws the QR itself using half-block characters, so no QR generator is needed — zellij-send sends `/remote-control` to the pane, waits for the menu, picks **Show QR code**, captures the screen, and dismisses the overlay with `Esc` so the pane returns to its prompt. The session URL is extracted too and copied to the kill ring.
 
-Because this exposes a local session to claude.ai, `r` always asks for confirmation, and — like `Q` — it only works on an **idle** session, since it types into the pane.
+Because this exposes a local session to claude.ai, `r` always asks for confirmation, and it only works on an **idle** session, since it types into the pane.
 
 **If you always want phone access, set `zellij-send-remote-control` to `t` instead.** New Claude Code sessions are then started as `claude --remote-control SESSION`, so they show up in claude.ai and the mobile app under their zellij name (`myproj00`) without scanning anything. It does not read the screen, so it is sturdier than `r`. It only affects sessions created from now on via `[New]` or `+` (`zellij-send-add-agent`), and is never added to non-claude commands.
 

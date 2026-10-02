@@ -732,7 +732,11 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
     (zellij-send-compact)))
 
 (defun zellij-send-dashboard-kill-session ()
-  "カーソル行のセッションを削除する（確認あり）。"
+  "カーソル行のセッションを終了する（確認あり）。
+黒板バッファの `C-c C-a q'（`zellij-send-quit'）と同じ処理。状態は問わない。
+かつては待機中のセッションしか終了させなかったが、一覧の状態表示は
+画面の変化から推し量ったもので数秒ずれる。終了させたいときには作業は
+もう止まっているので、待機中の判定で拒むと止められないだけだった。"
   (interactive)
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send-quit)))
@@ -1013,23 +1017,6 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
          (when ok
            (zellij-send-dashboard--qr-step-menu buf session)))))))
 
-(defun zellij-send-dashboard-quit-idle-session ()
-  "カーソル行のセッションが待機中なら終了する（確認あり）。
-作業中・選択待ち・完了のセッションは誤終了を防ぐため拒否する
-（それでも終了したい場合は k）。"
-  (interactive)
-  (let* ((buf (zellij-send-dashboard--buffer-at-point))
-         (session (buffer-local-value 'zellij-send--session buf))
-         (status (plist-get (gethash session zellij-send-dashboard--state)
-                            :status)))
-    (unless (eq status 'idle)
-      (user-error "[%s] は待機中ではありません（%s）。強制終了するなら k"
-                  session
-                  (nth 0 (alist-get status
-                                    zellij-send-dashboard--status-alist))))
-    (with-current-buffer buf
-      (zellij-send-quit))))
-
 (defun zellij-send-dashboard-open-log ()
   "カーソル行のセッションの出力ログを開く。"
   (interactive)
@@ -1112,8 +1099,8 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     ("a"   zellij-send-dashboard-show-response      "画面を手動で取得する")
     ("?"   zellij-send-dashboard-help               "このキー一覧を出す")
     ("終了")
-    ("Q"   zellij-send-dashboard-quit-idle-session  "セッションを終了する（待機中のみ）")
-    ("k"   zellij-send-dashboard-kill-session       "セッションを削除する（状態を問わない）"))
+    ("Q"   zellij-send-dashboard-kill-session       "セッションを終了する（C-c C-a q と同じ）")
+    ("k"   zellij-send-dashboard-kill-session       "Q と同じ"))
   "ヘルプ（`zellij-send-dashboard-help'）に出すキー一覧。
 要素は (KEY COMMAND DESC)、または見出しだけの (TITLE)。
 COMMAND はキーマップとの食い違いを検査するために持つ
@@ -1129,7 +1116,7 @@ COMMAND はキーマップとの食い違いを検査するために持つ
     (define-key map (kbd "i")   #'zellij-send-dashboard-interrupt)
     (define-key map (kbd "c")   #'zellij-send-dashboard-compact)
     (define-key map (kbd "k")   #'zellij-send-dashboard-kill-session)
-    (define-key map (kbd "Q")   #'zellij-send-dashboard-quit-idle-session)
+    (define-key map (kbd "Q")   #'zellij-send-dashboard-kill-session)
     (define-key map (kbd "r")   #'zellij-send-dashboard-remote-control)
     (define-key map (kbd "1")   #'zellij-send-dashboard-select-1)
     (define-key map (kbd "2")   #'zellij-send-dashboard-select-2)
