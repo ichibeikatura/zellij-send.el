@@ -685,6 +685,12 @@ zellij --session NAME subscribe --pane-id terminal_N --format json
   だった。`zellij-send--process-dump` が行末空白と末尾の連続空行を落とすので、
   **この処理を外さないこと**。ANSI 除去より後に削る（エスケープが残っていると
   行末を判定できない）
+- **受信した行に正規表現の末尾錨（`string-trim` / `[ \t]+$` / `…\\'`）を使わない**。
+  空白の連なりの各位置で後戻りして 2 乗時間になる。生の JSON 行への `string-trim` が
+  1 イベント 70 ms かかり、作業中（スピナーの描画で毎秒 7〜9 イベント）に
+  Emacs が半分以上止まっていた（2026-10-02 実測。「命令を出した後に重い」の原因）。
+  行末は `zellij-send--trim-end`（後ろから走査）で削る。結合前に行ごとに削るのは
+  GC を減らすため（割り当て 1/8）
 - **1 イベント約 8 KB**で複数回に分かれて届く。プロセスフィルタは**行単位の
   バッファリングが必須**（`zellij-send--subscribe-pending`）
 - **セッションが消えても subscribe は終了しない**。`delete-session --force` の後も

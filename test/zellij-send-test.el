@@ -68,6 +68,21 @@
   (should (equal (zellij-send--process-dump "  上\t \n\n  下  ")
                  "  上\n\n  下")))
 
+(ert-deftest zellij-send-test-trim-end ()
+  "末尾の指定文字だけを落とし、途中と先頭は残す。"
+  (should (equal (zellij-send--trim-end "  A   B \t " '(?\s ?\t)) "  A   B"))
+  (should (equal (zellij-send--trim-end "   " '(?\s)) ""))
+  (should (equal (zellij-send--trim-end "" '(?\s)) ""))
+  (should (equal (zellij-send--trim-end "上\n\n下\n\n" '(?\n)) "上\n\n下")))
+
+(ert-deftest zellij-send-test-process-dump-wide-inner-gap ()
+  "列の間が大きく空いた行も、行末だけ削って中の空白は保つ。
+正規表現で行末を削っていたころは、この形で 1 画面 45 ms かかっていた。"
+  (let* ((line (concat "A" (make-string 318 ?\s) "B"))
+         (raw (mapconcat #'identity (make-list 78 (concat line "  ")) "\n")))
+    (should (equal (zellij-send--process-dump raw)
+                   (mapconcat #'identity (make-list 78 line) "\n")))))
+
 (ert-deftest zellij-send-test-process-dump-strips-ansi-then-spaces ()
   "ANSI を除去した結果の行末空白も削る（除去順の確認）。"
   (should (equal (zellij-send--process-dump "本文\033[0m   \n")
@@ -1184,6 +1199,15 @@ codex のペインに `/' を打ち込む。"
     (should-not zellij-send--pending-content)
     (deactivate-mark)
     (zellij-send-test--run-timers)
+    (should (equal (buffer-string) "A"))))
+
+(ert-deftest zellij-send-test-subscribe-line-whitespace ()
+  "前後に空白がある行も読み、空白だけの行では黒板を消さない。
+`string-trim' をやめた（空白の多い行で 70 ms かかった）ので、その代わりの判定を確かめる。"
+  (zellij-send-test--with-board
+    (zellij-send--subscribe-handle-line "  {\"viewport\":[\"A   \"]} \r")
+    (should (equal (buffer-string) "A"))
+    (zellij-send--subscribe-handle-line " \t\r")
     (should (equal (buffer-string) "A"))))
 
 ;;; 黒板の桁揃え

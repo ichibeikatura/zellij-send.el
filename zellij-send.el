@@ -611,6 +611,20 @@ nF エスケープ（`ESC ( B' など）も 2 文字規則より前に処理す�
     (setq result (replace-regexp-in-string "\033." "" result))
     result))
 
+(defun zellij-send--trim-end (string chars)
+  "STRING の末尾から、CHARS（文字のリスト）に含まれる文字を取り除いて返す。
+
+**行末の空白を正規表現で削ってはいけない**。`[ \t]+$' も `string-trim-right'
+も、行の途中にある空白の連なりの各位置から末尾まで試しては後戻りするので、
+連なりの長さの 2 乗かかる。`A' と `B' の間に 318 個の空白がある行を
+78 行並べた画面で 1 回 45 ms、受信処理全体で 86 ms だった（2026-10-02、
+codex の計測）。表のように列の間が大きく空いた画面で起きる。
+後ろから 1 文字ずつ見るこの関数なら長さに比例する。"
+  (let ((end (length string)))
+    (while (and (> end 0) (memq (aref string (1- end)) chars))
+      (setq end (1- end)))
+    (if (= end (length string)) string (substring string 0 end))))
+
 (defun zellij-send--process-dump (raw)
   "dump-screen / subscribe の生テキスト RAW を整形して返す。
 zellij は `--ansi' を付けない限りエスケープを除去済みの平文を返すので、
@@ -625,9 +639,10 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
                 "^─+" ""
                 (zellij-send--strip-ansi
                  (replace-regexp-in-string "\r" "" raw))))
-         (text (replace-regexp-in-string "[ \t]+$" "" text)))
+         (text (mapconcat (lambda (line) (zellij-send--trim-end line '(?\s ?\t)))
+                          (split-string text "\n") "\n")))
     ;; 画面下端の空行（パディングだけの行）を落とす
-    (replace-regexp-in-string "\n+\\'" "" text)))
+    (zellij-send--trim-end text '(?\n))))
 
 (defun zellij-send--dump-screen-async (session callback &optional full)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。
@@ -1526,29 +1541,40 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
 
 (defun zellij-send--subscribe-handle-line (line)
   "subscribe から届いた 1 行 LINE を解釈してバッファに反映する。"
-  (let ((line (string-trim line)))
-    (unless (string-empty-p line)
-      (let* ((obj (ignore-errors
-                    (json-parse-string line :object-type 'alist
-                                       :array-type 'list :null-object nil)))
-             (viewport (alist-get 'viewport obj)))
-        (when (listp viewport)
-          (setq zellij-send--subscribe-retries 0
-                zellij-send--last-event-time (float-time))
-          (let ((content (zellij-send--process-dump
-                          (string-join viewport "\n"))))
-            ;; 変化の記録は更新抑止中も続ける（ダッシュボードが見るため）
-            (unless (equal content zellij-send--last-content)
-              (setq zellij-send--last-content content
-                    zellij-send--last-change-time (float-time)))
-            ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ。
-            ;; 保留があるときは画面と同じ内容でも渡す（A → 保留 B → A と
-            ;; 戻ったときに、古い B を保留したままにしないため）
-            (when (and (not (buffer-modified-p))
-                       (not zellij-send--user-cleared)
-                       (or zellij-send--pending-content
-                           (not (string= content (buffer-string)))))
-              (zellij-send--update-buffer content))))))))
+  ;; **`string-trim' を通してはいけない**。文字列末尾に錨を置く正規表現は
+  ;; 空白の連なりごとに後戻りするので、ペイン幅ぶんの空白が詰まった
+  ;; 27 KB の行では 1 回 70 ms かかった（2026-10-02 実測。作業中は毎秒
+  ;; 8 回届くので Emacs が半分以上止まる）。前後の空白は `json-parse-string'
+  ;; が読み飛ばすので、空行かどうかだけ先頭から見る
+  (when (string-match-p "[^ \t\r]" line)
+    (let* ((obj (ignore-errors
+                  (json-parse-string line :object-type 'alist
+                                     :array-type 'list :null-object nil)))
+           (viewport (alist-get 'viewport obj)))
+      (when (listp viewport)
+        (setq zellij-send--subscribe-retries 0
+              zellij-send--last-event-time (float-time))
+        ;; 結合する前に行ごとの右詰めの空白を落とす。`--process-dump' は
+        ;; 文字列を何度も作り直すので、27 KB のまま渡すと 1 イベントで
+        ;; 約 8 倍のごみが出て、GC（1 回 10 ms）が 1.5 イベントに 1 回
+        ;; 走っていた（2026-10-02 実測）。正式な行末処理は ANSI 除去の後に
+        ;; `--process-dump' がやるので、ここは量を減らすだけ
+        (let ((content (zellij-send--process-dump
+                        (mapconcat (lambda (line)
+                                     (zellij-send--trim-end line '(?\s ?\t)))
+                                   viewport "\n"))))
+          ;; 変化の記録は更新抑止中も続ける（ダッシュボードが見るため）
+          (unless (equal content zellij-send--last-content)
+            (setq zellij-send--last-content content
+                  zellij-send--last-change-time (float-time)))
+          ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ。
+          ;; 保留があるときは画面と同じ内容でも渡す（A → 保留 B → A と
+          ;; 戻ったときに、古い B を保留したままにしないため）
+          (when (and (not (buffer-modified-p))
+                     (not zellij-send--user-cleared)
+                     (or zellij-send--pending-content
+                         (not (string= content (buffer-string)))))
+            (zellij-send--update-buffer content)))))))
 
 (defun zellij-send--subscribe-filter (buf out)
   "subscribe プロセスの出力 OUT を BUF で行単位に解釈する。"
