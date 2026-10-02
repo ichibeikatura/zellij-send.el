@@ -845,6 +845,12 @@ TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X
   中なので、**`run-at-time 0` を挟んでから** `--spawn-session`（`switch-to-buffer` を含む）を呼ぶ
 - 実体の作成は `zellij-send--spawn-session`（セッション名と dir を受け取る）。
   `zellij-send--create-new-session` はディレクトリを尋ねて名前を決めるだけの薄い層
+- **起動時に Remote Control を付けられる**（`zellij-send-remote-control`、既定 nil）。
+  `zellij-send--launch-command` が claude のときだけ `--remote-control SESSION` を足す。
+  `zellij-send--command` には**付ける前の**コマンドを入れる。付いたまま引き継ぐと
+  `add-agent` で前のセッション名がスマホ側に重複するので、既存の
+  `--remote-control [NAME]` は外してから付け直す。ダッシュボードの `r`（画面を読んで
+  QR を取る）より壊れにくい
 
 `zellij-send--spawn-session` のフロー（すべて非同期）:
 1. `zellij attach --create-background NAME` — detached セッション作成（tty 不要）

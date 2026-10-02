@@ -68,6 +68,18 @@
   :type '(repeat string)
   :group 'zellij-send)
 
+(defcustom zellij-send-remote-control nil
+  "非 nil なら、新規に作る Claude Code のセッションを Remote Control 付きで起動する。
+
+起動コマンドに `--remote-control SESSION' を足すので、claude.ai や
+Claude モバイルアプリのセッション一覧に zellij のセッション名（`myproj00'）で
+出てくる。画面を読まないので、ダッシュボードの `r'（QR の取り込み）より壊れにくい。
+
+効くのは `[New]' と `zellij-send-add-agent' で**これから作る**セッションだけ。
+claude 以外のコマンドには付けない。"
+  :type 'boolean
+  :group 'zellij-send)
+
 (defcustom zellij-send-prompt-marker-regexp "[❯›]"
   "選択肢プロンプトのカーソル記号にマッチする正規表現（既定値）。
 
@@ -368,6 +380,33 @@ Claude Code の画面・transcript に依存する機能はこれで分岐する
 そちらは `zellij-send--claude-confirmed-p' を使う。"
   (let ((name (zellij-send--buffer-command)))
     (and name (string-prefix-p "claude" name))))
+
+(defun zellij-send--launch-command (command session)
+  "SESSION で実際に起動するコマンド文字列を COMMAND から作る。
+
+Claude Code で、`zellij-send-remote-control' が非 nil か、COMMAND に
+`--remote-control' が既に入っているなら、末尾に `--remote-control SESSION'
+を付けて返す。既存の `--remote-control [NAME]' は外してから付け直す
+——`zellij-send-add-agent' が引き継いだコマンドに前のセッション名が
+残っていると、スマホ側に同じ名前が 2 つ並ぶため。
+それ以外は COMMAND をそのまま返す。"
+  (let* ((tokens (split-string command nil t))
+         (has-flag (member "--remote-control" tokens)))
+    (if (not (and (or zellij-send-remote-control has-flag)
+                  (equal (zellij-send--command-name command) "claude")))
+        command
+      (let (kept)
+        (while tokens
+          (if (equal (car tokens) "--remote-control")
+              ;; 名前は省略できるので、次がオプションでなければ名前として捨てる
+              (setq tokens (if (and (cdr tokens)
+                                    (not (string-prefix-p "-" (cadr tokens))))
+                               (cddr tokens)
+                             (cdr tokens)))
+            (push (car tokens) kept)
+            (setq tokens (cdr tokens))))
+        (string-join (append (nreverse kept) (list "--remote-control" session))
+                     " ")))))
 
 (defun zellij-send--agent-name ()
   "**確定している**エージェント名を返す。判っていなければ nil。
@@ -3804,7 +3843,7 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
              0.5 nil
              (lambda ()
                (zellij-send--run-in-session-async
-                session dir command
+                session dir (zellij-send--launch-command command session)
                 (lambda (pane-id)
                   (if (not pane-id)
                       (message "%s の起動に失敗しました" command)

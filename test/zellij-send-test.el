@@ -600,6 +600,29 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 
 ;;; セッションのコマンド（多 CLI 対応）
 
+(ert-deftest zellij-send-test-launch-command ()
+  "Remote Control 付きの起動コマンドを組み立てる。"
+  ;; 無効なら何も足さない
+  (let ((zellij-send-remote-control nil))
+    (should (equal (zellij-send--launch-command "claude" "p00") "claude"))
+    ;; ただし既に付いていれば、名前だけ新しいセッションに付け替える
+    ;; （add-agent が前のセッションの名前を引き継がないように）
+    (should (equal (zellij-send--launch-command "claude --remote-control p00" "p01")
+                   "claude --remote-control p01")))
+  (let ((zellij-send-remote-control t))
+    (should (equal (zellij-send--launch-command "claude" "p00")
+                   "claude --remote-control p00"))
+    (should (equal (zellij-send--launch-command "claude --resume" "p00")
+                   "claude --resume --remote-control p00"))
+    ;; 名前を省いた形・後ろにオプションが続く形でも重複させない
+    (should (equal (zellij-send--launch-command "claude --remote-control --verbose" "p01")
+                   "claude --verbose --remote-control p01"))
+    (should (equal (zellij-send--launch-command "claude --remote-control old --verbose" "p01")
+                   "claude --verbose --remote-control p01"))
+    ;; claude 以外には付けない
+    (should (equal (zellij-send--launch-command "codex" "p00") "codex"))
+    (should (equal (zellij-send--launch-command "agy" "p00") "agy"))))
+
 (ert-deftest zellij-send-test-command-name ()
   "起動コマンドからエージェント名を取り出す。"
   (should (equal (zellij-send--command-name "claude") "claude"))

@@ -389,6 +389,12 @@ Claude Code draws the QR itself using half-block characters, so no QR generator 
 
 Because this exposes a local session to claude.ai, `r` always asks for confirmation, and — like `Q` — it only works on an **idle** session, since it types into the pane.
 
+**If you always want phone access, set `zellij-send-remote-control` to `t` instead.** New Claude Code sessions are then started as `claude --remote-control SESSION`, so they show up in claude.ai and the mobile app under their zellij name (`myproj00`) without scanning anything. It does not read the screen, so it is sturdier than `r`. It only affects sessions created from now on via `[New]` or `+` (`zellij-send-add-agent`), and is never added to non-claude commands.
+
+```elisp
+(setq zellij-send-remote-control t)
+```
+
 | Option                                            | Meaning                                        |
 |---------------------------------------------------|------------------------------------------------|
 | `zellij-send-dashboard-remote-control-timeout`    | How long to wait for the screens (default 40s) |
