@@ -1289,6 +1289,80 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
     (zellij-send--update-buffer "─────")
     (should-not truncate-lines)))
 
+;;; 黒板・受信の不具合の回帰テスト
+
+(ert-deftest zellij-send-test-slash-collecting-token ()
+  "期限切れの古い取得が後から返っても、新しい取得の印を下ろさない。"
+  (with-temp-buffer
+    (let ((buf (current-buffer)) callbacks)
+      (cl-letf (((symbol-function 'zellij-send--slash-collect-1)
+                 (lambda (_buf cb) (push cb callbacks))))
+        (zellij-send--slash-collect buf #'ignore)
+        (should (zellij-send--slash-collecting-p))
+        ;; 古い取得を期限切れにして、新しい取得を始める
+        (setq zellij-send--slash-collecting
+              (- (float-time) zellij-send--slash-collect-stale 1))
+        (should-not (zellij-send--slash-collecting-p))
+        (let ((old (car callbacks)))
+          (zellij-send--slash-collect buf #'ignore)
+          (funcall old nil nil))
+        (should (zellij-send--slash-collecting-p))
+        (funcall (car callbacks) nil nil)
+        (should-not (zellij-send--slash-collecting-p))))))
+
+
+(ert-deftest zellij-send-test-history-next-keeps-draft ()
+  "履歴を辿っていないときの M-n は下書きを消さない。
+かつては退避していない下書きを空文字で「復帰」して消していた。"
+  (let ((zellij-send--history-table (make-hash-table :test 'equal)))
+    (with-temp-buffer
+      (setq-local zellij-send--session "test00")
+      (zellij-send--history-add "test00" "送った文")
+      (insert "書きかけ")
+      (should-error (zellij-send-history-next) :type 'user-error)
+      (should (equal (buffer-string) "書きかけ"))
+      ;; 辿ってから戻れば下書きに復帰する
+      (zellij-send-history-prev)
+      (should (equal (buffer-string) "送った文"))
+      (zellij-send-history-next)
+      (should (equal (buffer-string) "書きかけ")))))
+
+(ert-deftest zellij-send-test-subscribe-ignores-non-screen-events ()
+  "`viewport' の無いイベントや壊れた行で黒板を空にしない。"
+  (with-temp-buffer
+    (insert "いまの画面")
+    (set-buffer-modified-p nil)
+    (zellij-send--subscribe-handle-line "{\"event\":\"other\"}")
+    (zellij-send--subscribe-handle-line "{\"event\":\"pane_update\",\"viewp")
+    (should (equal (buffer-string) "いまの画面"))
+    (zellij-send--subscribe-handle-line
+     "{\"event\":\"pane_update\",\"viewport\":[\"新しい画面   \"]}")
+    (should (equal (buffer-string) "新しい画面"))))
+
+(ert-deftest zellij-send-test-keys-mode-restores-read-only ()
+  "キー透過モードを重ねて有効にしても、抜けたら元の read-only に戻る。"
+  (with-temp-buffer
+    (setq-local zellij-send--session "test00")
+    (should-not buffer-read-only)
+    (zellij-send-keys-mode 1)
+    (zellij-send-keys-mode 1)
+    (should buffer-read-only)
+    (zellij-send-keys-mode -1)
+    (should-not buffer-read-only)
+    ;; 元から read-only なら抜けても read-only のまま
+    (setq buffer-read-only t)
+    (zellij-send-keys-mode 1)
+    (zellij-send-keys-mode -1)
+    (should buffer-read-only)))
+
+(ert-deftest zellij-send-test-pane-table ()
+  "ヘッダとフィールド数の合わない行は表から落とす。"
+  (let ((table (zellij-send--pane-table
+                "PANE_ID  TYPE  TITLE\nterminal_1  terminal  claude\nterminal_2  terminal  a  b\n")))
+    (should (equal (car table) '("PANE_ID" "TYPE" "TITLE")))
+    (should (equal (cdr table) '(("terminal_1" "terminal" "claude")))))
+  (should (equal (zellij-send--pane-table "") '(nil))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

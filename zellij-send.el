@@ -267,7 +267,8 @@ ai-title 行は会話が進むたび追記されるので末尾側にある（�
 
 (defvar-local zellij-send--pane-id nil
   "送信先ペインの ID（例: \"terminal_2\"）。
-このパッケージが `zellij run' で起動したペインのみ判明する。
+新規作成時は `zellij run' の出力から、既存セッションへの接続時は
+`list-panes --all' から取る（`zellij-send--detect-pane-async'）。
 nil の場合は focused pane に送る（attach クライアントが必要）。")
 
 (defvar-local zellij-send--command nil
@@ -417,11 +418,16 @@ Claude Code で、`zellij-send-remote-control' が非 nil か、COMMAND に
 (defun zellij-send--claude-confirmed-p ()
   "Claude Code だと**確定している**なら non-nil。
 
-**ペインに打ち込む機能はすべてこれで守る**——スラッシュコマンドの補完と
-先読み、AskUserQuestion の操作、数字での回答、Remote Control、
-`/compact' `/clear'。`zellij-send--claude-p' は既定値（普通は claude）で
-代用するので、コマンドを特定できなかったセッションを claude と誤認して
-別の CLI の入力欄に打ち込む（astra のレビューで指摘）。
+**Claude Code 専用の、ペインに打ち込む機能はこれで守る**——スラッシュ
+コマンドの補完と先読み、AskUserQuestion の操作、Remote Control。
+`zellij-send--claude-p' は既定値（普通は claude）で代用するので、
+コマンドを特定できなかったセッションを claude と誤認して別の CLI の
+入力欄に打ち込む（astra のレビューで指摘）。
+
+数字での回答と `/compact' `/clear' は claude 以外にも効くので、こちらでは
+なく対応表で守る（`zellij-send-number-reply-commands' /
+`zellij-send-slash-support-alist'）。どちらも `zellij-send--agent-name' を
+見るので、コマンドが確定していなければ断るのは同じ。
 
 読むだけの機能（transcript 表示・出力ログ・ヘッダ表示）は
 `zellij-send--claude-p' の推測でよい。外しても実害が無いため。"
@@ -450,17 +456,28 @@ zellij の出力は 1 行 1 セッションで
 (defun zellij-send--list-sessions-async (callback)
   "list-sessions を非同期で実行し CALLBACK を呼ぶ。
 成功時: (callback sessions) — sessions は文字列リスト（空もあり）。
-タイムアウト時（5秒）: (callback :timeout)。"
+タイムアウト時（5秒）: (callback :timeout)。
+失敗時: (callback :error)。
+
+セッションが 0 件のときも zellij は exit 1 を返す（stderr に
+\"No active zellij sessions found.\"）。これだけは 0 件として扱い、
+それ以外の異常終了は 0 件と区別する。呼び出し側はセッションの無い
+バッファを kill するので、失敗を 0 件と読むと生きている黒板が消える。
+呼び出し側は `listp' で成否を見ること。
+
+stderr は別バッファに分けず stdout と同じバッファで受ける。分けると
+stderr 側のパイプが読み終わる前に sentinel が走ることがあり、
+0 件の案内文を見落として失敗と読む。案内文の行は
+`zellij-send--parse-sessions' が捨てる。"
   (let* ((out-buf (generate-new-buffer " *zellij-list-sessions*"))
-         (err-buf (generate-new-buffer " *zellij-list-sessions-err*"))
          (done nil)
          timer proc)
     (setq proc
           (make-process
            :name "zellij-list-sessions"
            :buffer out-buf
-           :stderr err-buf
            :noquery t
+           :connection-type 'pipe
            :command (list zellij-send-executable "list-sessions")
            :sentinel
            (lambda (p _)
@@ -468,10 +485,13 @@ zellij の出力は 1 行 1 セッションで
                         (memq (process-status p) '(exit signal)))
                (setq done t)
                (when timer (cancel-timer timer))
-               (let ((sessions (zellij-send--parse-sessions
-                                (with-current-buffer out-buf (buffer-string)))))
+               (let* ((raw (with-current-buffer out-buf (buffer-string)))
+                      (sessions
+                       (if (or (zerop (process-exit-status p))
+                               (string-match-p "No active zellij sessions" raw))
+                           (zellij-send--parse-sessions raw)
+                         :error)))
                  (ignore-errors (kill-buffer out-buf))
-                 (ignore-errors (kill-buffer err-buf))
                  (funcall callback sessions))))))
     (setq timer
           (run-with-timer 5.0 nil
@@ -480,8 +500,13 @@ zellij の出力は 1 行 1 セッションで
                               (setq done t)
                               (ignore-errors (delete-process proc))
                               (ignore-errors (kill-buffer out-buf))
-                              (ignore-errors (kill-buffer err-buf))
                               (funcall callback :timeout)))))))
+
+(defun zellij-send--list-sessions-failure (result)
+  "`zellij-send--list-sessions-async' の失敗 RESULT を説明する文を返す。"
+  (if (eq result :timeout)
+      "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。"
+    "zellij のセッション一覧を取得できませんでした。zellij が正常に動作しているか確認してください。"))
 
 ;;; バッファ管理
 
@@ -489,16 +514,25 @@ zellij の出力は 1 行 1 セッションで
   "SESSION に対応するバッファ名を返す。"
   (format "*ai-%s*" session))
 
-(defun zellij-send--get-or-create-buffer (session)
-  "SESSION 用バッファを返す。なければ作成して zellij-send-mode を有効化。"
+(defun zellij-send--get-or-create-buffer (session &optional no-subscribe)
+  "SESSION 用バッファを返す。なければ作成して zellij-send-mode を有効化。
+
+subscribe を張り直すのは既存のバッファだけ。新しいバッファは呼び出し側
+（`zellij-send-attach-session-async' / `zellij-send--spawn-session'）が
+pane-id とコマンドを決めてから張る。ここでも張ると、ペイン検出が
+2 本並んで走るうえ、新規作成ではセッションができる前に検出しに行く。
+NO-SUBSCRIBE が non-nil なら既存のバッファでも張らない（自分で検出して
+張る `zellij-send-attach-session-async' 用。`--connect-existing-session'
+はバッファを作ってから attach を呼ぶので、そこでは既存扱いになる）。"
   (let* ((name (zellij-send--buffer-name session))
          (buf (get-buffer-create name)))
     (with-current-buffer buf
-      (unless (eq major-mode 'zellij-send-mode)
+      (if (eq major-mode 'zellij-send-mode)
+          ;; pane-id が未確定でも呼んでよい（ensure が特定してから張る）
+          (unless no-subscribe
+            (zellij-send--subscribe-ensure))
         (zellij-send-mode)
-        (setq zellij-send--session session))
-      ;; pane-id が未確定でも呼んでよい（ensure が特定してから張る）
-      (zellij-send--subscribe-ensure))
+        (setq zellij-send--session session)))
     buf))
 
 ;;; 送信
@@ -1031,25 +1065,37 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
            (ignore-errors (kill-buffer err-buf))
            (funcall callback out)))))))
 
+(defun zellij-send--pane-table (raw)
+  "`action list-panes --all' の出力 RAW を (HEADER . ROWS) にして返す。
+HEADER は列名のリスト、ROWS は各行のフィールドのリスト。
+
+列は 2 個以上の空白区切りだが、TITLE や COMMAND 自体に空白が入るため
+位置を決め打ちにせず、呼び出し側はヘッダから列位置を求めること。
+フィールド数がヘッダと食い違う行は捨てる（TITLE に 2 連空白が入った等）。"
+  (let* ((lines (split-string (or raw "") "\n" t))
+         (header (and lines (split-string (string-trim (car lines))
+                                          "[ \t]\\{2,\\}" t))))
+    (cons header
+          (and header
+               (seq-filter
+                (lambda (fields) (= (length fields) (length header)))
+                (mapcar (lambda (line)
+                          (split-string (string-trim (zellij-send--strip-ansi line))
+                                        "[ \t]\\{2,\\}" t))
+                        (cdr lines)))))))
+
 (defun zellij-send--pane-field (raw pane-id column)
   "`action list-panes --all' の出力 RAW から PANE-ID の行の COLUMN 列を返す。
 COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなければ nil。
-
-列は 2 個以上の空白区切りだが、TITLE や COMMAND 自体に空白が入るため
-位置を決め打ちにせず、ヘッダ行から列位置を求める。フィールド数がヘッダと
-食い違う行は読み飛ばす（TITLE に 2 連空白が入った等）。"
-  (let* ((lines (split-string (or raw "") "\n" t))
-         (header (and lines (split-string (string-trim (car lines)) "[ \t]\\{2,\\}" t)))
-         (pane-col (and header (seq-position header "PANE_ID")))
-         (col (and header (seq-position header column))))
+表の読み方は `zellij-send--pane-table'。"
+  (let* ((table (zellij-send--pane-table raw))
+         (header (car table))
+         (pane-col (seq-position header "PANE_ID"))
+         (col (seq-position header column)))
     (when (and pane-col col)
-      (let (result)
-        (dolist (line (cdr lines) result)
-          (let ((fields (split-string (string-trim (zellij-send--strip-ansi line))
-                                      "[ \t]\\{2,\\}" t)))
-            (when (and (= (length fields) (length header))
-                       (equal (nth pane-col fields) pane-id))
-              (setq result (nth col fields)))))))))
+      (let ((row (seq-find (lambda (fields) (equal (nth pane-col fields) pane-id))
+                           (reverse (cdr table)))))
+        (and row (nth col row))))))
 
 (defun zellij-send--parse-terminal-panes (raw)
   "`action list-panes --all' の出力 RAW から端末ペインを順に返す。
@@ -1061,29 +1107,24 @@ COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなけ
 `zellij-send'）。COMMAND 列には `node /opt/homebrew/bin/codex' のように
 実際の起動コマンドが入る。TYPE・COMMAND・EXITED は `--all' にしか出ない。
 
-列の読み方は `zellij-send--pane-field' と同じ（ヘッダ行から列位置を求め、
-フィールド数がヘッダと食い違う行は読み飛ばす）。"
-  (let* ((lines (split-string (or raw "") "\n" t))
-         (header (and lines (split-string (string-trim (car lines))
-                                          "[ \t]\\{2,\\}" t)))
-         (id-col (and header (seq-position header "PANE_ID")))
-         (type-col (and header (seq-position header "TYPE")))
-         (cmd-col (and header (seq-position header "COMMAND")))
-         (exited-col (and header (seq-position header "EXITED"))))
+表の読み方は `zellij-send--pane-table'。"
+  (let* ((table (zellij-send--pane-table raw))
+         (header (car table))
+         (id-col (seq-position header "PANE_ID"))
+         (type-col (seq-position header "TYPE"))
+         (cmd-col (seq-position header "COMMAND"))
+         (exited-col (seq-position header "EXITED")))
     (when (and id-col type-col cmd-col)
       (delq nil
             (mapcar
-             (lambda (line)
-               (let ((fields (split-string (string-trim (zellij-send--strip-ansi line))
-                                           "[ \t]\\{2,\\}" t)))
-                 (when (and (= (length fields) (length header))
-                            (equal (nth type-col fields) "terminal"))
-                   (let ((cmd (nth cmd-col fields)))
-                     (list (nth id-col fields)
-                           (unless (member cmd '("-" "")) cmd)
-                           (and exited-col
-                                (string= (nth exited-col fields) "true")))))))
-             (cdr lines))))))
+             (lambda (fields)
+               (when (equal (nth type-col fields) "terminal")
+                 (let ((cmd (nth cmd-col fields)))
+                   (list (nth id-col fields)
+                         (unless (member cmd '("-" "")) cmd)
+                         (and exited-col
+                              (string= (nth exited-col fields) "true"))))))
+             (cdr table))))))
 
 (defun zellij-send--pick-pane (panes)
   "PANES（(ID COMMAND EXITED-P) のリスト）から送信先として最も妥当なものを選ぶ。
@@ -1140,11 +1181,11 @@ CALLBACK は 2 引数 (PANE-ID COMMAND) で呼ばれる。不明なものは nil
 
 (defun zellij-send-attach-session-async (session &optional callback)
   "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
-cwd は `dump-layout'、pane-id は `list-panes'、動いているコマンドは
-`list-panes --all' の COMMAND 列から取得して設定する。
+cwd は `dump-layout' から、pane-id と動いているコマンドは
+`list-panes --all' を 1 回叩いて取得する（`zellij-send--detect-pane-async'）。
 pane-id が取れれば attach クライアント無しでも送信できる。
 用意できたら CALLBACK にバッファを渡す。"
-  (let ((buf (zellij-send--get-or-create-buffer session)))
+  (let ((buf (zellij-send--get-or-create-buffer session t)))
     (zellij-send--session-cwd-async
      session
      (lambda (cwd)
@@ -1198,7 +1239,7 @@ pane-id が取れれば attach クライアント無しでも送信できる。
 
 (defun zellij-send--history-replace (text)
   "バッファの内容を TEXT で置き換える。
-ポーリングに上書きされないよう、変更済みのままにしておく。"
+自動更新に上書きされないよう、変更済みのままにしておく。"
   (erase-buffer)
   (insert text)
   (goto-char (point-max)))
@@ -1210,6 +1251,10 @@ pane-id が取れれば attach クライアント無しでも送信できる。
          (index (+ (or zellij-send--history-index -1) delta)))
     (unless history
       (user-error "送信履歴がありません"))
+    ;; 辿っていないのに新しい側へ進むと、退避していない下書きを
+    ;; 空文字で「復帰」して消してしまう
+    (when (and (null zellij-send--history-index) (< delta 0))
+      (user-error "履歴を辿っていません"))
     (cond
      ((< index 0)
       ;; 最新より新しい側に戻ったら、辿り始める前の下書きに復帰する
@@ -1486,7 +1531,7 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
 (defun zellij-send--update-buffer (content)
   "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。
 カーソル位置・マーク・ウィンドウの表示開始位置は可能な範囲で復元する
-（ポーリング更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。
+（自動更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。
 選択中（`zellij-send--defer-update-p'）は書き換えず、最新の内容だけを
 `zellij-send--pending-content' に取っておく。"
   (if (zellij-send--defer-update-p)
@@ -1559,7 +1604,9 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
                   (json-parse-string line :object-type 'alist
                                      :array-type 'list :null-object nil)))
            (viewport (alist-get 'viewport obj)))
-      (when (listp viewport)
+      ;; 読めない行や `viewport' の無いイベントを空の画面として扱わない
+      ;; （`alist-get' はどちらでも nil を返し、nil は `listp' を満たす）
+      (when (and (assq 'viewport obj) (listp viewport))
         (setq zellij-send--subscribe-retries 0
               zellij-send--last-event-time (float-time))
         ;; 結合する前に行ごとの右詰めの空白を落とす。`--process-dump' は
@@ -1605,6 +1652,10 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
     (let ((delay (min zellij-send-subscribe-backoff-max
                       (expt 2.0 (1- zellij-send--subscribe-retries))))
           (buf (current-buffer)))
+      ;; 初回イベント待ちのタイマーが残っていれば止める。参照を上書きすると
+      ;; `--subscribe-stop' で止められなくなり、後から再接続をもう 1 本起こす
+      (when zellij-send--subscribe-timer
+        (cancel-timer zellij-send--subscribe-timer))
       (setq zellij-send--subscribe-timer
             (run-at-time delay nil
                          (lambda ()
@@ -1885,6 +1936,22 @@ nil にする。"
 
 (defvar-local zellij-send--slash-prefetching nil
   "先読みの取得中なら non-nil。多重起動を防ぎ、進捗メッセージを黙らせる。")
+
+(defvar-local zellij-send--slash-collecting nil
+  "一覧を集め始めた時刻（`float-time'）。集めていなければ nil。
+手動の取得と先読みが同じペインに同時に打ち込まないための印。
+コールバックが返らないまま残っても永久に塞がないよう、
+`zellij-send--slash-collect-stale' 秒を過ぎたものは無視する。")
+
+(defconst zellij-send--slash-collect-stale 120
+  "`zellij-send--slash-collecting' を無効とみなすまでの秒数。
+取得は普通 8 秒前後、`zellij-send-slash-max-rounds' を使い切っても 1 分程度。")
+
+(defun zellij-send--slash-collecting-p ()
+  "カレントバッファで一覧を集めている最中なら non-nil。"
+  (and zellij-send--slash-collecting
+       (< (- (float-time) zellij-send--slash-collecting)
+          zellij-send--slash-collect-stale)))
 
 (defun zellij-send--slash-cache-key ()
   "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
@@ -2173,7 +2240,28 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
 
 (defun zellij-send--slash-collect (buf callback)
   "BUF のセッションのスラッシュコマンド一覧を集めて CALLBACK に渡す。
-失敗したら nil を渡す。"
+CALLBACK は 2 引数 (ENTRIES TRUNCATED) で呼ばれる。失敗したら ENTRIES は nil。
+TRUNCATED が non-nil の一覧は回数を使い切って打ち切ったもので、
+キャッシュしてはいけない（以後ずっと欠けたまま出る）。
+
+集めている間は `zellij-send--slash-collecting' を立てる。
+呼び出し側は `zellij-send--slash-collecting-p' で多重起動を避けること。"
+  (let* ((started (float-time))
+         (callback
+          (lambda (entries &optional truncated)
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                ;; 自分が立てた印だけを下ろす。期限切れの後に別の取得が
+                ;; 始まっていたら、その印を消さない
+                (when (eql zellij-send--slash-collecting started)
+                  (setq zellij-send--slash-collecting nil))))
+            (funcall callback entries truncated))))
+    (with-current-buffer buf
+      (setq zellij-send--slash-collecting started))
+    (zellij-send--slash-collect-1 buf callback)))
+
+(defun zellij-send--slash-collect-1 (buf callback)
+  "`zellij-send--slash-collect' の本体。"
   (zellij-send--slash-wait
    buf #'zellij-send--slash-idle-p
    (lambda (screen)
@@ -2182,7 +2270,9 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
                  "ペインの入力欄が空ではありません。先にペインを片付けてください")
                 (funcall callback nil))
        (let ((spec (zellij-send--slash-command-spec))
-             (done (lambda (result) (funcall callback (plist-get result :entries)))))
+             (done (lambda (result)
+                     (funcall callback (plist-get result :entries)
+                              (plist-get result :truncated)))))
          (with-current-buffer buf
            (zellij-send--slash-write-chars
             zellij-send--session (plist-get spec :input)
@@ -2399,7 +2489,9 @@ CALLBACK に渡すのは plist:
        zellij-send--session text
        (lambda (ok)
          (if (not ok)
-             (funcall callback nil)
+             ;; 打てなかったのは「引数なし」ではない。nil を返すと
+             ;; 引数を付けずにそのまま送ってしまう
+             (funcall callback (list :abort t))
            ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
            (run-at-time
             zellij-send-slash-settle-delay nil
@@ -2419,6 +2511,11 @@ CALLBACK に渡すのは plist:
          (hint (and screen empty (zellij-send--slash-arg-hint screen name)))
          (entries (and screen (null hint) (zellij-send--slash-arg-entries screen))))
     (cond
+     ;; 打った文字が入力欄に出てこなかった。ペインの状態が分からないので
+     ;; 「引数なし」とは読まずに中止する
+     ((null screen)
+      (zellij-send--slash-clear-input
+       buf (lambda (_ok) (funcall callback (list :abort t)))))
      (hint (zellij-send--slash-clear-input
             buf (lambda (_ok) (funcall callback (list :hint hint)))))
      (entries
@@ -2509,42 +2606,47 @@ CALLBACK に渡すのは plist:
   "NAME の引数を INFO に従って尋ね、決まったら送る。
 ARGS はここまでに決まった引数文字列、OPEN は末尾のトークンが書きかけか、
 DEPTH は何段目か。候補は入れ子になる（`/plugin' → `enable' → プラグイン名）
-ので、1 つ選ぶたびに次の段を聞き直す。"
-  (when (buffer-live-p buf)
-    (cond
-     ((plist-get info :abort)
-      (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
-     ((plist-get info :hint)
-      (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
-        (zellij-send--slash-submit
-         buf name (string-trim (concat args " " (or arg ""))))))
-     ((plist-get info :values)
-      (let ((choice (zellij-send--slash-read-value name info)))
-        (if (null choice)
-            (zellij-send--slash-submit buf name args)
-          (let* ((value (car choice))
-                 (listed (cdr choice))
-                 ;; 一覧から選んだ値は、それ自体が書きかけ（`autoScroll=' の
-                 ;; ような）でなければ 1 トークンぶんの確定。一覧に無い値は
-                 ;; 絞り込みの打ちかけとみなして、次はそれを打った状態で聞く
-                 (next-open (if listed (zellij-send--slash-arg-open-p value) t))
-                 (next (zellij-send--slash-arg-append args value open)))
-            (if (>= depth zellij-send--slash-arg-max-depth)
-                (zellij-send--slash-submit buf name next)
-              (message "%s %s の続きを確認中…" name next)
-              (zellij-send--slash-probe-arg
-               buf name next next-open
-               (lambda (result)
-                 ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）
-                 (run-at-time 0 nil #'zellij-send--slash-run
-                              buf name next next-open (1+ depth) result))))))))
-     (t (zellij-send--slash-submit buf name args)))))
+ので、1 つ選ぶたびに次の段を聞き直す。
 
-(defun zellij-send--slash-choose (buf)
-  "BUF のキャッシュから選ばせ、引数を尋ねてから送る。"
+タイマーから呼ばれるので、BUF をカレントにしてから尋ねる（`<path>' の
+補完が BUF の `default-directory' から始まるように）。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((name (string-trim (zellij-send--slash-read (zellij-send--slash-cached)))))
+      (cond
+       ((plist-get info :abort)
+        (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
+       ((plist-get info :hint)
+        (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
+          (zellij-send--slash-submit
+           buf name (string-trim (concat args " " (or arg ""))))))
+       ((plist-get info :values)
+        (let ((choice (zellij-send--slash-read-value name info)))
+          (if (null choice)
+              (zellij-send--slash-submit buf name args)
+            (let* ((value (car choice))
+                   (listed (cdr choice))
+                   ;; 一覧から選んだ値は、それ自体が書きかけ（`autoScroll=' の
+                   ;; ような）でなければ 1 トークンぶんの確定。一覧に無い値は
+                   ;; 絞り込みの打ちかけとみなして、次はそれを打った状態で聞く
+                   (next-open (if listed (zellij-send--slash-arg-open-p value) t))
+                   (next (zellij-send--slash-arg-append args value open)))
+              (if (>= depth zellij-send--slash-arg-max-depth)
+                  (zellij-send--slash-submit buf name next)
+                (message "%s %s の続きを確認中…" name next)
+                (zellij-send--slash-probe-arg
+                 buf name next next-open
+                 (lambda (result)
+                   ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）
+                   (run-at-time 0 nil #'zellij-send--slash-run
+                                buf name next next-open (1+ depth) result))))))))
+       (t (zellij-send--slash-submit buf name args))))))
+
+(defun zellij-send--slash-choose (buf &optional alist)
+  "BUF のキャッシュ（ALIST があればそれ）から選ばせ、引数を尋ねてから送る。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((name (string-trim (zellij-send--slash-read
+                                (or alist (zellij-send--slash-cached))))))
         (unless (string-empty-p name)
           (unless (string-prefix-p "/" name)
             (setq name (concat "/" name)))
@@ -2582,6 +2684,8 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
   (unless (zellij-send--claude-confirmed-p)
     (user-error "スラッシュコマンドの補完は Claude Code 専用です（%s）。本文として送るか C-c C-t のキー透過モードを使ってください"
                 (or (zellij-send--agent-name) "コマンド不明")))
+  (when (zellij-send--slash-collecting-p)
+    (user-error "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
   (when refresh
     (zellij-send--slash-arg-cache-clear))
   (let ((buf (current-buffer)))
@@ -2590,14 +2694,17 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
       (message "スラッシュコマンド一覧を取得中…（初回のみ数秒かかります）")
       (zellij-send--slash-collect
        buf
-       (lambda (alist)
+       (lambda (alist truncated)
          (when (buffer-live-p buf)
            (with-current-buffer buf
              (if (null alist)
                  (message "コマンド一覧を取得できませんでした。ペインの状態を確認してください")
-               (zellij-send--slash-cache-put alist)
-               (message "スラッシュコマンド %d 件" (length alist))
-               (run-at-time 0 nil #'zellij-send--slash-choose buf)))))))))
+               ;; 打ち切った一覧は今回だけ使い、キャッシュせず次回は取り直す
+               (unless truncated
+                 (zellij-send--slash-cache-put alist))
+               (message "スラッシュコマンド %d 件%s" (length alist)
+                        (if truncated "（一部）" ""))
+               (run-at-time 0 nil #'zellij-send--slash-choose buf alist)))))))))
 
 ;;;; 先読み
 
@@ -2609,7 +2716,8 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
              zellij-send--session
              (zellij-send--claude-confirmed-p)
              (null (zellij-send--slash-cached))
-             (not zellij-send--slash-prefetching))
+             (not zellij-send--slash-prefetching)
+             (not (zellij-send--slash-collecting-p)))
     (run-at-time zellij-send-slash-prefetch-delay nil
                  #'zellij-send--slash-prefetch-run (current-buffer) 1)))
 
@@ -2625,19 +2733,23 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
                  (zellij-send--claude-confirmed-p)
                  (null (zellij-send--slash-cached))
                  (not zellij-send--slash-prefetching)
+                 (not (zellij-send--slash-collecting-p))
                  (<= try zellij-send-slash-prefetch-retries))
         (setq zellij-send--slash-prefetching t)
         (zellij-send--slash-collect
          buf
-         (lambda (alist)
+         (lambda (alist truncated)
            (when (buffer-live-p buf)
              (with-current-buffer buf
                (setq zellij-send--slash-prefetching nil)
-               (if alist
-                   (zellij-send--slash-cache-put alist)
+               ;; 打ち切った一覧は覚えない。取り直しても同じなので再試行もしない
+               (cond
+                (truncated nil)
+                (alist (zellij-send--slash-cache-put alist))
+                (t
                  (run-at-time zellij-send-slash-prefetch-delay nil
                               #'zellij-send--slash-prefetch-run
-                              buf (1+ try)))))))))))
+                              buf (1+ try))))))))))))
 
 ;;; インタラクティブコマンド
 
@@ -2687,15 +2799,18 @@ ARG（\\[universal-argument]）付きのときは、従来どおり zellij ス�
      (t
       (when claude
         (message "transcript が見つかりません。スクリーンを取得します"))
-      (zellij-send--dump-screen-async
-       zellij-send--session
-       (lambda (content)
-         (if content
-             (progn
-               (zellij-send--update-buffer content)
-               (message "スクリーン内容を取得しました"))
-           (message "スクリーン内容の取得に失敗しました")))
-       t)))))
+      (let ((tick (buffer-chars-modified-tick)))
+        (zellij-send--dump-screen-async
+         zellij-send--session
+         (lambda (content)
+           (cond
+            ((null content) (message "スクリーン内容の取得に失敗しました"))
+            ;; 取得を待つ間に書き始めた下書きは上書きしない
+            ((/= tick (buffer-chars-modified-tick))
+             (message "取得中にバッファが編集されたので反映しませんでした"))
+            (t (zellij-send--update-buffer content)
+               (message "スクリーン内容を取得しました"))))
+         t))))))
 
 (defun zellij-send-show-live (&optional arg)
   "黒板を今のペイン画面に戻し、自動更新を再開する。
@@ -2721,18 +2836,19 @@ ARG（\\[universal-argument]）付きならスクロールバックまで取る�
   (setq zellij-send--user-cleared nil)
   ;; 取り直す画面の方が新しいので、選択中に保留した分は要らない
   (zellij-send--pending-drop)
-  (let ((buf (current-buffer)))
-    (zellij-send--dump-screen-async
-     zellij-send--session
-     (lambda (content)
-       (if content
-           (progn
-             (zellij-send--update-buffer content)
-             (when (buffer-live-p buf)
-               (with-current-buffer buf (goto-char (point-max))))
-             (message "ペインの画面に戻しました（自動更新を再開）"))
-         (message "スクリーン内容の取得に失敗しました（自動更新は再開しました）")))
-     arg)))
+  (zellij-send--dump-screen-async
+   zellij-send--session
+   (lambda (content)
+     (cond
+      ((null content)
+       (message "スクリーン内容の取得に失敗しました（自動更新は再開しました）"))
+      ;; 取得を待つ間に書き始めた下書きは上書きしない（自動更新と同じ扱い）
+      ((buffer-modified-p)
+       (message "取得中にバッファが編集されたので反映しませんでした"))
+      (t (zellij-send--update-buffer content)
+         (goto-char (point-max))
+         (message "ペインの画面に戻しました（自動更新を再開）"))))
+   arg))
 
 (defun zellij-send-clear-buffer ()
   "バッファの内容をクリアする。"
@@ -2930,16 +3046,21 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
   "zellij-send 返信バッファのキーマップ。")
 
 (defun zellij-send-reply ()
-  "返信用の空バッファを開く。C-c C-c で送信してバッファを閉じる。"
+  "返信用のバッファを開く。C-c C-c で送信してバッファを閉じる。
+送らずに閉じた返信は、次に開いたときにそのまま残っている。"
   (interactive)
   (zellij-send--assert-session)
   (let* ((session zellij-send--session)
          (main-buf (current-buffer))
          (wconf (current-window-configuration))
-         (reply-buf (get-buffer-create (format "*zellij-reply-%s*" session))))
+         (name (format "*zellij-reply-%s*" session))
+         (fresh (not (get-buffer name)))
+         (reply-buf (get-buffer-create name)))
     (with-current-buffer reply-buf
-      (erase-buffer)
-      (text-mode)
+      ;; 開き直したときは書きかけの返信を残す。`text-mode' はバッファ
+      ;; ローカル変数を消すので、作ったときだけ呼ぶ
+      (when fresh
+        (text-mode))
       (setq-local zellij-send--session session)
       (setq-local zellij-send--pane-id
                   (buffer-local-value 'zellij-send--pane-id main-buf))
@@ -3495,7 +3616,9 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 ;; 見えるため（`zellij-send--update-buffer' の抑止条件）。
 
 (defvar-local zellij-send--keys-saved-read-only nil
-  "キー透過モードに入る前の `buffer-read-only' の値。")
+  "キー透過モードに入る前の `buffer-read-only' の値を (VALUE) の形で持つ。
+入っていないときは nil。リストに包むのは、有効化が重なったときに
+自分で立てた t を「元の値」として上書きしないため。")
 
 (defun zellij-send--keys-send (bytes)
   "BYTES をペインへ送る。キー透過モード用の薄いラッパ。"
@@ -3558,10 +3681,13 @@ UTF-8 のバイト列に分解してから送る。"
         (unless zellij-send--session
           (setq zellij-send-keys-mode nil)
           (user-error "zellij-send バッファ外では使えません"))
-        (setq zellij-send--keys-saved-read-only buffer-read-only)
+        (unless zellij-send--keys-saved-read-only
+          (setq zellij-send--keys-saved-read-only (list buffer-read-only)))
         (setq buffer-read-only t)
         (message "キー透過モード ON（↑↓ 選択 / RET 決定 / SPC トグル / C-c C-t で解除）"))
-    (setq buffer-read-only zellij-send--keys-saved-read-only)
+    (when zellij-send--keys-saved-read-only
+      (setq buffer-read-only (car zellij-send--keys-saved-read-only)
+            zellij-send--keys-saved-read-only nil))
     ;; 手で抜けたら「自動で入った」印も落とす。次に自分で入れ直したモードを
     ;; 質問が消えた拍子に勝手に切らないため
     (setq zellij-send--askq-keys-auto nil)
@@ -3639,7 +3765,7 @@ claude 以外を動かしているセッションを見分けるためだけの�
                         (format " Session: %s%s  |  C-c C-c: 送信  C-c C-a: メニュー  C-c C-t: キー透過"
                                 (or zellij-send--session "?")
                                 (zellij-send--header-command-suffix)))))
-  ;; subscribe はセッション名が入ってから張る（`--get-or-create-buffer' が呼ぶ）。
+  ;; subscribe は pane-id が決まってから張る（`--get-or-create-buffer' 参照）。
   ;; ここで確実に止めておかないと、常駐プロセスがバッファより長生きする
   ;; ——セッションが消えても subscribe 自身は終了しないため、これが唯一の
   ;; 確実な後始末になる。
@@ -3936,8 +4062,8 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
     (message "セッション一覧を取得中...")
     (zellij-send--list-sessions-async
      (lambda (sessions)
-       (if (eq sessions :timeout)
-           (message "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。")
+       (if (not (listp sessions))
+           (message "%s" (zellij-send--list-sessions-failure sessions))
          (let ((session (zellij-send--numbered-session-name
                          base (zellij-send--taken-session-names sessions))))
            ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
@@ -3980,8 +4106,8 @@ cwd と pane-id は zellij から取得するので、ディレクトリは尋�
   (message "セッション一覧を取得中...")
   (zellij-send--list-sessions-async
    (lambda (sessions)
-     (if (eq sessions :timeout)
-         (message "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。")
+     (if (not (listp sessions))
+         (message "%s" (zellij-send--list-sessions-failure sessions))
        ;; コールバックはプロセス sentinel の中で走る。sentinel 内では
        ;; quit が抑止されるため、そのままミニバッファ入力を行うと C-g が
        ;; 効かない・入力が壊れる。タイマーで sentinel を抜けてから聞く。

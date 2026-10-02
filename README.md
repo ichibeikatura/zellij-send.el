@@ -360,12 +360,12 @@ Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij
 | `o`     | Show it in another window, stay here       |
 | `e`     | Open a reply buffer for that session       |
 | `1`/`2`/`3` | Send that numbered choice              |
-| `a`     | Fetch the screen manually                  |
+| `a`     | Show the conversation (`C-u`: the screen)  |
 | `l`     | Open that session's log                    |
 | `i`     | Interrupt what the session is doing (Esc)  |
 | `c`     | Send `/compact`                            |
 | `r`     | Connect to Remote Control and show its QR  |
-| `Q`/`k` | End the session (same as `C-c C-a q`)      |
+| `Q`     | End the session (same as `C-c C-a q`)      |
 | `g`     | Refresh now (`revert-buffer`)              |
 | `G`     | Connect to any zellij session not yet listed |
 | `?`     | Show the key list                          |
@@ -378,7 +378,7 @@ Connecting is not a one-shot at startup: the list is rescanned every `zellij-sen
 
 State is derived from each session buffer's contents — no extra `zellij` calls are made. A session counts as **working** when the spinner line is present (`zellij-send-dashboard-working-regexp`, default `esc to \(?:interrupt\|cancel\)` — agy says cancel) **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). The screen check matters: while Claude Code streams plain prose it shows no spinner at all, so spinner-only detection reports an actively answering session as idle. When neither holds, the session flips to **done**, which clears once you look at that buffer.
 
-`Q` and `k` do the same thing as `C-c C-a q` in the blackboard buffer: they ask for confirmation, send `/exit`, wait for the agent to exit, and delete the zellij session, in any state. If the agent has not exited within `zellij-send-quit-timeout` seconds (default 10) — or `/exit` could not be sent — the session is force-deleted. The state column is inferred from screen changes and can lag by a few seconds, so refusing to quit a session that merely *looks* busy only got in the way.
+`Q` does the same thing as `C-c C-a q` in the blackboard buffer: it asks for confirmation, send `/exit`, wait for the agent to exit, and delete the zellij session, in any state. If the agent has not exited within `zellij-send-quit-timeout` seconds (default 10) — or `/exit` could not be sent — the session is force-deleted. The state column is inferred from screen changes and can lag by a few seconds, so refusing to quit a session that merely *looks* busy only got in the way.
 
 ### Remote Control QR (`r`)
 

@@ -971,8 +971,12 @@ attach クライアント無しで送信できる）。`M-x zellij-send` の既�
 `list-sessions` と突き合わせ、未接続セッションに接続し、消えたセッションの
 バッファを kill する（`--prune-gone`）。守るべき点:
 
-- **タイムアウト（`:timeout`）を「0 件」と解釈しない**。そのまま prune すると
-  zellij が一時的に応答しないだけで全行が消える
+- **タイムアウト（`:timeout`）・失敗（`:error`）を「0 件」と解釈しない**。そのまま
+  prune すると zellij が一時的に応答しないだけで全行が消える。成否は `listp` で見る。
+  なお **0 件でも `list-sessions` は exit 1**（`No active zellij sessions found.` を
+  stderr に出す。2026-10-03 実測）なので、終了コードだけでは失敗と決められない。
+  stderr は stdout と同じバッファで受けて文言で見分ける（別バッファだと sentinel の
+  時点で届いていないことがある）
 - **編集中（`buffer-modified-p`）のバッファは kill しない**。書きかけの入力を失う
 - `--scanning` フラグで多重起動を防ぐ（応答が 15 秒を超えても `zellij` を重ねない）
 - ダッシュボードを閉じたら `--stop-timers` で両方止める

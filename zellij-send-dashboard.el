@@ -9,14 +9,15 @@
 ;;
 ;; 状態判定はこのファイルが自前で行う。zellij-send 本体は状態フラグを
 ;; 持たない（モードライン通知の撤去に伴い削除された）ため、各セッション
-;; バッファの内容（zellij-send のポーリングが取得済み）から毎回算出する。
-;; zellij を追加で呼ぶことはない。
+;; バッファの内容（zellij-send の subscribe が受信済み）から毎回算出する。
+;; 状態の算出では zellij を呼ばない。呼ぶのは 15 秒ごとのセッション検出
+;; （`zellij-send-dashboard-scan-interval'）だけ。
 ;;
 ;;   M-x zellij-send-dashboard
 ;;
 ;; 表示される情報:
-;;   Flag  ✎ = 未送信の下書きあり（＝ポーリング停止中で表示が古い）
-;;         ‖ = ユーザーがクリアした（＝ポーリング停止中）
+;;   Flag  ✎ = 未送信の下書きあり（＝自動更新停止中で表示が古い）
+;;         ‖ = ユーザーがクリアした（＝自動更新停止中）
 ;;   St    選択待ち / 完了 / 作業中 / 待機
 ;;   経過  その状態になってからの時間
 ;;   無変化 画面内容が最後に変わってからの時間（詰まり検出用）
@@ -330,15 +331,15 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
 
 (defun zellij-send-dashboard--flag (buf)
   "BUF の表示が更新停止中かどうかを表す印を返す。
-zellij-send のポーリングは buffer-modified-p と user-cleared のとき
-更新をスキップするため、その場合は表示が古い旨を明示する。"
+zellij-send の自動更新は buffer-modified-p と user-cleared のとき
+書き換えを止めるため、その場合は表示が古い旨を明示する。"
   (with-current-buffer buf
     (cond (zellij-send--user-cleared
            (propertize "‖" 'face 'shadow
-                       'help-echo "クリア済み: ポーリング停止中"))
+                       'help-echo "クリア済み: 自動更新停止中"))
           ((buffer-modified-p)
            (propertize "✎" 'face 'font-lock-string-face
-                       'help-echo "未送信の下書きあり: ポーリング停止中"))
+                       'help-echo "未送信の下書きあり: 自動更新停止中"))
           (t " "))))
 
 (defun zellij-send-dashboard--gc-state (live-sessions)
@@ -368,16 +369,18 @@ zellij-send のポーリングは buffer-modified-p と user-cleared のとき
   "BUF の画面末尾から、意味のありそうな行を 1 行拾う。"
   (with-current-buffer buf
     (save-excursion
+      ;; 画面は末尾の改行を落として入るので、最終行から読み始める
+      ;; （先に `forward-line -1' すると最終行を読み飛ばす）
       (goto-char (point-max))
-      (let ((line nil) (guard 40))
-        (while (and (null line) (> guard 0) (not (bobp)))
+      (let ((line nil) (guard 40) (more t))
+        (while (and (null line) more (> guard 0))
           (cl-decf guard)
-          (forward-line -1)
           (let ((s (string-trim (buffer-substring-no-properties
                                  (line-beginning-position)
                                  (line-end-position)))))
             (unless (zellij-send-dashboard--noise-p s)
-              (setq line s))))
+              (setq line s)))
+          (setq more (zerop (forward-line -1))))
         (truncate-string-to-width (or line "")
                                   zellij-send-dashboard-tail-width nil nil "…")))))
 
@@ -682,16 +685,18 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send-reply)))
 
-(defun zellij-send-dashboard-show-response ()
-  "カーソル行のセッションの画面を手動で取得する。"
-  (interactive)
+(defun zellij-send-dashboard-show-response (&optional arg)
+  "カーソル行のセッションの会話履歴を表示する（`zellij-send-show-response'）。
+Claude Code なら transcript を、それ以外は画面を取得する。
+ARG（\\[universal-argument]）付きなら Claude Code でも画面を取得する。"
+  (interactive "P")
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
-    (zellij-send-show-response)))
+    (zellij-send-show-response arg)))
 
 (defun zellij-send-dashboard--send-choice (n)
   "カーソル行のセッションが選択肢待ちなら N を送る。
-数字が選択として効くのは Claude Code だけ
-（`zellij-send--assert-number-reply' 参照）。"
+数字が選択として効くと確かめたエージェントだけ
+（`zellij-send-number-reply-commands'。codex には効かない）。"
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send--assert-number-reply)
     (unless (zellij-send--detect-prompt)
@@ -836,7 +841,8 @@ URL はペイン幅で折り返されるため、行頭の空白ごと改行を�
         (url (zellij-send-dashboard--extract-url screen))
         (buf (get-buffer-create (format "*zellij-qr-%s*" session))))
     (with-current-buffer buf
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (image nil))
         (erase-buffer)
         (special-mode)
         ;; ブロック文字を 1 桁にする（2 桁のままだと QR が横に伸びて読めない）
@@ -852,9 +858,9 @@ URL はペイン幅で折り返されるため、行頭の空白ごと改行を�
           (insert (propertize " QR コードを取得できませんでした。\n\n"
                               'face 'warning)))
          ;; 画像で描ければそちらを使う（文字だとフォント次第で読めない）
-         ((zellij-send-dashboard--qr-image qr)
+         ((setq image (zellij-send-dashboard--qr-image qr))
           (insert " ")
-          (insert-image (zellij-send-dashboard--qr-image qr))
+          (insert-image image)
           (insert "\n\n"))
          (t (insert (mapconcat #'identity qr "\n") "\n\n")))
         (if url
@@ -947,6 +953,9 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
         ((null qr-idx) (zellij-send-dashboard--qr-step-capture buf session))
         ((null cur-idx)
          (message "メニューの選択位置が読めませんでした。ペインを直接確認してください")
+         ;; メニューは出ているので閉じておく。留まると以後の送信が壊れる
+         (with-current-buffer buf
+           (zellij-send-dashboard--send-keys session '(27) #'ignore))
          (zellij-send-dashboard--show-qr session screen))
         ((= cur-idx qr-idx) (zellij-send-dashboard--qr-confirm-and-enter buf session))
         (t
@@ -1096,11 +1105,10 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
     ("一覧")
     ("g"   zellij-send-dashboard-refresh            "手動で更新する（revert-buffer）")
     ("G"   zellij-send-dashboard-connect-all        "未接続のセッションに接続し、消えた行を消す")
-    ("a"   zellij-send-dashboard-show-response      "画面を手動で取得する")
+    ("a"   zellij-send-dashboard-show-response      "会話履歴を表示する（C-u で画面を取得）")
     ("?"   zellij-send-dashboard-help               "このキー一覧を出す")
     ("終了")
-    ("Q"   zellij-send-dashboard-kill-session       "セッションを終了する（C-c C-a q と同じ）")
-    ("k"   zellij-send-dashboard-kill-session       "Q と同じ"))
+    ("Q"   zellij-send-dashboard-kill-session       "セッションを終了する（C-c C-a q と同じ）"))
   "ヘルプ（`zellij-send-dashboard-help'）に出すキー一覧。
 要素は (KEY COMMAND DESC)、または見出しだけの (TITLE)。
 COMMAND はキーマップとの食い違いを検査するために持つ
@@ -1115,7 +1123,6 @@ COMMAND はキーマップとの食い違いを検査するために持つ
     (define-key map (kbd "l")   #'zellij-send-dashboard-open-log)
     (define-key map (kbd "i")   #'zellij-send-dashboard-interrupt)
     (define-key map (kbd "c")   #'zellij-send-dashboard-compact)
-    (define-key map (kbd "k")   #'zellij-send-dashboard-kill-session)
     (define-key map (kbd "Q")   #'zellij-send-dashboard-kill-session)
     (define-key map (kbd "r")   #'zellij-send-dashboard-remote-control)
     (define-key map (kbd "1")   #'zellij-send-dashboard-select-1)
@@ -1205,10 +1212,10 @@ COMMAND はキーマップとの食い違いを検査するために持つ
     (zellij-send--list-sessions-async
      (lambda (sessions)
        (setq zellij-send-dashboard--scanning nil)
-       (if (eq sessions :timeout)
-           ;; タイムアウト時は一覧が空とみなさない（生きている行を消さない）
+       (if (not (listp sessions))
+           ;; タイムアウト・失敗は一覧が空とみなさない（生きている行を消さない）
            (when verbose
-             (message "zellij の応答がタイムアウトしました（5秒）"))
+             (message "%s" (zellij-send--list-sessions-failure sessions)))
          (let ((new (seq-difference
                      sessions (zellij-send-dashboard--connected-sessions)))
                (killed (if zellij-send-dashboard-prune-gone
