@@ -171,6 +171,15 @@ zellij は罫線 `─' や矢印 `←' などの曖昧幅の文字を 1 桁で�
   :type 'boolean
   :group 'zellij-send)
 
+(defcustom zellij-send-max-blank-lines 2
+  "黒板に映す画面で、続けて残す空行の数の上限。nil なら詰めない。
+Claude Code は入力欄を画面の最下段に描くので、会話が短いうちは本文と
+入力欄の間が空行で埋まる。`zellij-send-session-size' で 500 行に広げた
+セッションでは、起動直後の黒板が約 485 行の空行になった（2026-10-03 実測）。
+これより長い空行の連なりは、この数まで詰める。"
+  :type '(choice (const :tag "詰めない" nil) natnum)
+  :group 'zellij-send)
+
 (defcustom zellij-send-grid-symbol-families
   '("Menlo" "DejaVu Sans Mono" "STIX Two Math" "Apple Symbols" "Symbola")
   "黒板バッファで記号を 1 桁の幅に収めるために使う字体（先頭から試す）。
@@ -676,7 +685,9 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
 スペースで右パディングして返す（`dump-screen' は返さない）ので、320 桁に
 広げた背景セッションでは 1 行あたり数百文字の空白が付いてくる（2026-07-29 実測）。
 末尾の連続空行もまとめて落とす。ANSI 除去より後に行うこと
-（エスケープが残ったままだと行末を正しく判定できない）。"
+（エスケープが残ったままだと行末を正しく判定できない）。
+
+本文の途中の長い空行は `zellij-send-max-blank-lines' まで詰める。"
   (let* ((text (replace-regexp-in-string
                 "^─+" ""
                 (zellij-send--strip-ansi
@@ -684,7 +695,15 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
          (text (mapconcat (lambda (line) (zellij-send--trim-end line '(?\s ?\t)))
                           (split-string text "\n") "\n")))
     ;; 画面下端の空行（パディングだけの行）を落とす
-    (zellij-send--trim-end text '(?\n))))
+    (setq text (zellij-send--trim-end text '(?\n)))
+    ;; 本文と最下段の入力欄の間に挟まった空行を詰める。照合は改行の位置から
+    ;; だけ始まり、連なりを 1 回読むだけなので線形時間
+    (if (natnump zellij-send-max-blank-lines)
+        (replace-regexp-in-string
+         (format "\n\\{%d,\\}" (+ zellij-send-max-blank-lines 2))
+         (make-string (1+ zellij-send-max-blank-lines) ?\n)
+         text t t)
+      text)))
 
 (defun zellij-send--dump-screen-async (session callback &optional full)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。

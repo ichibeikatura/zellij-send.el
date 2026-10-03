@@ -68,6 +68,23 @@
   (should (equal (zellij-send--process-dump "  上\t \n\n  下  ")
                  "  上\n\n  下")))
 
+;; 入力欄が最下段にあるので、500 行の画面では起動直後に約 485 行の空行が挟まる
+(ert-deftest zellij-send-test-process-dump-collapses-blank-run ()
+  "長い空行の連なりを `zellij-send-max-blank-lines' まで詰め、短いものは残す。"
+  (let ((raw (concat "ロゴ\n\n本文" (make-string 485 ?\n) "❯ 入力欄\n\n  ⏵⏵ auto")))
+    (let ((zellij-send-max-blank-lines 2))
+      (should (equal (zellij-send--process-dump raw)
+                     "ロゴ\n\n本文\n\n\n❯ 入力欄\n\n  ⏵⏵ auto"))
+      ;; ちょうど上限の連なりはそのまま
+      (should (equal (zellij-send--process-dump "上\n\n\n下") "上\n\n\n下")))
+    (let ((zellij-send-max-blank-lines 0))
+      (should (equal (zellij-send--process-dump raw)
+                     "ロゴ\n本文\n❯ 入力欄\n  ⏵⏵ auto")))
+    (let ((zellij-send-max-blank-lines nil))
+      (should (equal (zellij-send--process-dump raw)
+                     (concat "ロゴ\n\n本文" (make-string 485 ?\n)
+                             "❯ 入力欄\n\n  ⏵⏵ auto"))))))
+
 (ert-deftest zellij-send-test-trim-end ()
   "末尾の指定文字だけを落とし、途中と先頭は残す。"
   (should (equal (zellij-send--trim-end "  A   B \t " '(?\s ?\t)) "  A   B"))

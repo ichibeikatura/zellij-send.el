@@ -564,6 +564,8 @@ To widen a session that already exists, run `M-x zellij-send-resize-session` fro
 
 Attaching from a terminal shrinks the session to that client's size — that is how zellij works. Don't attach if you want to keep the full width.
 
+Claude Code draws its input box on the bottom row, so while the conversation is short the screen is mostly blank lines between the text and the input box (about 485 of them right after start-up in a 500-line session). The buffer squeezes such runs down to `zellij-send-max-blank-lines` (default 2; `nil` keeps them as they are).
+
 ## Auto-receive & Markdown Log Setup (Claude Code Stop Hook)
 
 The Stop hook does two things every time Claude Code finishes a response:
