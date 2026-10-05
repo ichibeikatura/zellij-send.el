@@ -139,6 +139,10 @@ the already sent text. Failed sends preserve the text as well.
 
 When Claude Code finishes its reply, the `*ai-session-name*` buffer **updates automatically**.
 
+While point is at the end of the buffer, updates keep it there and keep the last line at the
+bottom of the window. Sending clears the buffer, so this is where you land right after a send.
+Move up to read and the buffer stays put; `M->` back to the end and it follows again.
+
 The buffer mirrors the pane, which means it shows one screenful — a TUI in the alternate
 screen has no scrollback, so whatever scrolled past is gone as far as the terminal is
 concerned. To read the conversation from the beginning, open the menu with `C-c C-a` and

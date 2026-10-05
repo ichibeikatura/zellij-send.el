@@ -1559,21 +1559,37 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
             (unless (string= content (buffer-string)) content))
     (zellij-send--pending-drop)
     (let* ((win (get-buffer-window (current-buffer) t))
-           (pos (point))
+           ;; 選択されていない窓では、窓の point とバッファの point が別物になる。
+           ;; ユーザーが見ているのは窓の方なので、窓があればそちらを基準にする
+           (pos (if (window-live-p win) (window-point win) (point)))
+           (follow (= pos (point-max)))
            (mark (mark t))
            (wstart (and (window-live-p win) (window-start win))))
       (with-silent-modifications
         (erase-buffer)
         (insert content))
       (zellij-send--grid-apply t content)
-      (goto-char (min pos (point-max)))
+      ;; 末尾にいたら末尾を追う（ターミナルや `M-x compile' と同じ）。送信に
+      ;; 成功すると黒板を空にするので、送った直後は自動でここに入り、最新の
+      ;; 回答が出る下端が見え続ける。上へ動かして読み始めたら追うのをやめる
+      (goto-char (if follow (point-max) (min pos (point-max))))
       ;; `erase-buffer' はマークも point-min に潰す。point と同じく位置で戻す
       (when mark
         (set-marker (mark-marker) (min mark (point-max))))
       (when (window-live-p win)
         (set-window-point win (point))
-        (when wstart
-          (set-window-start win (min wstart (point-max)) t))))
+        (cond
+         (follow
+          ;; 最下段を窓の下端に合わせる。`recenter' は窓を選択しないと
+          ;; 使えないので、末尾から窓の高さぶん表示行を戻って開始位置を決める
+          (set-window-start
+           win
+           (save-excursion
+             (vertical-motion (- 1 (window-body-height win)) win)
+             (point))
+           t))
+         (wstart
+          (set-window-start win (min wstart (point-max)) t)))))
     (set-buffer-modified-p nil)
     (if (zellij-send--detect-prompt)
         (zellij-send--highlight-prompt)

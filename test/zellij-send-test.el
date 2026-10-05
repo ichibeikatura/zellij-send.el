@@ -1131,6 +1131,36 @@ codex のペインに `/' を打ち込む。"
     (zellij-send--update-buffer "line one\nline two")
     (should-not zellij-send--pending-content)))
 
+(ert-deftest zellij-send-test-update-follows-end ()
+  "末尾にいたら更新後も末尾を追い、最下段を窓の下端に合わせる。
+送信成功で黒板が空になった直後もこれに当たる。旧実装は point 1 に留まり、
+回答が出る下端が見えなかった。"
+  (zellij-send-test--with-board
+    (let ((screen (lambda (n)
+                    (mapconcat (lambda (i) (format "line %d" i))
+                               (number-sequence 1 n) "\n")))
+          ;; batch では再描画が走らず `pos-visible-in-window-p' が使えないので、
+          ;; 開始位置が「末尾から窓の高さぶん上の行頭」かで確かめる
+          (bottom-start (lambda ()
+                          (save-excursion
+                            (goto-char (point-max))
+                            (forward-line (- 1 (window-body-height)))
+                            (point)))))
+      ;; 空の黒板（送信直後）は末尾にいる扱い
+      (zellij-send--update-buffer (funcall screen 100))
+      (should (= (point) (point-max)))
+      (should (= (window-point) (point-max)))
+      (should (> (window-start) 1))
+      (should (= (window-start) (funcall bottom-start)))
+      ;; 伸びても末尾を追う
+      (zellij-send--update-buffer (funcall screen 120))
+      (should (= (point) (point-max)))
+      (should (= (window-start) (funcall bottom-start)))
+      ;; 上へ動いたら追わず、位置を保つ
+      (goto-char 10)
+      (zellij-send--update-buffer (funcall screen 130))
+      (should (= (point) 10)))))
+
 (ert-deftest zellij-send-test-pending-resumes-on-deactivate ()
   "選択を解くと保留していた最新の内容を反映する。"
   (zellij-send-test--with-board
