@@ -1580,14 +1580,13 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
         (set-window-point win (point))
         (cond
          (follow
-          ;; 最下段を窓の下端に合わせる。`recenter' は窓を選択しないと
-          ;; 使えないので、末尾から窓の高さぶん表示行を戻って開始位置を決める
-          (set-window-start
-           win
-           (save-excursion
-             (vertical-motion (- 1 (window-body-height win)) win)
-             (point))
-           t))
+          ;; 最下段を窓の下端に合わせる。行数（`vertical-motion'）で開始位置を
+          ;; 決めてはいけない。日本語や記号の行は既定の行より背が高いので
+          ;; ピクセルでは収まらず、再描画が point を窓の中央へ寄せ直す
+          ;; （実測: 36 行の窓で最終行が上から 325px、下に 270px の空白）。
+          ;; `recenter' はピクセルで数えるが、選択中の窓にしか効かない
+          (with-selected-window win
+            (recenter -1)))
          (wstart
           (set-window-start win (min wstart (point-max)) t)))))
     (set-buffer-modified-p nil)
