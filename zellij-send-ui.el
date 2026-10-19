@@ -1282,7 +1282,14 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
 
 `zellij-send--command' はバッファを作った直後に入れる。subscribe の開始が
 スラッシュコマンドの先読みを呼ぶので、claude 以外のペインに `/' を
-打たないためにはペイン起動より前に確定していなければならない。"
+打たないためにはペイン起動より前に確定していなければならない。
+
+DIR が無いディレクトリなら、黒板もセッションも作らずに `user-error' にする。
+`attach --create-background' は呼び出し側のバッファから起動するので DIR が
+無くても成功し、その後の拡幅とペインの起動だけが黒板の `default-directory'
+で失敗して、空の黒板とセッションが残った（2026-10-20 手元確認）。"
+  (unless (file-directory-p dir)
+    (user-error "ディレクトリがありません: %s" dir))
   (let* ((command (or command zellij-send-default-command))
          (buf (zellij-send--get-or-create-buffer session)))
     (with-current-buffer buf

@@ -2370,6 +2370,21 @@ C-u で捨てたものは戻らない。"
           (should-not (get-buffer name)))
       (when (get-buffer name) (kill-buffer name)))))
 
+(ert-deftest zellij-send-test-spawn-missing-dir ()
+  "無いディレクトリでは黒板もセッションも作らない。"
+  (let ((name (zellij-send--buffer-name "zjs-nodir00"))
+        (dir (expand-file-name "zjs-no-such-dir" (make-temp-file "zjs" t)))
+        called)
+    (unwind-protect
+        (cl-letf (((symbol-function 'zellij-send--zellij-async)
+                   (lambda (&rest _) (setq called t))))
+          (should-error (zellij-send-spawn-session "zjs-nodir00" dir "claude")
+                        :type 'user-error)
+          (should-not called)
+          (should-not (get-buffer name)))
+      (when (get-buffer name) (kill-buffer name))
+      (delete-directory (file-name-directory dir)))))
+
 (ert-deftest zellij-send-test-dashboard-state-without-session ()
   "セッション名の無い状態は記録しない。"
   (let ((zellij-send-dashboard--state (make-hash-table :test #'equal)))
