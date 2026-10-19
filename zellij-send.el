@@ -2191,6 +2191,16 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
 ;;
 ;; ペインの入力欄を実際に打って調べるので、**入力欄が空でないときは何もしない**。
 ;; ユーザーがターミナル側で書きかけたテキストを Ctrl+U で消してしまわないため。
+;;
+;; 2026-10-19 実測（Claude Code v2.1.303 / zellij 0.45.1、320 桁の背景セッション。
+;; 画面そのものは test/fixtures/slash-*.txt）:
+;; - **選択中の項目の行頭に `❯' が付く**（`  ❯ /ndl   国立国会図書館…'）。
+;;   `zellij-send--slash-entry-regexp' はこの行に当たらず、そこで読むのをやめる
+;;   ので、一覧が欠ける（test/zellij-send-parse-test.el の失敗扱いの 4 本）
+;; - 1 行で収まる項目なら 5 件見えた（`/install-github-app' から `/login' まで）
+;; - 入力枠の上罫線は `─' だけの行になった（`↯' は無い）
+;; - 末尾で ↓ を押すと先頭へ、先頭で ↑ を押すと末尾へ回り込む
+;;   （`/' の直後に ↑ 1 回で最後の `/workflow-authoring' に移った）
 
 (defcustom zellij-send-slash-settle-delay 0.25
   "スラッシュコマンドの操作で、キーを送ってから画面を読み直すまでの待ち時間（秒）。"
@@ -2887,6 +2897,12 @@ TRUNCATED が non-nil なら回数を使い切って打ち切った一覧。"
 ;;   候補が数百あるので `zellij-send-slash-arg-max-rounds' で打ち切る
 ;; - `<path>` のヒントはペインに聞かず Emacs 側で補完する。ペインの
 ;;   ディレクトリ候補は途中まで打たないと出てこないため
+;;
+;; 2026-10-19 実測（Claude Code v2.1.303）: `/effort ' のヒントが入れ子になった
+;; （`/effort  [low|medium|high|xhigh|max|auto|ultracode [on|off]]'）。
+;; `zellij-send--slash-hint-values' は `|' で切るので、`ultracode' が落ちて
+;; `ultracode' の引数の `off' が候補に混ざる。`/config ' `/plugin ' の候補メニューと
+;; `/add-dir  <path>' は 2026-09-06 と同じ形だった（test/fixtures/slash-arg-*.txt）。
 
 (defun zellij-send--slash-probe-arg (buf name args open callback)
   "NAME の引数 ARGS の続きをペインに聞いて CALLBACK に渡す。
@@ -3615,6 +3631,11 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
 ;; → 実装した（`zellij-send--askq-enrich'）。2026-10-19 実測、同じ版で:
 ;; 質問がペインに出た 6.35 秒の時点で、state-zellij-send.sh 経由の質問 2 つの
 ;; 原文と「選択待ち」が既に黒板に届いていた（PreToolUse は描画より先に来る）。
+;;
+;; 2026-10-19 実測（Claude Code v2.1.303 / zellij 0.45.1）: 単一選択・自由入力に
+;; カーソル・複数選択・最終確認の 4 画面とも、上の 2026-07-29 の形のままだった
+;; （test/fixtures/askq-*.txt）。複数選択のヒント行から `ctrl+g to edit in Vim'
+;; の項が消えていたが、`zellij-send-askq-hint-regexp' は両端しか見ないので影響しない。
 
 (defcustom zellij-send-askq-hint-regexp "^Enter to select · .*Esc to cancel"
   "AskUserQuestion の画面を見分けるための正規表現。

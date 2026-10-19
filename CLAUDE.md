@@ -32,7 +32,9 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 - 検証は `make`（バイトコンパイル → テスト → checkdoc）。`make test` / `make compile` で個別に。
   バイトコンパイルは警告もエラーにする（警告を増やさない）。checkdoc は日本語 docstring の
   誤検知が多いので件数を見るだけ。Emacs は `make EMACS=…` で差し替える
-- テストは zellij を呼ばない純関数と、バッファ更新の振る舞い（`test/zellij-send-test.el`）
+- テストは zellij を呼ばない純関数と、バッファ更新の振る舞い（`test/zellij-send-test.el`）、
+  実機の画面（`test/fixtures/`）をパーサに通すもの（`test/zellij-send-parse-test.el`）。
+  性能の見張りは `make bench`（機械依存なので `make` には入れない）
 - zellij を叩く経路は、`ZELLIJ_SOCKET_DIR` を分けた使い捨てサーバで手で確かめる
   （普段のダッシュボードが自動接続しないように。パスは 104 バイト未満）
 - GUI の描画を確かめるときは別の `emacs -Q` を使い、既定フォントは
@@ -50,7 +52,8 @@ Emacs から detached な zellij セッションで動く AI エージェント�
   `zellij-send-slash-support-alist` / `zellij-send-progress-file-alist`）。
   エージェントの自己申告は信用しない（agy は `/compact` が「ある」と答え、実機が否定した）
 - **日付入りの実測コメントを消さない・書き換えない。** 変えるときは新しい実測を日付付きで追記する
-- **画面の形に新しい仮定を置かない。** 置くなら実機で確かめ、日付と版をコメントに残す
+- **画面の形に新しい仮定を置かない。** 置くなら実機で確かめ、日付と版をコメントに残し、
+  画面は `test/fixtures/capture.sh` で fixture にしてテストに足す
 - 本体（`zellij-send.el`）からダッシュボードを require しない・シンボルを参照しない。
   依存は dashboard → 本体の一方向（メニュー `d` は `require ... noerror` で遅延ロード）。
   ダッシュボードは本体の公開 API（「セッションの状態と操作（公開 API）」節）だけを使い、
@@ -128,6 +131,7 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 | CLI ごとの差（記号・数字キー・`/compact`） | `zellij-send-prompt-marker-alist` / `zellij-send-number-reply-commands` / `zellij-send-slash-support-alist` |
 | transcript の場所・題名 | `zellij-send--transcript-*` の docstring |
 | ダッシュボード・/usage | `.claude/skills/zellij-send-dashboard/SKILL.md` |
+| 実機の画面そのもの（版・幅つき） | `test/fixtures/`（採り方は `capture.sh` の先頭） |
 
 ### コードに無い CLI の実測（2026-09-07、zellij 0.45.1）
 

@@ -1,0 +1,6 @@
+#fixture: name=list-sessions-empty
+#fixture: captured=2026-10-19T19:59:04+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.303 (Claude Code)
+#fixture: note=空の ZELLIJ_SOCKET_DIR で zellij list-sessions（stdout と stderr）
+No active zellij sessions found.

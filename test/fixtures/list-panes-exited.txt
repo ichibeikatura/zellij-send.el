@@ -1,0 +1,10 @@
+#fixture: name=list-panes-exited
+#fixture: captured=2026-10-19T19:59:28+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.303 (Claude Code)
+#fixture: note=zellij --session zjs-fixture00 action list-panes --all
+TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+0  0  Tab #1  plugin_0  plugin  (.) - zellij:link  zellij:link  -  false  false  false  13  13  24  25
+0  0  Tab #1  plugin_1  plugin  tab-bar  tab-bar  -  false  false  false  0  0  1  320
+0  0  Tab #1  plugin_2  plugin  status-bar  status-bar  -  false  false  false  0  499  1  320
+0  0  Tab #1  terminal_1  terminal  claude --remote-control zjs-fixture00  claude --remote-control zjs-fixture00  -  true  false  true  0  1  498  320

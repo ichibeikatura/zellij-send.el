@@ -1,0 +1,49 @@
+#fixture: name=agy-permission
+#fixture: captured=2026-10-19T19:50:39+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=agy 1.4.2
+#fixture: panes-header=TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+#fixture: pane=0  0  Tab #1  terminal_1  terminal  agy  agy  /Users/mck/zjs-fixture  true  false  false  0  1  498  320
+#fixture: note=agy の許可ダイアログ（> 1. Yes, run command）
+
+      ▄▀▀▄        Antigravity CLI 1.4.2
+     ▀▀▀▀▀▀       user000000@gmail.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+   ▄▀▀    ▀▀▄     ~/zjs-fixture
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> カレントディレクトリで ls -la を実行してください
+
+● Ran (ls -la) (ctrl+o to expand)
+
+  カレントディレクトリ（/Users/mck/zjs-fixture）での ls -la の実行結果は以下の通りです。
+
+    total 8
+    drwxr-xr-x@   4 mck  staff   128 10 19 19:34 .
+    drwxr-xr-x+ 141 mck  staff  4512 10 19 19:49 ..
+    drwxr-xr-x@   9 mck  staff   288 10 19 19:34 .git
+    -rw-r--r--@   1 mck  staff    13 10 19 19:34 README.md
+
+  • .git
+  • README.md
+
+────────────────────────────────────────────────────────────
+> touch zjs-test.txt を実行してください
+
+● Ran (touch zjs-test.txt) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   touch zjs-test.txt
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'touch'
+  3. Yes, and always allow for commands that start with 'touch' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                                                                                                                                                                                                                                                            Gemini 4 Argon · mediu

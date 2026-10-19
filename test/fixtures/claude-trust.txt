@@ -1,0 +1,24 @@
+#fixture: name=claude-trust
+#fixture: captured=2026-10-19T19:36:30+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.303 (Claude Code)
+#fixture: panes-header=TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+#fixture: pane=
+#fixture: note=Claude Code のフォルダ信頼確認（番号なしの ❯ 選択肢）。採取時は askq-single の名前で保存されていたものを改名
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /Users/mck/zjs-fixture
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+

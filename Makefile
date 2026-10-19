@@ -4,9 +4,9 @@
 EMACS ?= emacs
 BATCH  = $(EMACS) -Q --batch -L .
 SRCS   = zellij-send.el zellij-send-dashboard.el
-TESTS  = test/zellij-send-test.el
+TESTS  = test/zellij-send-test.el test/zellij-send-parse-test.el
 
-.PHONY: check test compile checkdoc clean
+.PHONY: check test bench compile checkdoc clean
 
 check: compile test checkdoc
 
@@ -18,7 +18,11 @@ compile:
 	status=$$?; rm -f *.elc; exit $$status
 
 test:
-	$(BATCH) -l ert -l $(TESTS) -f ert-run-tests-batch-and-exit
+	$(BATCH) -l ert $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
+
+# 性能の見張り（1 回 10 ms を超えたら失敗）。機械に依存するので check には入れない
+bench:
+	$(BATCH) -l ert -l test/zellij-send-bench.el -f ert-run-tests-batch-and-exit
 
 # 日本語の docstring に対する誤検知（句点「。」を文末と見なさない等）が多いので、
 # 結果は表示するだけで失敗にはしない

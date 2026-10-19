@@ -1,0 +1,10 @@
+#fixture: name=list-sessions
+#fixture: captured=2026-10-19T19:59:04+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.303 (Claude Code)
+#fixture: note=zellij list-sessions（stdout と stderr）
+[32;1mproject01[m [Created [35;1m2h 29m 32s[m ago] 
+[32;1msample-proj00[m [Created [35;1m2h 6m 54s[m ago] (current)
+[32;1mzjs-fixture00[m [Created [35;1m24m 1s[m ago] 
+[32;1mzjs-fixture01[m [Created [35;1m13m[m ago] 
+[32;1mzjs-fixture02[m [Created [35;1m12m 52s[m ago] 

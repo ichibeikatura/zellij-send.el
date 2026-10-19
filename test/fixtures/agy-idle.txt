@@ -1,0 +1,22 @@
+#fixture: name=agy-idle
+#fixture: captured=2026-10-19T19:49:50+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=agy 1.4.2
+#fixture: panes-header=TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+#fixture: pane=0  0  Tab #1  terminal_1  terminal  agy  agy  /Users/mck/zjs-fixture  true  false  false  0  1  498  320
+#fixture: note=agy の待機画面（空の > 入力欄）
+
+      ▄▀▀▄        Antigravity CLI 1.4.2
+     ▀▀▀▀▀▀       user000000@gmail.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Argon (Medium)
+   ▄▀▀    ▀▀▄     ~/zjs-fixture
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Verbosity now defaults to medium
+ ┃ Verbosity is now medium by default, so tool calls and thoughts roll up into summaries. You can change your preferred verbosity anytime in /config > Verbosity.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                                                                                                                                                                                                                                                          Gemini 4 Argon · mediu
