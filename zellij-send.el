@@ -38,35 +38,155 @@
   :type 'string
   :group 'zellij-send)
 
-(defcustom zellij-send-interpreters '("node" "bun" "deno" "python" "python3"
+;;; エージェントの対応表
+
+;; エージェントごとの知識はここ（`zellij-send-agents'）に集める。4 体目の CLI を
+;; 足すときに埋めるのはこの表の 1 行だけ。能力の名前と意味は
+;; `zellij-send--capabilities'。読むだけの機能は `zellij-send--capable-p'（推測あり）、
+;; ペインに打ち込む機能は `zellij-send--assert-capability'（確定が要る）で問い合わせる。
+;;
+;; 2026-10-19 に、次の 6 つの defcustom をこの表にまとめた（README の移行表）:
+;; `zellij-send-commands' / `zellij-send-interpreters' / `zellij-send-prompt-marker-alist' /
+;; `zellij-send-slash-support-alist' / `zellij-send-number-reply-commands' /
+;; `zellij-send-progress-file-alist'。以下はそれぞれの docstring にあった実測と注意で、
+;; 要約せずにそのまま移した。
+;;
+;; [zellij-send-commands]
+;; `agy' は Antigravity CLI の実行ファイル名（`antigravity' ではない）。
+;;
+;; 送信・subscribe・キー透過モード・ダッシュボードは画面を解釈しないので
+;; どのコマンドでも動く。Claude Code の画面や成果物に依存する機能
+;; （transcript 表示・スラッシュコマンド・AskUserQuestion の解析）だけが
+;; `zellij-send--claude-p' で分岐する。
+;; （→ 今は能力の問い合わせで分岐する）
+;;
+;; [zellij-send-interpreters]
+;; `zellij-send--command-name' は、先頭トークンがこの一覧にあるときだけ
+;; 残りのトークンからエージェント名を探す。実測で codex は
+;; `node /opt/homebrew/bin/codex' として COMMAND 列に出るため必要だが、
+;; **無条件に全トークンを見ると `cat /tmp/claude' も claude と判定する**
+;; （astra のレビューで指摘）。先読みの許可条件に使う判定なので絞っておく。
+;; （→ `zellij-send--interpreters'）
+;;
+;; [zellij-send-prompt-marker-alist]
+;; agy の許可ダイアログは ASCII の `> 1. Yes' なので `>' が要るが、
+;; **これを全 CLI で有効にすると本文中の markdown 引用（`> 1. …'）を
+;; 選択肢と誤検出する**。誤検出は表示だけの問題ではない——ダッシュボードの
+;; 数字キー（`1' `2' `3'）は `zellij-send--detect-prompt' を許可条件に
+;; しているので、誤検出した状態でユーザーが押すと、選択のつもりの数字が
+;; **ただの入力**としてペインに届く（astra のレビューで指摘）。
+;;
+;; そのため `>' は agy のバッファでだけ有効にする。**agy 内での誤検出は
+;; 残る**（agy 自身の出力に `> 1. …' があれば拾う）。
+;;
+;; [zellij-send-number-reply-commands]
+;; 送り方は本文と同じ `paste' + CR なので、受け手が貼り付けられた数字を
+;; 選択として扱うかどうかは CLI ごとに違う（2026-09-07 実測）:
+;;
+;;   claude  ○  選択肢は数字キーが直接効く
+;;   agy     ○  許可ダイアログ `> 1. Yes' に `paste' + CR の `1' で確定した
+;;   codex   ×  **数字キーを受け付けない**。信頼確認の画面に `1' を送っても
+;;              何も起きず `Press enter to continue' のままで、Enter で確定した
+;;
+;; 一覧に無いエージェントではキー透過モード（`zellij-send-keys-mode'）の
+;; ↑↓ と RET で選ぶ。あれは画面を解釈せず生のキーを送るのでどこでも効く。
+;; **未確認の CLI をここに足さないこと**——選択ではない別の操作になりうる。
+;;
+;; [zellij-send-slash-support-alist]
+;; `zellij-send-compact' / `zellij-send-cc-clear' はこの表を見て、
+;; 対応が判っていないコマンドのときは送らない。「テキストを送るだけだから
+;; どの CLI でも許可」は妥当ではない——受け取った側は本文として解釈し、
+;; そのまま作業を始めてしまう。
+;;
+;; - claude / codex: `/compact' と `/clear' の両方を持つ
+;;   （codex は公式ドキュメントで確認。ただし実行中は無効）
+;; - agy（Antigravity CLI）: **`/compact' は無い**。2026-09-07 に
+;;   ペインの補完メニューで `/comp' と打って `No matches' を確認した
+;;   （本人は「ある」と答えたが実機は否定した。自己申告を信用しないこと）。
+;;   `/clear'（Clear conversation and start a new one）はある。
+;;   近いのは `/context'（Visualize current context usage）だが別物
+;;
+;; [zellij-send-progress-file-alist]
+;; 一覧に無いエージェントには `zellij-send-progress-file-default' を使う。
+;; CLAUDE.md を無条件に指定すると codex が読まないファイルに書かせることになる。
+;;
+;; agy の GEMINI.md は**実機で確認済み**（2026-09-07。合言葉を書いた
+;; GEMINI.md を置いた使い捨てディレクトリで agy を起動し、その合言葉を
+;; 返すことを確認した）。agy は `/compact' の有無について実機と食い違う
+;; 回答をしたので、**自己申告だけで表に足さないこと**。
+
+(defconst zellij-send--capabilities
+  '((number-reply     . "選択肢に数字（本文と同じ paste + CR）で答えられる")
+    (compact          . "/compact を持つ")
+    (clear            . "/clear を持つ")
+    (slash-completion . "補完メニューを読んでスラッシュコマンドを選べる（Claude Code の画面）")
+    (askq             . "AskUserQuestion の画面を読んで答えられる（Claude Code の画面）")
+    (transcript       . "会話履歴（JSONL）を読める（Claude Code の transcript）")
+    (output-log       . "Stop フックが書く出力ログを読める（Claude Code の hooks）")
+    (remote-control   . "起動時に --remote-control SESSION を付けられる（Claude Code）"))
+  "`zellij-send-agents' の `:capabilities' に書ける能力と、その意味。")
+
+(defcustom zellij-send-agents
+  '(("claude" :progress-file "CLAUDE.md"
+     :capabilities (number-reply compact clear slash-completion askq
+                    transcript output-log remote-control))
+    ("codex"  :progress-file "AGENTS.md"
+     :capabilities (compact clear))
+    ("agy"    :prompt-marker "[❯›>]" :progress-file "GEMINI.md"
+     :capabilities (number-reply clear)))
+  "エージェント（ペインで動かす CLI）ごとの知識の対応表。
+
+各要素は (NAME . PLIST)。NAME は実行ファイル名で、`[New]' で選ぶ候補にも、
+起動コマンドからエージェントを見分けるのにも使う。PLIST に書けるもの:
+
+  :prompt-marker  選択肢プロンプトのカーソル記号の正規表現。
+                  省けば `zellij-send-prompt-marker-regexp'
+  :progress-file  `zellij-send-save-progress' が書かせるファイル。
+                  省けば `zellij-send-progress-file-default'
+  :capabilities   能力のシンボルのリスト（`zellij-send--capabilities'）
+
+**実機で確かめた能力だけを書くこと。** エージェントの自己申告は信用しない
+（agy は `/compact' が「ある」と答え、実機が否定した）。足し忘れた能力は
+断られるだけだが、確かめずに足すと、選択のつもりの数字や `/compact' が
+本文としてペインに届く。実測の記録はこの変数の定義の前のコメントにある。"
+  :type '(alist :key-type (string :tag "実行ファイル名")
+                :value-type (plist :tag "知識"))
+  :group 'zellij-send)
+
+(defconst zellij-send--interpreters '("node" "bun" "deno" "python" "python3"
                                       "ruby" "perl" "npx" "uv" "uvx")
   "エージェントを起動しうるインタプリタの実行ファイル名。
+`zellij-send--command-name' が、先頭トークンがこれのときだけ残りのトークンから
+エージェント名を探す（定義の前のコメントの [zellij-send-interpreters]）。")
 
-`zellij-send--command-name' は、先頭トークンがこの一覧にあるときだけ
-残りのトークンからエージェント名を探す。実測で codex は
-`node /opt/homebrew/bin/codex' として COMMAND 列に出るため必要だが、
-**無条件に全トークンを見ると `cat /tmp/claude' も claude と判定する**
-（astra のレビューで指摘）。先読みの許可条件に使う判定なので絞っておく。"
-  :type '(repeat string)
-  :group 'zellij-send)
+(defconst zellij-send--capability-errors
+  '((number-reply     . "数字での回答は %s では確認できていません。C-c C-t のキー透過モードで ↑↓ と RET を使ってください")
+    (compact          . "/compact に対応しているか判らないので送りません（%s）。本文として送るなら C-c C-c を使ってください")
+    (clear            . "/clear に対応しているか判らないので送りません（%s）。本文として送るなら C-c C-c を使ってください")
+    (slash-completion . "スラッシュコマンドの補完は Claude Code 専用です（%s）。本文として送るか C-c C-t のキー透過モードを使ってください")
+    (askq             . "AskUserQuestion の解析は Claude Code 専用です（%s）。C-c C-t のキー透過モードを使ってください"))
+  "`zellij-send--assert-capability' が断るときの文面。%s はエージェント名。")
 
-(defcustom zellij-send-commands '("claude" "codex" "agy")
-  "新規セッションで選べるコマンドの候補。
+(defun zellij-send--agent-names ()
+  "`zellij-send-agents' にあるエージェント名のリストを返す。"
+  (mapcar #'car zellij-send-agents))
 
-`agy' は Antigravity CLI の実行ファイル名（`antigravity' ではない）。
+(defun zellij-send--agent-entry (name)
+  "エージェント NAME の `zellij-send-agents' の要素を返す。無ければ nil。
+同じ名前が無ければ、NAME がその名前で始まる要素を使う（`claude-beta' のような
+派生の実行ファイル名。かつての `string-prefix-p' による判定と同じ扱い）。"
+  (and name
+       (or (assoc name zellij-send-agents)
+           (seq-find (lambda (a) (string-prefix-p (car a) name))
+                     zellij-send-agents))))
 
-`[New]' でセッションを作るときにこの中から選ぶ（既定は
-`zellij-send-default-command'。一覧に無いコマンドも入力できる）。
+(defun zellij-send--agent-get (name prop)
+  "エージェント NAME の PLIST から PROP の値を返す。"
+  (plist-get (cdr (zellij-send--agent-entry name)) prop))
 
-送信・subscribe・キー透過モード・ダッシュボードは画面を解釈しないので
-どのコマンドでも動く。Claude Code の画面や成果物に依存する機能
-（transcript 表示・スラッシュコマンド・AskUserQuestion の解析）だけが
-`zellij-send--claude-p' で分岐する。
-
-`zellij-send--command-name' は `node /opt/homebrew/bin/codex' のような
-起動コマンドからエージェント名を拾うのにもこの一覧を使う。"
-  :type '(repeat string)
-  :group 'zellij-send)
+(defun zellij-send--agent-capable-p (name cap)
+  "エージェント NAME が能力 CAP を持つと表にあれば non-nil。NAME が nil なら nil。"
+  (and (memq cap (zellij-send--agent-get name :capabilities)) t))
 
 (defcustom zellij-send-remote-control nil
   "非 nil なら、新規に作る Claude Code のセッションを Remote Control 付きで起動する。
@@ -96,30 +216,15 @@ claude 以外のコマンドには付けない。"
 
 `❯' と `›' はまず本文に現れないのでここに入れてある。**ASCII の `>' は
 markdown 引用（`> 1. …'）と衝突する**ので、ここではなく
-`zellij-send-prompt-marker-alist' で agy のバッファに限って有効にする。"
+`zellij-send-agents' の `:prompt-marker' で agy のバッファに限って有効にする。
+`:prompt-marker' を持たないエージェントはこの値を使う。"
   :type 'regexp
   :group 'zellij-send)
 
-(defcustom zellij-send-prompt-marker-alist '(("agy" . "[❯›>]"))
-  "エージェント名ごとの選択肢プロンプト記号。無い名前は
-`zellij-send-prompt-marker-regexp' を使う。
-
-agy の許可ダイアログは ASCII の `> 1. Yes' なので `>' が要るが、
-**これを全 CLI で有効にすると本文中の markdown 引用（`> 1. …'）を
-選択肢と誤検出する**。誤検出は表示だけの問題ではない——ダッシュボードの
-数字キー（`1' `2' `3'）は `zellij-send--detect-prompt' を許可条件に
-しているので、誤検出した状態でユーザーが押すと、選択のつもりの数字が
-**ただの入力**としてペインに届く（astra のレビューで指摘）。
-
-そのため `>' は agy のバッファでだけ有効にする。**agy 内での誤検出は
-残る**（agy 自身の出力に `> 1. …' があれば拾う）。"
-  :type '(alist :key-type string :value-type regexp)
-  :group 'zellij-send)
-
 (defun zellij-send--prompt-marker ()
-  "このバッファで使う選択肢プロンプトの記号正規表現を返す。"
-  (or (alist-get (zellij-send--agent-name)
-                 zellij-send-prompt-marker-alist nil nil #'equal)
+  "このバッファで使う選択肢プロンプトの記号正規表現を返す。
+エージェントが確定していなければ（推測で代用せず）既定の記号を使う。"
+  (or (zellij-send--agent-get (zellij-send--agent-name) :prompt-marker)
       zellij-send-prompt-marker-regexp))
 
 (defcustom zellij-send-term "xterm-256color"
@@ -357,26 +462,28 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 ;; `zellij-send--command' を使う（claude と codex を同時に開けるように）。
 ;;
 ;; 画面を解釈しない機能——送信・subscribe・キー透過モード・ダッシュボード——は
-;; どのコマンドでも動く。Claude Code の画面や成果物に依存する機能だけを
-;; `zellij-send--claude-p' で囲うこと。
+;; どのコマンドでも動く。CLI ごとに違う機能は `zellij-send-agents' の能力で
+;; 囲うこと（読むだけなら `zellij-send--capable-p'、打ち込むなら
+;; `zellij-send--assert-capability'）。
 
 (defun zellij-send--command-name (command)
   "COMMAND 文字列からエージェント名を返す。判らなければ nil。
 
 基本は**先頭トークンの実行ファイル名**。ただし先頭が
-`zellij-send-interpreters' のいずれかなら、残りのトークンから
-`zellij-send-commands' の名前を探す（実測: codex は
+`zellij-send--interpreters' のいずれかなら、残りのトークンから
+`zellij-send-agents' の名前を探す（実測: codex は
 `node /opt/homebrew/bin/codex' として COMMAND 列に出る）。
 
 インタプリタに限るのは、全トークンを無条件に見ると `cat /tmp/claude' の
 ような引数まで拾って claude と判定してしまうため。この判定は
-打ち込む機能の許可条件（`zellij-send--claude-confirmed-p'）に使うので、
+打ち込む機能の許可条件（`zellij-send--assert-capability'）に使うので、
 **誤って claude と読む方が危険**。"
   (let* ((names (mapcar #'file-name-nondirectory
                         (split-string (or command "") nil t)))
          (head (car names)))
-    (if (member head zellij-send-interpreters)
-        (or (seq-find (lambda (n) (member n zellij-send-commands)) (cdr names))
+    (if (member head zellij-send--interpreters)
+        (or (seq-find (lambda (n) (member n (zellij-send--agent-names)))
+                      (cdr names))
             head)
       head)))
 
@@ -387,22 +494,20 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
   (zellij-send--command-name (or zellij-send--command
                                  zellij-send-default-command)))
 
-(defun zellij-send--claude-p ()
-  "このバッファのペインで Claude Code が動いていれば non-nil。
-Claude Code の画面・transcript に依存する機能はこれで分岐する。
-
+(defun zellij-send--capable-p (cap)
+  "このバッファのエージェントが能力 CAP を持つなら non-nil（**推測あり**）。
 コマンドが判らないときは `zellij-send-default-command'（普通は claude）で
-代用する——読むだけの機能（transcript 表示・出力ログ・ヘッダ表示）なら
-外しても実害が無いため。**ペインに打ち込む機能では代用してはいけない**。
-そちらは `zellij-send--claude-confirmed-p' を使う。"
-  (let ((name (zellij-send--buffer-command)))
-    (and name (string-prefix-p "claude" name))))
+代用する——読むだけの機能（transcript 表示・出力ログ）なら外しても実害が
+無いため。**ペインに打ち込む機能では使わない**。そちらは
+`zellij-send--assert-capability' か `zellij-send--confirmed-capable-p'。"
+  (zellij-send--agent-capable-p (zellij-send--buffer-command) cap))
 
 (defun zellij-send--launch-command (command session)
   "SESSION で実際に起動するコマンド文字列を COMMAND から作る。
 
-Claude Code で、`zellij-send-remote-control' が非 nil か、COMMAND に
-`--remote-control' が既に入っているなら、末尾に `--remote-control SESSION'
+Claude Code（能力 `remote-control'）で、`zellij-send-remote-control' が
+非 nil か、COMMAND に `--remote-control' が既に入っているなら、末尾に
+`--remote-control SESSION'
 を付けて返す。既存の `--remote-control [NAME]' は外してから付け直す
 ——`zellij-send-add-agent' が引き継いだコマンドに前のセッション名が
 残っていると、スマホ側に同じ名前が 2 つ並ぶため。
@@ -410,7 +515,8 @@ Claude Code で、`zellij-send-remote-control' が非 nil か、COMMAND に
   (let* ((tokens (split-string command nil t))
          (has-flag (member "--remote-control" tokens)))
     (if (not (and (or zellij-send-remote-control has-flag)
-                  (equal (zellij-send--command-name command) "claude")))
+                  (zellij-send--agent-capable-p
+                   (zellij-send--command-name command) 'remote-control)))
         command
       (let (kept)
         (while tokens
@@ -431,24 +537,21 @@ Claude Code で、`zellij-send-remote-control' が非 nil か、COMMAND に
 代用しない。"
   (and zellij-send--command (zellij-send--command-name zellij-send--command)))
 
-(defun zellij-send--claude-confirmed-p ()
-  "Claude Code だと**確定している**なら non-nil。
+(defun zellij-send--confirmed-capable-p (cap)
+  "このバッファのエージェントが能力 CAP を持つと**確定している**なら non-nil。
+コマンドを特定できなかったセッションでは nil（既定値で代用しない）。
+推測で代用すると、別の CLI の入力欄に打ち込んでしまう（astra のレビューで指摘）。
+断るときの文面が要るなら `zellij-send--assert-capability' を使う。"
+  (zellij-send--agent-capable-p (zellij-send--agent-name) cap))
 
-**Claude Code 専用の、ペインに打ち込む機能はこれで守る**——スラッシュ
-コマンドの補完と先読み、AskUserQuestion の操作、Remote Control。
-`zellij-send--claude-p' は既定値（普通は claude）で代用するので、
-コマンドを特定できなかったセッションを claude と誤認して別の CLI の
-入力欄に打ち込む（astra のレビューで指摘）。
-
-数字での回答と `/compact' `/clear' は claude 以外にも効くので、こちらでは
-なく対応表で守る（`zellij-send-number-reply-commands' /
-`zellij-send-slash-support-alist'）。どちらも `zellij-send--agent-name' を
-見るので、コマンドが確定していなければ断るのは同じ。
-
-読むだけの機能（transcript 表示・出力ログ・ヘッダ表示）は
-`zellij-send--claude-p' の推測でよい。外しても実害が無いため。"
-  (let ((name (zellij-send--agent-name)))
-    (and name (string-prefix-p "claude" name))))
+(defun zellij-send--assert-capability (cap)
+  "このバッファのエージェントが能力 CAP を持つと確定していなければ `user-error'。
+**ペインに打ち込む機能はこれで守る**——数字での回答・`/compact' `/clear'・
+スラッシュコマンドの補完・AskUserQuestion の操作。文面は
+`zellij-send--capability-errors'。"
+  (unless (zellij-send--confirmed-capable-p cap)
+    (user-error (alist-get cap zellij-send--capability-errors)
+                (or (zellij-send--agent-name) "コマンド不明"))))
 
 ;;; セッション一覧の取得
 
@@ -923,7 +1026,7 @@ RESELECT が非 nil なら選び直す。候補は更新日時の新しい順に
 状態フックが知らせた transcript より優先する。"
   (interactive)
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--capable-p 'transcript)
     (user-error "Claude Code のセッションで使用してください"))
   (unless (zellij-send--transcript-file default-directory t)
     (user-error "履歴を選べませんでした（このディレクトリに transcript が無いか、選択を中止しました）")))
@@ -1255,7 +1358,7 @@ transcript の tool_use に無いので出せない。見出しにそう書く�
 編集が見つからないときは「対象なし」と言って終わる。Claude Code 専用。"
   (interactive)
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--capable-p 'transcript)
     (user-error "直近の編集の表示は Claude Code 専用です（いまは %s）"
                 (or (zellij-send--buffer-command) "コマンド不明")))
   (let* ((session zellij-send--session)
@@ -1370,7 +1473,7 @@ COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなけ
   "PANES（(ID COMMAND EXITED-P) のリスト）から送信先として最も妥当なものを選ぶ。
 
 **生きているペインを優先**し、その中では `zellij-send-default-command' と
-同じエージェント → `zellij-send-commands' のいずれか → 先頭、の順で選ぶ。
+同じエージェント → `zellij-send-agents' のいずれか → 先頭、の順で選ぶ。
 これで、デフォルト shell ペインが残っているセッションでもエージェントの
 ペインに繋がる。
 
@@ -1386,7 +1489,7 @@ COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなけ
                      (car (seq-find
                            (lambda (p)
                              (member (zellij-send--command-name (nth 1 p))
-                                     zellij-send-commands))
+                                     (zellij-send--agent-names)))
                            list))
                      (car (car list))))))
     (or (funcall rank (seq-remove (lambda (p) (nth 2 p)) panes))
@@ -2035,7 +2138,7 @@ IF-CHANGED が non-nil なら、黒板に同じ表示形がもう映っていて
                (setq-local zellij-send--pane-id pane-id)
                ;; `--subscribe-start' が先読みを呼ぶので、ここでも
                ;; コマンドを先に入れる。入れ忘れると codex のペインに
-               ;; `/' を打ち込む（`zellij-send--claude-confirmed-p' 参照）。
+               ;; `/' を打ち込む（`zellij-send--confirmed-capable-p' 参照）。
                ;; pane-id を替えるときは **nil でも代入する**
                (setq-local zellij-send--command command)
                (zellij-send--subscribe-start)))))))))
@@ -2046,43 +2149,15 @@ IF-CHANGED が non-nil なら、黒板に同じ表示形がもう映っていて
 ;; どのスラッシュコマンドも送れるようになったため）。M-x とダッシュボードの
 ;; `c'（`zellij-send-dashboard-compact')から使うのでコマンド自体は残す。
 
-(defcustom zellij-send-slash-support-alist
-  '(("/compact" . ("claude" "codex"))
-    ("/clear"   . ("claude" "codex" "agy")))
-  "共通スラッシュコマンドを受け付けるエージェント名の対応表。
-
-`zellij-send-compact' / `zellij-send-cc-clear' はこの表を見て、
-対応が判っていないコマンドのときは送らない。「テキストを送るだけだから
-どの CLI でも許可」は妥当ではない——受け取った側は本文として解釈し、
-そのまま作業を始めてしまう。
-
-- claude / codex: `/compact' と `/clear' の両方を持つ
-  （codex は公式ドキュメントで確認。ただし実行中は無効）
-- agy（Antigravity CLI）: **`/compact' は無い**。2026-09-07 に
-  ペインの補完メニューで `/comp' と打って `No matches' を確認した
-  （本人は「ある」と答えたが実機は否定した。自己申告を信用しないこと）。
-  `/clear'（Clear conversation and start a new one）はある。
-  近いのは `/context'（Visualize current context usage）だが別物"
-  :type '(alist :key-type string :value-type (repeat string))
-  :group 'zellij-send)
-
-(defun zellij-send--slash-supported-p (command)
-  "このバッファのエージェントが COMMAND（例: \"/compact\"）を持てば non-nil。
-コマンドが確定していないセッションでは nil（既定値で代用しない）。"
-  (let ((name (zellij-send--agent-name)))
-    (and name (member name (alist-get command zellij-send-slash-support-alist
-                                      nil nil #'equal))
-         t)))
-
-(defun zellij-send--send-known-slash (command done-message)
-  "COMMAND を送る。対応表に無いエージェントなら送らずに `user-error'。
+(defun zellij-send--send-known-slash (command cap done-message)
+  "COMMAND を送る。能力 CAP を持つと確定していなければ送らずに `user-error'。
 DONE-MESSAGE は送信に成功したときのメッセージ。
 **「効いた」ではなく「送った」と書くこと**——画面を読んでいないので
-受け取った側が実行したかどうかは判らない。"
+受け取った側が実行したかどうかは判らない。
+「テキストを送るだけだからどの CLI でも許可」は妥当ではない——受け取った
+側は本文として解釈し、そのまま作業を始めてしまう（`zellij-send-agents'）。"
   (zellij-send--assert-session)
-  (unless (zellij-send--slash-supported-p command)
-    (user-error "%s に対応しているか判らないので送りません（%s）。本文として送るなら C-c C-c を使ってください"
-                command (or (zellij-send--agent-name) "コマンド不明")))
+  (zellij-send--assert-capability cap)
   (zellij-send--send zellij-send--session command
                      (lambda (ok) (when ok (message "%s" done-message)))))
 
@@ -2090,13 +2165,13 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
   "セッションに /compact を送信してコンテキストを圧縮させる。
 メニューには無い（`C-c C-a' → `/' か M-x、ダッシュボードの `c'）。"
   (interactive)
-  (zellij-send--send-known-slash "/compact" "/compact を送信しました"))
+  (zellij-send--send-known-slash "/compact" 'compact "/compact を送信しました"))
 
 (defun zellij-send-cc-clear ()
   "セッションに /clear を送信してコンテキストをリセットさせる。
 メニューには無い（`C-c C-a' → `/' か M-x）。"
   (interactive)
-  (zellij-send--send-known-slash "/clear" "/clear を送信しました"))
+  (zellij-send--send-known-slash "/clear" 'clear "/clear を送信しました"))
 
 (defun zellij-send-interrupt ()
   "実行中の処理を中断する（対象ペインに Esc を送る）。
@@ -2122,23 +2197,8 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
            (message "Esc を送信しました → [%s]" session)
          (message "Esc の送信に失敗しました (exit: %d)" exit))))))
 
-(defcustom zellij-send-progress-file-alist
-  '(("claude" . "CLAUDE.md")
-    ("codex"  . "AGENTS.md")
-    ("agy"    . "GEMINI.md"))
-  "エージェント名 → `zellij-send-save-progress' が書かせるファイル名。
-一覧に無いエージェントには `zellij-send-progress-file-default' を使う。
-CLAUDE.md を無条件に指定すると codex が読まないファイルに書かせることになる。
-
-agy の GEMINI.md は**実機で確認済み**（2026-09-07。合言葉を書いた
-GEMINI.md を置いた使い捨てディレクトリで agy を起動し、その合言葉を
-返すことを確認した）。agy は `/compact' の有無について実機と食い違う
-回答をしたので、**自己申告だけで表に足さないこと**。"
-  :type '(alist :key-type string :value-type string)
-  :group 'zellij-send)
-
 (defcustom zellij-send-progress-file-default "AGENTS.md"
-  "`zellij-send-progress-file-alist' に無いエージェントで使うファイル名。"
+  "`zellij-send-agents' で `:progress-file' を持たないエージェントで使うファイル名。"
   :type 'string
   :group 'zellij-send)
 
@@ -2147,7 +2207,7 @@ GEMINI.md を置いた使い捨てディレクトリで agy を起動し、そ�
 作業ログを書かせるファイル（セッション作業ディレクトリからの相対）。
 `format-time-string' の書式で、依頼を送った時点の日付が入る。
 
-作業ログを CLAUDE.md 等（`zellij-send-progress-file-alist'）に書かせない
+作業ログを CLAUDE.md 等（`zellij-send-agents' の `:progress-file'）に書かせない
 ための受け皿。あちらはエージェントが毎回読み込むので、その場の経過を
 積むほどコンテキストを食う。日付で分けたファイルなら、要らなくなった
 日の分をまとめて捨てられる。"
@@ -2156,8 +2216,7 @@ GEMINI.md を置いた使い捨てディレクトリで agy を起動し、そ�
 
 (defun zellij-send--progress-file ()
   "このバッファのエージェントに作業内容を書かせるファイル名を返す。"
-  (or (alist-get (zellij-send--buffer-command)
-                 zellij-send-progress-file-alist nil nil #'equal)
+  (or (zellij-send--agent-get (zellij-send--buffer-command) :progress-file)
       zellij-send-progress-file-default))
 
 (defun zellij-send--progress-request (file &optional log-file)
@@ -2183,7 +2242,7 @@ CLAUDE.md が肥大する構造だった）。更新として、重複は書き�
 
 (defun zellij-send-save-progress (&optional log)
   "決定事項を記録するよう依頼する。
-書かせる先はエージェントごとに変える（`zellij-send-progress-file-alist'）。
+書かせる先はエージェントごとに変える（`zellij-send-agents' の `:progress-file'）。
 依頼は**追記ではなく更新**——恒久的な決定事項だけを反映させ、重複は
 まとめ、古い記述は消させる（`zellij-send--progress-request'）。
 
@@ -2363,8 +2422,10 @@ ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
 
 値は `equal' で比べるので、数値と文字列だけで作る。"
   (let* ((exe (executable-find
-               (or (car (split-string (or zellij-send--command "claude") nil t))
-                   "claude")))
+               (or (car (split-string (or zellij-send--command
+                                          zellij-send-default-command)
+                                      nil t))
+                   zellij-send-default-command)))
          (true (and exe (file-truename exe)))
          (home (expand-file-name "~/.claude/")))
     (list :claude (and true (list true (zellij-send--slash-mtime true)))
@@ -3179,9 +3240,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
 本文として送るか（C-c C-c）、キー透過モードで直接打つ。"
   (interactive "P")
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-confirmed-p)
-    (user-error "スラッシュコマンドの補完は Claude Code 専用です（%s）。本文として送るか C-c C-t のキー透過モードを使ってください"
-                (or (zellij-send--agent-name) "コマンド不明")))
+  (zellij-send--assert-capability 'slash-completion)
   (when (zellij-send--slash-collecting-p)
     (user-error "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
   (when refresh
@@ -3215,7 +3274,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
 初回の `zellij-send-slash-command' を待たせないための先読み。"
   (when (and zellij-send-slash-prefetch
              zellij-send--session
-             (zellij-send--claude-confirmed-p)
+             (zellij-send--confirmed-capable-p 'slash-completion)
              (null (zellij-send--slash-cached))
              (not zellij-send--slash-prefetching)
              (not (zellij-send--slash-collecting-p)))
@@ -3231,7 +3290,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
       (when (and zellij-send-slash-prefetch
                  zellij-send--session
                  zellij-send--pane-id
-                 (zellij-send--claude-confirmed-p)
+                 (zellij-send--confirmed-capable-p 'slash-completion)
                  (null (zellij-send--slash-cached))
                  (not zellij-send--slash-prefetching)
                  (not (zellij-send--slash-collecting-p))
@@ -3293,7 +3352,7 @@ ARG（\\[universal-argument]）付きのときは、従来どおり zellij ス�
 `zellij-send-show-live'（メニュー `g'）を使う。"
   (interactive "P")
   (zellij-send--assert-session)
-  (let* ((claude (and (not arg) (zellij-send--claude-p)))
+  (let* ((claude (and (not arg) (zellij-send--capable-p 'transcript)))
          (file (and claude (zellij-send--transcript-file default-directory))))
     (cond
      (file (zellij-send--transcript-show file))
@@ -3485,7 +3544,7 @@ PREVIOUS（`\\[universal-argument]'）を付けるとそちらを開く。退避
 claude のログが開けてしまい、自分の出力だと誤解する（astra の指摘）。"
   (interactive "P")
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-p)
+  (unless (zellij-send--capable-p 'output-log)
     (user-error "出力ログは Claude Code の Stop フックが書くものです（いまは %s）"
                 (or (zellij-send--buffer-command) "コマンド不明")))
   (let* ((file (expand-file-name zellij-send-log-file default-directory))
@@ -3551,38 +3610,12 @@ claude のログが開けてしまい、自分の出力だと誤解する（astr
   (with-current-buffer (zellij-send--reply-main)
     (zellij-send-interrupt)))
 
-(defcustom zellij-send-number-reply-commands '("claude" "agy")
-  "選択肢に数字を送って答えられると**実測で確認した**エージェントの一覧。
-
-送り方は本文と同じ `paste' + CR なので、受け手が貼り付けられた数字を
-選択として扱うかどうかは CLI ごとに違う（2026-09-07 実測）:
-
-  claude  ○  選択肢は数字キーが直接効く
-  agy     ○  許可ダイアログ `> 1. Yes' に `paste' + CR の `1' で確定した
-  codex   ×  **数字キーを受け付けない**。信頼確認の画面に `1' を送っても
-             何も起きず `Press enter to continue' のままで、Enter で確定した
-
-一覧に無いエージェントではキー透過モード（\\[zellij-send-keys-mode]）の
-↑↓ と RET で選ぶ。あれは画面を解釈せず生のキーを送るのでどこでも効く。
-**未確認の CLI をここに足さないこと**——選択ではない別の操作になりうる。"
-  :type '(repeat string)
-  :group 'zellij-send)
-
-(defun zellij-send--assert-number-reply ()
-  "数字の送信（本文として `paste' + CR）が通じるエージェントか確かめる。
-可否は `zellij-send-number-reply-commands'。コマンドが確定していない
-セッションでは既定値で代用せずに断る。"
-  (let ((name (zellij-send--agent-name)))
-    (unless (and name (member name zellij-send-number-reply-commands))
-      (user-error "数字での回答は %s では確認できていません。C-c C-t のキー透過モードで ↑↓ と RET を使ってください"
-                  (or name "コマンド不明")))))
-
 (defun zellij-send-reply-number ()
   "数字を入力して zellij セッションに送信する。
-Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 参照）。"
+数字が選択として効くと確かめたエージェント（能力 `number-reply'）だけ。"
   (interactive)
   (zellij-send--assert-session)
-  (zellij-send--assert-number-reply)
+  (zellij-send--assert-capability 'number-reply)
   (let ((session zellij-send--session)
         (n (read-number "送る数字: ")))
     (zellij-send--send session (number-to-string n)
@@ -4204,9 +4237,7 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 （\\[zellij-send-keys-mode]）を使う。"
   (interactive)
   (zellij-send--assert-session)
-  (unless (zellij-send--claude-confirmed-p)
-    (user-error "AskUserQuestion の解析は Claude Code 専用です（%s）。C-c C-t のキー透過モードを使ってください"
-                (or (zellij-send--agent-name) "コマンド不明")))
+  (zellij-send--assert-capability 'askq)
   (when zellij-send--askq-answering
     (user-error "回答の途中です"))
   ;; 黒板ではなくペインの画面を読む。下書きを書いた黒板で C-c C-q を
@@ -4279,7 +4310,7 @@ SCREEN は書き込んだ画面の正規形（黒板の中身は表示形なの�
 解釈しないのでどの TUI にも効く。"
   ;; 自動起動は数字キーの送信やキー透過モードへの切り替えを伴うので、
   ;; 推測ではなく**確定したコマンド**で判断する
-  (let ((now (and (zellij-send--claude-confirmed-p)
+  (let ((now (and (zellij-send--confirmed-capable-p 'askq)
                   (zellij-send--askq-parse screen) t)))
     (cond
      ((and now
@@ -4441,7 +4472,8 @@ UTF-8 のバイト列に分解してから送る。"
   "ヘッダ行に足すコマンド名。Claude Code のときは空文字。
 claude 以外を動かしているセッションを見分けるためだけの表示なので、
 既定の（＝ほとんどの）場合はヘッダを変えない。"
-  (if (zellij-send--claude-p)
+  (if (equal (zellij-send--buffer-command)
+             (zellij-send--command-name zellij-send-default-command))
       ""
     (format " [%s]" (or (zellij-send--buffer-command) "?"))))
 
@@ -4754,10 +4786,10 @@ Claude Code は本文を流している間スピナー行を出さないので�
 読める画面（`zellij-send--askq-parse'）ではそれを正とし、読めない画面でだけ
 記号の正規表現（`zellij-send--detect-prompt'）に落ちる。2 つを別々の場所で
 使うと食い違いうる（構造の方は、ヒント行の無い最終確認画面も読める）。
-AskUserQuestion の形は Claude Code のものなので、Claude Code と推測できる
-黒板（`zellij-send--claude-p'）でだけ試す。SCREEN が nil なら nil。"
+AskUserQuestion の形は Claude Code のものなので、その能力を持つと推測できる
+黒板（`zellij-send--capable-p'）でだけ試す。SCREEN が nil なら nil。"
   (and screen
-       (or (and (zellij-send--claude-p) (zellij-send--askq-parse screen) t)
+       (or (and (zellij-send--capable-p 'askq) (zellij-send--askq-parse screen) t)
            (zellij-send--detect-prompt screen))))
 
 (defun zellij-send--hook-status (now changed-at)
@@ -4870,12 +4902,12 @@ Stop フックが来ないため）。"
 (defun zellij-send-choice-to-session (buf n)
   "黒板 BUF のペインが選択肢待ちなら、選択肢の番号 N を送る。
 数字が選択として効くと確かめたエージェントだけ
-（`zellij-send-number-reply-commands'。codex には効かない）。
+（能力 `number-reply'。codex には効かない）。
 選択待ちかは黒板の中身ではなく受け取った画面で確かめる
 （`zellij-send--screen-prompt-p'）。フックの知らせだけでは送らない——
 ダイアログが描かれる前に数字を送ると、ただの入力として届く。"
   (with-current-buffer buf
-    (zellij-send--assert-number-reply)
+    (zellij-send--assert-capability 'number-reply)
     (unless (zellij-send--screen-prompt-p (zellij-send--last-screen))
       (user-error "[%s] は選択肢待ちではありません" zellij-send--session))
     (let ((session zellij-send--session))
@@ -5106,12 +5138,13 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
 
 (defun zellij-send--prompt-command (&optional default)
   "起動するコマンドを尋ねる。DEFAULT（既定は `zellij-send-default-command'）が初期値。
-候補は `zellij-send-commands' だが、一覧に無いコマンドも入力できる。
+候補は `zellij-send-agents' の名前だが、一覧に無いコマンドも入力できる。
 ミニバッファ入力を含むため、プロセス sentinel の中から呼ばないこと。"
   (let* ((default (or default zellij-send-default-command))
          (input (string-trim
                  (completing-read (format "Command (default %s): " default)
-                                  zellij-send-commands nil nil nil nil default))))
+                                  (zellij-send--agent-names)
+                                  nil nil nil nil default))))
     (if (string-empty-p input) default input)))
 
 (defun zellij-send--create-new-session (known-sessions)

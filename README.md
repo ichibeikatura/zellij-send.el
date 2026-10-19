@@ -156,7 +156,7 @@ Inside `*ai-session-name*`:
 
 ### Recording progress (`s`)
 
-`s` asks the agent to fold only the lasting decisions (constraints, design decisions with their reasons, prohibitions) into its instruction file **as an update, not an append** — merge what overlaps, delete what is stale, leave out the play-by-play. The file depends on the agent: `zellij-send-progress-file-alist` (`CLAUDE.md` for claude, `AGENTS.md` for codex, `GEMINI.md` for agy).
+`s` asks the agent to fold only the lasting decisions (constraints, design decisions with their reasons, prohibitions) into its instruction file **as an update, not an append** — merge what overlaps, delete what is stale, leave out the play-by-play. The file depends on the agent: `:progress-file` in `zellij-send-agents` (`CLAUDE.md` for claude, `AGENTS.md` for codex, `GEMINI.md` for agy).
 
 To keep a log of the session itself, use `C-u s`: it goes to `zellij-send-progress-log-file` (default `.zellij-send/worklog-%Y-%m-%d.md`, dated) and never into `CLAUDE.md`.
 
@@ -166,7 +166,7 @@ Starts another agent in the **same directory, with the same command** as the cur
 
 ### Multiple CLIs (Claude Code / Codex / …)
 
-Each session can run a different command. Completion offers `zellij-send-commands` (default `("claude" "codex" "agy")`), but anything can be typed in. Buffers running something other than claude show it in the header line (`Session: myproj00 [codex]`).
+Each session can run a different command. Completion offers the names in `zellij-send-agents` (claude, codex, agy), but anything can be typed in. Buffers running something other than `zellij-send-default-command` (claude) show it in the header line (`Session: myproj00 [codex]`).
 
 | Feature | claude | codex | agy | others |
 |---|---|---|---|---|
@@ -185,7 +185,27 @@ Each session can run a different command. Completion offers `zellij-send-command
 
 The bottom four rows read the shape of Claude Code's screen or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens there — it does not interpret the screen, so it works with any TUI.
 
-The `no` cells were measured on real panes. The capability tables (`zellij-send-number-reply-commands`, `zellij-send-slash-support-alist`) contain **only verified CLIs**; do not add an unverified one.
+The `no` cells were measured on real panes. Everything that differs per CLI lives in one table, `zellij-send-agents`, and its `:capabilities` contain **only what was verified**; do not add an unverified one (an agent's own claims are not evidence).
+
+To add a fourth CLI, add one entry and list only the capabilities you have checked on a real pane (`zellij-send--capabilities` lists them):
+
+```elisp
+(add-to-list 'zellij-send-agents
+             '("mycli" :prompt-marker "[❯›]" :progress-file "AGENTS.md"
+               :capabilities (clear))
+             t)
+```
+
+Until 2026-10 these were six separate options. They have been removed; move any you set:
+
+| Old option | Now |
+|---|---|
+| `zellij-send-commands` | the names in `zellij-send-agents` |
+| `zellij-send-prompt-marker-alist` | `:prompt-marker` (falls back to `zellij-send-prompt-marker-regexp`) |
+| `zellij-send-number-reply-commands` | `number-reply` in `:capabilities` |
+| `zellij-send-slash-support-alist` | `compact` / `clear` in `:capabilities` |
+| `zellij-send-progress-file-alist` | `:progress-file` (falls back to `zellij-send-progress-file-default`) |
+| `zellij-send-interpreters` | no longer an option (fixed list: node, bun, deno, python, ruby, perl, npx, uv, …) |
 
 ### Send history
 
@@ -381,16 +401,13 @@ Rate limits are only present for Claude subscription accounts, and only after a 
 ;; The zellij executable
 (setq zellij-send-executable "/usr/local/bin/zellij")
 
-;; Commands offered for new sessions, and the default
-(setq zellij-send-commands '("claude" "codex" "agy"))
+;; The command for new sessions (the candidates are the names in `zellij-send-agents')
 (setq zellij-send-default-command "claude")
 
 ;; Claude output log (relative to the working directory; keep in sync with the hook)
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 
-;; Files `s' asks the agent to update, and the `C-u s' work log
-(setq zellij-send-progress-file-alist
-      '(("claude" . "CLAUDE.md") ("codex" . "AGENTS.md") ("agy" . "GEMINI.md")))
+;; The `C-u s' work log (the file `s' updates is `:progress-file' in `zellij-send-agents')
 (setq zellij-send-progress-log-file ".zellij-send/worklog-%Y-%m-%d.md")
 ```
 

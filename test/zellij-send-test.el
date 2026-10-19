@@ -688,28 +688,29 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   (should-not (zellij-send--command-name ""))
   (should-not (zellij-send--command-name nil)))
 
-(ert-deftest zellij-send-test-slash-supported-p ()
-  "共通スラッシュコマンドは対応表にあるエージェントにだけ送る。"
+(ert-deftest zellij-send-test-slash-capabilities ()
+  "共通スラッシュコマンドは、その能力を持つと確定したエージェントにだけ送る。"
   (with-temp-buffer
     (let ((zellij-send-default-command "claude"))
       (setq-local zellij-send--command "claude")
-      (should (zellij-send--slash-supported-p "/compact"))
-      (should (zellij-send--slash-supported-p "/clear"))
+      (should (zellij-send--confirmed-capable-p 'compact))
+      (should (zellij-send--confirmed-capable-p 'clear))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
-      (should (zellij-send--slash-supported-p "/compact"))
+      (should (zellij-send--confirmed-capable-p 'compact))
       ;; agy に /compact は無い（実測: 補完メニューで `No matches'）
       (setq-local zellij-send--command "agy")
-      (should (zellij-send--slash-supported-p "/clear"))
-      (should-not (zellij-send--slash-supported-p "/compact"))
+      (should (zellij-send--confirmed-capable-p 'clear))
+      (should-not (zellij-send--confirmed-capable-p 'compact))
+      (should-error (zellij-send--assert-capability 'compact) :type 'user-error)
       ;; 対応が判らない CLI には送らない
       (setq-local zellij-send--command "/bin/zsh")
-      (should-not (zellij-send--slash-supported-p "/compact"))
+      (should-not (zellij-send--confirmed-capable-p 'compact))
       ;; コマンド不明でも既定値（claude）で代用しない
       (setq-local zellij-send--command nil)
-      (should-not (zellij-send--slash-supported-p "/compact"))
-      ;; 表に無いコマンドはどのエージェントでも送らない
+      (should-not (zellij-send--confirmed-capable-p 'compact))
+      ;; 表に無い能力はどのエージェントでも無い
       (setq-local zellij-send--command "claude")
-      (should-not (zellij-send--slash-supported-p "/doctor")))))
+      (should-not (zellij-send--confirmed-capable-p 'doctor)))))
 
 (ert-deftest zellij-send-test-progress-file ()
   "作業内容を書かせる先はエージェントごとに変える。"
@@ -740,25 +741,28 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     (should (string-match-p "worklog-2026-10-19\\.md に書いて" req))
     (should (string-match-p "CLAUDE\\.md には書かないで" req))))
 
-(ert-deftest zellij-send-test-claude-p ()
-  "Claude Code のときだけ画面解析・transcript の経路に入る。
-判定はバッファローカルの `zellij-send--command' が優先で、
-空のときだけ `zellij-send-default-command' を使う。"
+(ert-deftest zellij-send-test-capable-p ()
+  "読むだけの機能は推測でよい。判定はバッファローカルの `zellij-send--command'
+が優先で、空のときだけ `zellij-send-default-command' を使う。"
   (with-temp-buffer
     (let ((zellij-send-default-command "claude"))
       ;; バッファローカルが空なら既定値で判定（従来どおり）
-      (should (zellij-send--claude-p))
-      ;; codex を動かしているバッファでは既定値が claude でも non-claude
+      (should (zellij-send--capable-p 'transcript))
+      ;; codex を動かしているバッファでは既定値が claude でも transcript は無い
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
-      (should-not (zellij-send--claude-p))
+      (should-not (zellij-send--capable-p 'transcript))
       (should (equal (zellij-send--buffer-command) "codex"))
       (setq-local zellij-send--command "/usr/local/bin/claude --resume")
-      (should (zellij-send--claude-p)))
+      (should (zellij-send--capable-p 'transcript))
+      ;; 派生の実行ファイル名（claude-beta）も claude として扱う（旧 `string-prefix-p'）
+      (setq-local zellij-send--command "claude-beta")
+      (should (zellij-send--capable-p 'transcript)))
     (let ((zellij-send-default-command "zsh"))
       ;; 既定値が claude でなくても、このバッファが claude なら claude 扱い
-      (should (zellij-send--claude-p))
+      (setq-local zellij-send--command "claude")
+      (should (zellij-send--capable-p 'output-log))
       (setq-local zellij-send--command nil)
-      (should-not (zellij-send--claude-p)))))
+      (should-not (zellij-send--capable-p 'output-log)))))
 
 (defconst zellij-send-test--panes-all "\
 PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED
@@ -902,35 +906,74 @@ agy の許可ダイアログは `> 1. Yes' なので `>' が要るが、全 CLI 
 
 (ert-deftest zellij-send-test-number-reply ()
   "数字での回答は実測で確認できたエージェントにだけ許す。
-codex は数字キーを選択として受け付けない（実測）ので一覧に入れない。"
+codex は数字キーを選択として受け付けない（実測）ので能力に入れない。"
   (with-temp-buffer
     (let ((zellij-send-default-command "claude"))
       (setq-local zellij-send--command "claude")
-      (should-not (zellij-send--assert-number-reply))
+      (should-not (zellij-send--assert-capability 'number-reply))
       (setq-local zellij-send--command "agy")
-      (should-not (zellij-send--assert-number-reply))
+      (should-not (zellij-send--assert-capability 'number-reply))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
-      (should-error (zellij-send--assert-number-reply) :type 'user-error)
+      (should-error (zellij-send--assert-capability 'number-reply) :type 'user-error)
       ;; コマンド不明でも既定値（claude）で代用しない
       (setq-local zellij-send--command nil)
-      (should-error (zellij-send--assert-number-reply) :type 'user-error))))
+      (should-error (zellij-send--assert-capability 'number-reply) :type 'user-error))))
 
-(ert-deftest zellij-send-test-claude-confirmed-p ()
-  "ペインに打ち込む機能は、コマンドが確定している claude のときだけ許す。
+(ert-deftest zellij-send-test-confirmed-capable-p ()
+  "ペインに打ち込む機能は、コマンドが確定しているときだけ許す。
 `zellij-send--command' が nil のときに既定値で代用すると、
 codex のペインに `/' を打ち込む。"
   (with-temp-buffer
     (let ((zellij-send-default-command "claude"))
-      ;; コマンド不明: 読むだけの `--claude-p' は t でも、打ち込む方は不可
-      (should (zellij-send--claude-p))
+      ;; コマンド不明: 読むだけの判定は t でも、打ち込む方は不可
+      (should (zellij-send--capable-p 'slash-completion))
       (should-not (zellij-send--agent-name))
-      (should-not (zellij-send--claude-confirmed-p))
-      (should-not (zellij-send--slash-supported-p "/compact"))
+      (should-not (zellij-send--confirmed-capable-p 'slash-completion))
+      (should-not (zellij-send--confirmed-capable-p 'compact))
       (setq-local zellij-send--command "claude")
-      (should (zellij-send--claude-confirmed-p))
+      (should (zellij-send--confirmed-capable-p 'slash-completion))
       (setq-local zellij-send--command "node /opt/homebrew/bin/codex")
       (should (equal (zellij-send--agent-name) "codex"))
-      (should-not (zellij-send--claude-confirmed-p)))))
+      (should-not (zellij-send--confirmed-capable-p 'slash-completion)))))
+
+(ert-deftest zellij-send-test-capability-error-messages ()
+  "断るときの文面は、対応表にまとめる前と 1 字も変えない。"
+  (cl-flet ((msg (cap command)
+              (with-temp-buffer
+                (setq-local zellij-send--command command)
+                (condition-case err
+                    (progn (zellij-send--assert-capability cap) nil)
+                  (user-error (cadr err))))))
+    (should (equal (msg 'number-reply "node /opt/homebrew/bin/codex")
+                   "数字での回答は codex では確認できていません。C-c C-t のキー透過モードで ↑↓ と RET を使ってください"))
+    (should (equal (msg 'compact "agy")
+                   "/compact に対応しているか判らないので送りません（agy）。本文として送るなら C-c C-c を使ってください"))
+    (should (equal (msg 'clear nil)
+                   "/clear に対応しているか判らないので送りません（コマンド不明）。本文として送るなら C-c C-c を使ってください"))
+    (should (equal (msg 'slash-completion "agy")
+                   "スラッシュコマンドの補完は Claude Code 専用です（agy）。本文として送るか C-c C-t のキー透過モードを使ってください"))
+    (should (equal (msg 'askq "node /opt/homebrew/bin/codex")
+                   "AskUserQuestion の解析は Claude Code 専用です（codex）。C-c C-t のキー透過モードを使ってください"))
+    ;; 文面が無い能力を持たない、ということが無いように
+    (dolist (cap '(number-reply compact clear slash-completion askq))
+      (should (alist-get cap zellij-send--capability-errors)))))
+
+(ert-deftest zellij-send-test-agents-fourth ()
+  "4 体目は `zellij-send-agents' に 1 行足すだけで使える。"
+  (let ((zellij-send-agents (append zellij-send-agents
+                                    '(("mycli" :prompt-marker "[»]"
+                                       :progress-file "MYCLI.md"
+                                       :capabilities (clear))))))
+    (with-temp-buffer
+      (setq-local zellij-send--command "/opt/bin/mycli --flag")
+      (should (equal (zellij-send--agent-name) "mycli"))
+      (should (zellij-send--confirmed-capable-p 'clear))
+      (should-not (zellij-send--confirmed-capable-p 'compact))
+      (should (equal (zellij-send--progress-file) "MYCLI.md"))
+      (should (equal (zellij-send--prompt-marker) "[»]"))
+      (should (member "mycli" (zellij-send--agent-names))))
+    ;; インタプリタ経由の起動でも名前を拾う
+    (should (equal (zellij-send--command-name "node /usr/lib/mycli") "mycli"))))
 
 ;;; セッションの連番（同じプロジェクトで複数エージェント）
 

@@ -157,7 +157,7 @@ TUI が機嫌よく動くペインへ zellij-send に届けさせてください
 
 ### 作業の記録（`s`）
 
-`s` はエージェントに「恒久的な決定事項（制約・設計判断とその理由・禁止事項）だけを、**追記ではなく更新として**反映して。重複はまとめ、古い記述は消し、作業の経過は書かない」と頼みます。書かせる先はエージェントごとに `zellij-send-progress-file-alist`（claude は `CLAUDE.md`、codex は `AGENTS.md`、agy は `GEMINI.md`）。
+`s` はエージェントに「恒久的な決定事項（制約・設計判断とその理由・禁止事項）だけを、**追記ではなく更新として**反映して。重複はまとめ、古い記述は消し、作業の経過は書かない」と頼みます。書かせる先はエージェントごとに `zellij-send-agents` の `:progress-file`（claude は `CLAUDE.md`、codex は `AGENTS.md`、agy は `GEMINI.md`）。
 
 その場の作業ログを残したいときは `C-u s` です。`zellij-send-progress-log-file`（既定 `.zellij-send/worklog-%Y-%m-%d.md`、日付入り）に書かせ、`CLAUDE.md` 等には書かせません。
 
@@ -167,7 +167,7 @@ TUI が機嫌よく動くペインへ zellij-send に届けさせてください
 
 ### 複数の CLI（Claude Code / Codex / …）
 
-セッションごとに違うコマンドを動かせます。候補は `zellij-send-commands`（既定 `("claude" "codex" "agy")`。一覧に無いコマンドも入力可）。claude 以外を動かしているバッファでは、ヘッダ行にコマンド名が出ます（`Session: myproj00 [codex]`）。
+セッションごとに違うコマンドを動かせます。候補は `zellij-send-agents` の名前（claude・codex・agy。一覧に無いコマンドも入力可）。`zellij-send-default-command`（claude）以外を動かしているバッファでは、ヘッダ行にコマンド名が出ます（`Session: myproj00 [codex]`）。
 
 | 機能 | claude | codex | agy | その他 |
 |---|---|---|---|---|
@@ -186,7 +186,27 @@ TUI が機嫌よく動くペインへ zellij-send に届けさせてください
 
 下の 4 行は Claude Code の画面の形や transcript を読むので、他の CLI では `user-error` で止まります。選択肢・権限ダイアログ・設定画面は**キー透過モード**で操作してください（画面を解釈しないので、どの TUI にも効きます）。
 
-`×` は実機で確かめた結果です。対応表（`zellij-send-number-reply-commands` / `zellij-send-slash-support-alist`）には**実機で確認した CLI だけ**が入っています。未確認の CLI を足さないでください。
+`×` は実機で確かめた結果です。CLI ごとに違うことは 1 つの対応表 `zellij-send-agents` にまとめてあり、その `:capabilities` には**実機で確認したものだけ**が入っています。未確認の能力を足さないでください（エージェントの自己申告は根拠になりません）。
+
+4 体目の CLI を足すときは、1 行足して、実機で確かめた能力だけを書きます（能力の一覧は `zellij-send--capabilities`）。
+
+```elisp
+(add-to-list 'zellij-send-agents
+             '("mycli" :prompt-marker "[❯›]" :progress-file "AGENTS.md"
+               :capabilities (clear))
+             t)
+```
+
+2026-10 までは 6 つの別々の設定でした。それらは削除したので、設定していた場合は次のように移してください。
+
+| 旧設定 | 移す先 |
+|---|---|
+| `zellij-send-commands` | `zellij-send-agents` の名前 |
+| `zellij-send-prompt-marker-alist` | `:prompt-marker`（省くと `zellij-send-prompt-marker-regexp`） |
+| `zellij-send-number-reply-commands` | `:capabilities` の `number-reply` |
+| `zellij-send-slash-support-alist` | `:capabilities` の `compact` / `clear` |
+| `zellij-send-progress-file-alist` | `:progress-file`（省くと `zellij-send-progress-file-default`） |
+| `zellij-send-interpreters` | 設定ではなくなった（固定: node・bun・deno・python・ruby・perl・npx・uv など） |
 
 ### 送信履歴
 
@@ -381,16 +401,13 @@ exit 0
 ;; zellij の実行ファイル
 (setq zellij-send-executable "/usr/local/bin/zellij")
 
-;; 新規セッションで選べるコマンドと既定値
-(setq zellij-send-commands '("claude" "codex" "agy"))
+;; 新規セッションで起動するコマンド（候補は `zellij-send-agents' の名前）
 (setq zellij-send-default-command "claude")
 
 ;; Claude 出力ログ（作業ディレクトリからの相対。フックスクリプトと合わせる）
 (setq zellij-send-log-file ".zellij-send/claude-log.md")
 
-;; s が書かせるファイルと、C-u s の作業ログ
-(setq zellij-send-progress-file-alist
-      '(("claude" . "CLAUDE.md") ("codex" . "AGENTS.md") ("agy" . "GEMINI.md")))
+;; C-u s の作業ログ（s が書かせるファイルは `zellij-send-agents' の `:progress-file'）
 (setq zellij-send-progress-log-file ".zellij-send/worklog-%Y-%m-%d.md")
 ```
 

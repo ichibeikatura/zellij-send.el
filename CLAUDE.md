@@ -46,11 +46,12 @@ Emacs から detached な zellij セッションで動く AI エージェント�
   sentinel。引数は文字列のリストで渡し、シェル文字列を組まない。ユーザーテキストの前に `--`
 - **sentinel / プロセスフィルタの中でミニバッファを開かない。** `run-at-time 0` で抜けてから聞く
   （その中では quit が抑止され C-g が効かない）
-- **ペインに打ち込む機能は `zellij-send--claude-confirmed-p` で守る。** 推測の
-  `zellij-send--claude-p`（不明なら既定コマンドで代用する）は読むだけの機能にしか使わない
-- **未確認の CLI を対応表に足さない**（`zellij-send-number-reply-commands` /
-  `zellij-send-slash-support-alist` / `zellij-send-progress-file-alist`）。
-  エージェントの自己申告は信用しない（agy は `/compact` が「ある」と答え、実機が否定した）
+- **ペインに打ち込む機能は `zellij-send--assert-capability`（確定が要る）で守る。** 推測の
+  `zellij-send--capable-p`（不明なら既定コマンドで代用する）は読むだけの機能にしか使わない
+- **CLI ごとの知識は `zellij-send-agents` の 1 か所だけに置く。** 名前の文字列
+  （`"claude"` など）で分岐を書かず、能力（`:capabilities`）で問い合わせる。
+  **未確認の能力を足さない**。エージェントの自己申告は信用しない
+  （agy は `/compact` が「ある」と答え、実機が否定した）
 - **日付入りの実測コメントを消さない・書き換えない。** 変えるときは新しい実測を日付付きで追記する
 - **画面の形に新しい仮定を置かない。** 置くなら実機で確かめ、日付と版をコメントに残し、
   画面は `test/fixtures/capture.sh` で fixture にしてテストに足す
@@ -130,7 +131,7 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 | スラッシュコマンドの補完メニュー・引数 | `zellij-send.el`「スラッシュコマンド」節の冒頭と「引数を読む」 |
 | 黒板の桁揃え・記号の字形 | `zellij-send-grid-align` ほか `--grid-*` の docstring |
 | 末尾を追う・選択中の保留 | `zellij-send--update-buffer` の前のコメント |
-| CLI ごとの差（記号・数字キー・`/compact`） | `zellij-send-prompt-marker-alist` / `zellij-send-number-reply-commands` / `zellij-send-slash-support-alist` |
+| CLI ごとの差（記号・数字キー・`/compact`・指示ファイル） | `zellij-send-agents` の定義の前のコメント |
 | transcript の場所・題名 | `zellij-send--transcript-*` の docstring |
 | ダッシュボード・/usage | `.claude/skills/zellij-send-dashboard/SKILL.md` |
 | 実機の画面そのもの（版・幅つき） | `test/fixtures/`（採り方は `capture.sh` の先頭） |
