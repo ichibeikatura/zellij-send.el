@@ -954,12 +954,16 @@ codex のペインに `/' を打ち込む。"
     (dolist (edit '(nil t))
       (dolist (ok '(nil t))
         (let ((buf (generate-new-buffer " *zjs-send-test*")) callback
+              (main (generate-new-buffer " *zjs-send-main*"))
               (zellij-send--history-table (make-hash-table :test #'equal)))
           (unwind-protect
               (cl-letf (((symbol-function 'zellij-send--send)
                          (lambda (_session _text cb) (setq callback cb))))
+                (with-current-buffer main
+                  (setq-local zellij-send--session "test00"))
                 (with-current-buffer buf
                   (setq-local zellij-send--session "test00")
+                  (setq-local zellij-send--reply-main-buffer main)
                   (insert "送信本文")
                   (if reply (zellij-send--reply-send) (zellij-send-send))
                   (when edit (insert "追記")))
@@ -974,7 +978,40 @@ codex のペインに `/' を打ち込む。"
                                          (ok "") (t "送信本文"))))))
                 (should (equal (zellij-send-history "test00")
                                (and ok '("送信本文")))))
-            (when (buffer-live-p buf) (kill-buffer buf))))))))
+            (when (buffer-live-p buf) (kill-buffer buf))
+            (when (buffer-live-p main) (kill-buffer main))))))))
+
+(ert-deftest zellij-send-test-reply-reads-pane-from-main ()
+  "返信は送る時点の元の黒板の pane-id で送る。元の黒板が無ければ送らない。"
+  (let ((main (generate-new-buffer " *zjs-reply-main*"))
+        (reply nil)
+        (sent nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'zellij-send--send)
+                   (lambda (session _text _cb)
+                     (push (cons session (zellij-send--pane-args)) sent)))
+                  ((symbol-function 'pop-to-buffer) #'ignore))
+          (with-current-buffer main
+            (setq-local zellij-send--session "proj00")
+            (setq-local zellij-send--pane-id "terminal_1")
+            (zellij-send-reply)
+            (setq reply (get-buffer "*zellij-reply-proj00*"))
+            ;; 返信バッファを開いた後に、元の黒板でペインが検出し直された
+            (setq-local zellij-send--pane-id "terminal_5"))
+          (with-current-buffer reply
+            (should-not (local-variable-p 'zellij-send--pane-id))
+            (insert "返信")
+            (zellij-send--reply-send))
+          (should (equal (car sent)
+                         '("proj00" "--pane-id" "terminal_5")))
+          ;; 元の黒板を閉じたら送らない（本文は残す）
+          (kill-buffer main)
+          (with-current-buffer reply
+            (should-error (zellij-send--reply-send) :type 'user-error)
+            (should (equal (buffer-string) "返信")))
+          (should (= (length sent) 1)))
+      (when (buffer-live-p main) (kill-buffer main))
+      (when (buffer-live-p reply) (kill-buffer reply)))))
 
 ;;; transcript の候補行
 

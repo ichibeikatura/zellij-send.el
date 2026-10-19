@@ -3042,34 +3042,58 @@ claude のログが開けてしまい、自分の出力だと誤解する（astr
 
 ;;; 返信バッファ
 
+(defun zellij-send--reply-main ()
+  "返信バッファの元の黒板バッファを返す。kill されていれば `user-error'。
+送り先（セッション・pane-id）は返信バッファにコピーせず、使うたびに
+元の黒板から読む。コピーすると、元の黒板で pane-id が検出し直された後も
+古いペインへ送り続けるため。
+
+元の黒板が無いときは送らない。セッション名だけで送ると focused pane に
+届き、attach クライアントが無ければ届かないか、別のペインに入るため。
+返信の本文はバッファに残るので、黒板を開き直して送り直せばよい。"
+  (let ((main zellij-send--reply-main-buffer))
+    (unless (buffer-live-p main)
+      (user-error "元の黒板バッファが閉じられているので送れません。M-x zellij-send で開き直してください（本文は残っています）"))
+    main))
+
 (defun zellij-send--reply-send ()
-  "返信バッファの内容を送信してバッファを閉じ、元のバッファに戻る。"
+  "返信バッファの内容を送信してバッファを閉じ、元のバッファに戻る。
+送り先は送信の時点で元の黒板から読む（`zellij-send--reply-main'）。
+元の黒板が kill されていたら送らずに `user-error' にする。"
   (interactive)
   (unless zellij-send--session
     (user-error "セッション情報がありません"))
-  (let ((session zellij-send--session)
-        (text (string-trim (buffer-string)))
-        (reply-buf (current-buffer))
-        (tick (buffer-chars-modified-tick))
-        (main-buf zellij-send--reply-main-buffer)
-        (wconf zellij-send--reply-window-config))
+  (let* ((main-buf (zellij-send--reply-main))
+         (session (buffer-local-value 'zellij-send--session main-buf))
+         (text (string-trim (buffer-string)))
+         (reply-buf (current-buffer))
+         (tick (buffer-chars-modified-tick))
+         (wconf zellij-send--reply-window-config))
     (when (string-empty-p text)
       (user-error "送信するテキストが空です"))
-    ;; 失敗時は返信バッファを残してテキストを失わない
-    (zellij-send--send
-     session text
-     (lambda (ok)
-       (when ok
-         (zellij-send--history-add session text)
-         (when (and (buffer-live-p reply-buf)
-                    (with-current-buffer reply-buf
-                      (= tick (buffer-chars-modified-tick))))
-           (kill-buffer reply-buf)
-           (if (window-configuration-p wconf)
-               (set-window-configuration wconf)
-             (when (and main-buf (buffer-live-p main-buf))
-               (pop-to-buffer main-buf))))
-         (message "送信しました → [%s]" session))))))
+    ;; `zellij-send--send' はカレントバッファの pane-id を使うので、
+    ;; 元の黒板をカレントにして呼ぶ。失敗時は返信バッファを残してテキストを失わない
+    (with-current-buffer main-buf
+      (zellij-send--send
+       session text
+       (lambda (ok)
+         (when ok
+           (zellij-send--history-add session text)
+           (when (and (buffer-live-p reply-buf)
+                      (with-current-buffer reply-buf
+                        (= tick (buffer-chars-modified-tick))))
+             (kill-buffer reply-buf)
+             (if (window-configuration-p wconf)
+                 (set-window-configuration wconf)
+               (when (buffer-live-p main-buf)
+                 (pop-to-buffer main-buf))))
+           (message "送信しました → [%s]" session)))))))
+
+(defun zellij-send--reply-interrupt ()
+  "返信バッファから、元の黒板のペインに Esc を送る（`zellij-send-interrupt'）。"
+  (interactive)
+  (with-current-buffer (zellij-send--reply-main)
+    (zellij-send-interrupt)))
 
 (defcustom zellij-send-number-reply-commands '("claude" "agy")
   "選択肢に数字を送って答えられると**実測で確認した**エージェントの一覧。
@@ -3114,7 +3138,7 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map text-mode-map)
     (define-key map (kbd "C-c C-c") #'zellij-send--reply-send)
-    (define-key map (kbd "C-c C-k") #'zellij-send-interrupt)
+    (define-key map (kbd "C-c C-k") #'zellij-send--reply-interrupt)
     (define-key map (kbd "M-p")     #'zellij-send-history-prev)
     (define-key map (kbd "M-n")     #'zellij-send-history-next)
     map)
@@ -3122,7 +3146,11 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
 
 (defun zellij-send-reply ()
   "返信用のバッファを開く。C-c C-c で送信してバッファを閉じる。
-送らずに閉じた返信は、次に開いたときにそのまま残っている。"
+送らずに閉じた返信は、次に開いたときにそのまま残っている。
+
+返信バッファは送り先の pane-id もコマンドも持たない。送信と中断
+（C-c C-k）のたびに元の黒板から読む（`zellij-send--reply-main'）。
+元の黒板を kill した後は送れない（本文は残る）。"
   (interactive)
   (zellij-send--assert-session)
   (let* ((session zellij-send--session)
@@ -3137,10 +3165,9 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
       (when fresh
         (text-mode))
       (setq-local zellij-send--session session)
-      (setq-local zellij-send--pane-id
-                  (buffer-local-value 'zellij-send--pane-id main-buf))
-      (setq-local zellij-send--command
-                  (buffer-local-value 'zellij-send--command main-buf))
+      ;; 以前の版がコピーした値が残っていれば消す（古いペインに送らないため）
+      (kill-local-variable 'zellij-send--pane-id)
+      (kill-local-variable 'zellij-send--command)
       (setq-local zellij-send--reply-main-buffer main-buf)
       (setq-local zellij-send--reply-window-config wconf)
       (use-local-map zellij-send-reply-mode-map)
