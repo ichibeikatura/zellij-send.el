@@ -216,7 +216,7 @@ Claude Code のスラッシュコマンドを全部ミニバッファから選�
 
 Claude Code の transcript（`~/.claude/projects/<slug>/` 以下の JSONL）を読み、あなたの発言・本文・thinking・ツールの呼び出しと結果を順番どおりに黒板へ流します。
 
-- 初回は対応する JSONL を選びます（`MM-DD HH:MM  サイズ  題名` の新しい順。候補が 1 つでも確認します）。対応付けはバッファを閉じるまで保持し、更新日時から別エージェントの履歴を自動で選ぶことはありません。選び直すには `M-x zellij-send-select-transcript`。
+- [状態フック](#3-状態フック任意ダッシュボードの判定を確かにする)を入れていれば、そのセッションの JSONL を Claude Code から教わるので選ぶ必要はありません。無ければ初回に対応する JSONL を選びます（`MM-DD HH:MM  サイズ  題名` の新しい順。候補が 1 つでも確認します）。自分で選んだものはフックより優先します。対応付けはバッファを閉じるまで保持し、更新日時から別エージェントの履歴を自動で選ぶことはありません。選び直すには `M-x zellij-send-select-transcript`。
 - 表示中は自動更新が止まります。戻すには `g`。
 - 画像は `[画像 image/png 66 KB]` の 1 行に、`zellij-send-transcript-max-line-length`（既定 2000 文字）を超える行は切り詰めて出します。ツールの出力が大きすぎるときは `zellij-send-transcript-max-block-lines` に行数を設定してください。
 - Claude Code 以外のコマンドと `C-u a` は zellij の画面をダンプします。
@@ -540,11 +540,14 @@ import json, os, re
 d = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
 def word(s):
     return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))
+def lisp(s):
+    return '"%s"' % str(s or "").replace("\\", "\\\\").replace('"', '\\"')
 detail = d.get("tool_name") or d.get("notification_type") or ""
-print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s")' % (
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s)' % (
     word(os.environ.get("ZELLIJ_SESSION_NAME")),
     word(os.environ.get("ZELLIJ_PANE_ID")),
-    word(d.get("hook_event_name")), word(detail)))
+    word(d.get("hook_event_name")), word(detail),
+    lisp(d.get("transcript_path"))))
 PY
 )
 [ -n "$FORM" ] || exit 0

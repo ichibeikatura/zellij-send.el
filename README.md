@@ -215,7 +215,7 @@ Opens `*zellij-reply-session-name*`: read the answer in the blackboard and write
 
 Reads Claude Code's transcript (the JSONL under `~/.claude/projects/<slug>/`) and lays the conversation into the blackboard in order: your messages, the assistant's prose, its thinking, every tool call and result.
 
-- On first use, pick the JSONL (newest first, shown as `MM-DD HH:MM  size  title`), even if there is only one. The choice lasts until the buffer is closed; another agent's history is never chosen by modification time. `M-x zellij-send-select-transcript` picks again.
+- With the [state hook](#3-state-hook-optional-makes-the-dashboards-state-reliable) installed, Claude Code tells Emacs which JSONL belongs to the session, so there is nothing to pick. Otherwise, on first use, pick the JSONL (newest first, shown as `MM-DD HH:MM  size  title`), even if there is only one; a choice you make overrides the hook. The choice lasts until the buffer is closed; another agent's history is never chosen by modification time. `M-x zellij-send-select-transcript` picks again.
 - Automatic updates pause while it is shown; `g` goes back.
 - Images become a one-line summary (`[画像 image/png 66 KB]`), and lines longer than `zellij-send-transcript-max-line-length` (default 2000) are cut. Set `zellij-send-transcript-max-block-lines` if tool outputs are too long.
 - Non-Claude commands, and `C-u a`, dump the zellij screen instead.
@@ -542,11 +542,14 @@ import json, os, re
 d = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
 def word(s):
     return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))
+def lisp(s):
+    return '"%s"' % str(s or "").replace("\\", "\\\\").replace('"', '\\"')
 detail = d.get("tool_name") or d.get("notification_type") or ""
-print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s")' % (
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s)' % (
     word(os.environ.get("ZELLIJ_SESSION_NAME")),
     word(os.environ.get("ZELLIJ_PANE_ID")),
-    word(d.get("hook_event_name")), word(detail)))
+    word(d.get("hook_event_name")), word(detail),
+    lisp(d.get("transcript_path"))))
 PY
 )
 [ -n "$FORM" ] || exit 0

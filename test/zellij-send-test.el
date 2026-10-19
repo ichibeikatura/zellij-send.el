@@ -1827,6 +1827,35 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                                :status)
                     'prompt))))))
 
+(ert-deftest zellij-send-test-hook-transcript ()
+  "状態フックが知らせた transcript を、選んでいなければ聞かずに使う。"
+  (let* ((dir (make-temp-file "zjs-tr" t))
+         (hooked (expand-file-name "hooked.jsonl" dir))
+         (chosen (expand-file-name "chosen.jsonl" dir))
+         (buf (generate-new-buffer " *zjs-hook-tr*")))
+    (unwind-protect
+        (progn
+          (write-region "" nil hooked nil 'silent)
+          (write-region "" nil chosen nil 'silent)
+          (with-current-buffer buf
+            (setq major-mode 'zellij-send-mode)
+            (setq-local zellij-send--session "proj00"))
+          ;; 存在しない・jsonl でないパスは使わない
+          (zellij-send--on-claude-hook "proj00" "1" "Stop" "" "/nonexistent.jsonl")
+          (zellij-send--on-claude-hook "proj00" "1" "Stop" "" dir)
+          (should-not (buffer-local-value 'zellij-send--hook-transcript-path buf))
+          ;; 状態に関係ないイベントでも transcript は受け取る
+          (zellij-send--on-claude-hook "proj00" "1" "SessionStart" "" hooked)
+          (with-current-buffer buf
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (&rest _) (error "聞いてはいけない"))))
+              (should (equal (zellij-send--transcript-file dir) hooked)))
+            ;; ユーザーが選んだものはフックより優先
+            (setq-local zellij-send--transcript-path chosen)
+            (should (equal (zellij-send--transcript-file dir) chosen))))
+      (kill-buffer buf)
+      (delete-directory dir t))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

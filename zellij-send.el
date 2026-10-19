@@ -762,6 +762,12 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
 (defvar-local zellij-send--transcript-path nil
   "このバッファのセッションにユーザーが対応付けた transcript。")
 
+(defvar-local zellij-send--hook-transcript-path nil
+  "状態フックが知らせた、このセッションの transcript（`zellij-send--on-claude-hook'）。
+フックは ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID で黒板を特定したうえで
+Claude Code 自身の `transcript_path' を渡すので、更新日時からの推測ではない。
+ユーザーが選んだ `zellij-send--transcript-path' があればそちらを優先する。")
+
 (defun zellij-send--transcript-ai-title (text)
   "TEXT（JSONL の断片）にある最後の ai-title を返す。無ければ nil。
 Claude Code は会話が進むたび ai-title 行を追記するので、
@@ -865,11 +871,19 @@ user でも発言ではない）と、スラッシュコマンドの注意書き
   "DIR 内の transcript を明示的に選び、バッファごとに保持する。
 RESELECT が非 nil なら選び直す。候補は更新日時の新しい順に並べ、
 `MM-DD HH:MM  サイズ  題名' の形で見せる（題名は JSONL の ai-title）。
-並べるだけで、更新日時から所属を推測して自動で選ぶことはしない。"
-  (if (and (not reselect) zellij-send--transcript-path)
-      (if (file-readable-p zellij-send--transcript-path)
-          zellij-send--transcript-path
-        (user-error "選択済みの履歴がありません。M-x zellij-send-select-transcript で選び直してください"))
+並べるだけで、更新日時から所属を推測して自動で選ぶことはしない。
+
+ユーザーが選んでいなければ、状態フックが知らせた transcript
+（`zellij-send--hook-transcript-path'）を聞かずに使う。"
+  (cond
+   ((and (not reselect) zellij-send--transcript-path)
+    (if (file-readable-p zellij-send--transcript-path)
+        zellij-send--transcript-path
+      (user-error "選択済みの履歴がありません。M-x zellij-send-select-transcript で選び直してください")))
+   ((and (not reselect) zellij-send--hook-transcript-path
+         (file-readable-p zellij-send--hook-transcript-path))
+    zellij-send--hook-transcript-path)
+   (t
     (let* ((proj (expand-file-name (zellij-send--transcript-slug dir)
                                    zellij-send-transcript-dir))
            (files (and (file-directory-p proj)
@@ -881,11 +895,12 @@ RESELECT が非 nil なら選び直す。候補は更新日時の新しい順に
                                 (or zellij-send--session "このセッション"))
                         (zellij-send--transcript-table cands)
                         nil t)))
-          (setq zellij-send--transcript-path (cdr (assoc choice cands))))))))
+          (setq zellij-send--transcript-path (cdr (assoc choice cands)))))))))
 
 (defun zellij-send-select-transcript ()
   "現在のセッションに対応する Claude transcript を選び直す。
-候補は会話の題名で選ぶ。対応付けはこのバッファが生きている間保持する。"
+候補は会話の題名で選ぶ。対応付けはこのバッファが生きている間保持し、
+状態フックが知らせた transcript より優先する。"
   (interactive)
   (zellij-send--assert-session)
   (unless (zellij-send--claude-p)
@@ -4410,18 +4425,26 @@ DETAIL は PreToolUse などでは tool_name、Notification では notification_
         zellij-send--hook-state-time nil))
 
 ;;;###autoload
-(defun zellij-send--on-claude-hook (session pane event &optional detail)
+(defun zellij-send--on-claude-hook (session pane event &optional detail transcript)
   "Claude Code のフックから状態を受け取る（state-zellij-send.sh が呼ぶ）。
 SESSION と PANE はフックが継承した ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID、
-EVENT は hook_event_name、DETAIL は tool_name か notification_type。
-対応する黒板の `zellij-send--hook-state' を立てるだけで、zellij は呼ばない。
+EVENT は hook_event_name、DETAIL は tool_name か notification_type、
+TRANSCRIPT はフックの transcript_path。
+対応する黒板の `zellij-send--hook-state' と
+`zellij-send--hook-transcript-path' を立てるだけで、zellij は呼ばない。
 emacsclient から呼ばれるので、すぐに返る。"
   (let ((state (zellij-send--hook-event-state event detail))
         (buf (zellij-send--hook-buffer session pane)))
-    (when (and state buf)
+    (when buf
       (with-current-buffer buf
-        (setq zellij-send--hook-state state
-              zellij-send--hook-state-time (float-time))))
+        (when state
+          (setq zellij-send--hook-state state
+                zellij-send--hook-state-time (float-time)))
+        ;; /clear で会話が替わると transcript も替わるので、毎回取り直す
+        (when (and (stringp transcript)
+                   (string-suffix-p ".jsonl" transcript)
+                   (file-readable-p transcript))
+          (setq zellij-send--hook-transcript-path transcript))))
     nil))
 
 ;;; エントリポイント
