@@ -1557,6 +1557,76 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
         (setq-local zellij-send--last-content zellij-send-test--askq-single)
         (should (zellij-send-dashboard--prompt-p buf))))))
 
+;;; スラッシュコマンド一覧の永続化
+
+(defmacro zellij-send-test--with-slash-cache (&rest body)
+  "使い捨てのキャッシュ置き場と作業ディレクトリで BODY を実行する。"
+  (declare (indent 0))
+  `(let* ((root (make-temp-file "zjs-slash" t))
+          (zellij-send-slash-cache-directory (expand-file-name "cache/" root))
+          (zellij-send--slash-cache-table (make-hash-table :test 'equal))
+          (zellij-send-slash-cache-max-age 3600))
+     (unwind-protect
+         (with-temp-buffer
+           (setq default-directory (file-name-as-directory
+                                    (expand-file-name "proj" root)))
+           (make-directory default-directory t)
+           (setq-local zellij-send--command "claude")
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest zellij-send-test-slash-cache-survives-restart ()
+  "保存した一覧は、メモリを捨てた後（＝再起動後）もディスクから読める。"
+  (zellij-send-test--with-slash-cache
+    (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/ndl" . "国会図書館")))
+    (should (file-exists-p (zellij-send--slash-cache-file
+                            (zellij-send--slash-cache-key))))
+    ;; 再起動に相当: メモリの表を空にする
+    (clrhash zellij-send--slash-cache-table)
+    (should (equal (zellij-send--slash-cached)
+                   '(("/clear" . "Clear") ("/ndl" . "国会図書館"))))))
+
+(ert-deftest zellij-send-test-slash-cache-invalidation ()
+  "古くなった一覧・材料が変わった一覧は使わない。C-u で捨てたものは戻らない。"
+  (zellij-send-test--with-slash-cache
+    (zellij-send--slash-cache-put '(("/clear" . "Clear")))
+    (let* ((key (zellij-send--slash-cache-key))
+           (entry (gethash key zellij-send--slash-cache-table))
+           (fp (plist-get entry :fingerprint))
+           (time (plist-get entry :time)))
+      (should (zellij-send--slash-cache-valid-p entry fp time))
+      ;; 期限切れ
+      (should-not (zellij-send--slash-cache-valid-p entry fp (+ time 3601)))
+      (let ((zellij-send-slash-cache-max-age nil))
+        (should (zellij-send--slash-cache-valid-p entry fp (+ time 1e9))))
+      ;; プロジェクトにスキルが足された
+      (make-directory (expand-file-name ".claude/skills/new-skill" default-directory) t)
+      (should-not (equal (zellij-send--slash-cache-fingerprint) fp))
+      (should-not (zellij-send--slash-cached))
+      ;; 取り直したものは使える。C-u で捨てるとディスクからも消える
+      (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/new-skill" . "")))
+      (should (zellij-send--slash-cached))
+      (zellij-send--slash-cache-drop)
+      (should-not (file-exists-p (zellij-send--slash-cache-file key)))
+      (should-not (zellij-send--slash-cached)))))
+
+(ert-deftest zellij-send-test-slash-cache-other-dir ()
+  "別のディレクトリの保存ファイルを読まない。保存しない設定ならファイルを作らない。"
+  (zellij-send-test--with-slash-cache
+    (let ((key (zellij-send--slash-cache-key)))
+      (zellij-send--slash-cache-write
+       key (list :entries '(("/x" . "")) :time (float-time) :fingerprint nil))
+      (should (zellij-send--slash-cache-read key))
+      (should-not (zellij-send--slash-cache-read "/somewhere/else"))
+      ;; 中身の :dir が食い違うファイルは捨てる
+      (with-temp-file (zellij-send--slash-cache-file "/somewhere/else")
+        (prin1 '(:dir "/another" :entries (("/x" . ""))) (current-buffer)))
+      (should-not (zellij-send--slash-cache-read "/somewhere/else")))
+    (let ((zellij-send-slash-cache-directory nil))
+      (should-not (zellij-send--slash-cache-file "/a"))
+      (zellij-send--slash-cache-put '(("/clear" . "")))
+      (should (equal (zellij-send--slash-cached) '(("/clear" . "")))))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

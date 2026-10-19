@@ -2020,12 +2020,35 @@ nil にする。"
   :type 'integer
   :group 'zellij-send)
 
+(defcustom zellij-send-slash-cache-directory
+  (locate-user-emacs-file "zellij-send/slash-commands/")
+  "スラッシュコマンド一覧をディスクに保存するディレクトリ。nil なら保存しない。
+作業ディレクトリごとに 1 ファイル置き、Emacs を再起動した後もそれを読む。
+
+一覧の取得はペインの入力欄を実際に打つうえ 8〜10 秒かかる（実測 102 件）。
+メモリにだけ持つと、Emacs を起動するたびに全セッションで打ち込みが走る。
+保存した一覧が古くなったら（`zellij-send--slash-cache-valid-p'）黙って
+取り直す。`\\[universal-argument] \\[zellij-send-slash-command]' はファイルも捨てて取り直す。"
+  :type '(choice (const :tag "保存しない" nil) directory)
+  :group 'zellij-send)
+
+(defcustom zellij-send-slash-cache-max-age (* 7 24 60 60)
+  "保存したスラッシュコマンド一覧を信用する期間（秒）。nil なら期限なし。
+claude 本体の更新やスキルの追加は `zellij-send--slash-cache-fingerprint' でも
+見ているが、拾えない変化（プラグイン内のコマンドの更新など）もあるので
+期限でも取り直す。"
+  :type '(choice (const :tag "期限なし" nil) natnum)
+  :group 'zellij-send)
+
 (defvar zellij-send--slash-cache-table (make-hash-table :test 'equal)
   "作業ディレクトリごとのスラッシュコマンド一覧。
-キーは絶対パス、値は ((\"/name\" . \"説明\") ...)。
+キーは絶対パス、値は plist (:entries ENTRIES :time 取得時刻 :fingerprint FP)。
+ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
+`zellij-send--slash-cache-fingerprint' の値。
 **セッションではなくディレクトリで持つ**——一覧の中身を決めるのは
 プロジェクトのコマンドとスキルなので、同じディレクトリのセッションなら
-同じ結果になる。2 つ目以降のセッションは取得ゼロで開ける。")
+同じ結果になる。2 つ目以降のセッションは取得ゼロで開ける。
+ディスク（`zellij-send-slash-cache-directory'）から読んだものもここに入る。")
 
 (defvar-local zellij-send--slash-prefetching nil
   "先読みの取得中なら non-nil。多重起動を防ぎ、進捗メッセージを黙らせる。")
@@ -2050,13 +2073,119 @@ nil にする。"
   "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
   (directory-file-name (file-truename default-directory)))
 
+(defun zellij-send--slash-mtime (file)
+  "FILE の最終更新時刻を `float-time' で返す。無ければ nil。"
+  (let ((attrs (file-attributes file)))
+    (and attrs (float-time (file-attribute-modification-time attrs)))))
+
+(defun zellij-send--slash-dir-stamp (dir)
+  "DIR とその直下の項目のうち、最も新しい最終更新時刻を返す。無ければ nil。
+スキルはディレクトリごと足すので、直下の項目の更新で増減と書き換えを拾う。"
+  (when (file-directory-p dir)
+    (apply #'max
+           (delq nil (cons (zellij-send--slash-mtime dir)
+                           (mapcar #'zellij-send--slash-mtime
+                                   (directory-files dir t "\\`[^.]")))))))
+
+(defun zellij-send--slash-cache-fingerprint ()
+  "カレントバッファの一覧が変わったかを見分けるための値を返す。
+一覧を決める材料をファイルの時刻で表す（zellij も claude も呼ばない）:
+
+- claude の実行ファイル（実体のパスと更新時刻。版が上がると変わる）
+- プロジェクトと `~/.claude' の `commands' / `skills'
+- `~/.claude/plugins/installed_plugins.json'（プラグインの増減）
+
+値は `equal' で比べるので、数値と文字列だけで作る。"
+  (let* ((exe (executable-find
+               (or (car (split-string (or zellij-send--command "claude") nil t))
+                   "claude")))
+         (true (and exe (file-truename exe)))
+         (home (expand-file-name "~/.claude/")))
+    (list :claude (and true (list true (zellij-send--slash-mtime true)))
+          :dirs (mapcar (lambda (dir) (cons dir (zellij-send--slash-dir-stamp dir)))
+                        (list (expand-file-name ".claude/commands" default-directory)
+                              (expand-file-name ".claude/skills" default-directory)
+                              (expand-file-name "commands" home)
+                              (expand-file-name "skills" home)))
+          :plugins (zellij-send--slash-mtime
+                    (expand-file-name "plugins/installed_plugins.json" home)))))
+
+(defun zellij-send--slash-cache-valid-p (entry fingerprint &optional now)
+  "保存した ENTRY（`zellij-send--slash-cache-table' の値）がまだ使えれば non-nil。
+FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在時刻
+（省略時は `float-time'）。取得から `zellij-send-slash-cache-max-age' 秒を
+過ぎたもの、材料（FINGERPRINT）が変わったものは使えない。"
+  (let ((time (plist-get entry :time))
+        (max-age zellij-send-slash-cache-max-age))
+    (and (plist-get entry :entries)
+         (numberp time)
+         (or (null max-age)
+             (< (- (or now (float-time)) time) max-age))
+         (equal (plist-get entry :fingerprint) fingerprint))))
+
+(defun zellij-send--slash-cache-file (key)
+  "作業ディレクトリ KEY の一覧を保存するファイルを返す。保存しないなら nil。"
+  (when zellij-send-slash-cache-directory
+    (expand-file-name (concat (md5 key) ".eld")
+                      zellij-send-slash-cache-directory)))
+
+(defun zellij-send--slash-cache-read (key)
+  "作業ディレクトリ KEY の一覧をディスクから読む。無い・壊れていれば nil。"
+  (let ((file (zellij-send--slash-cache-file key)))
+    (when (and file (file-readable-p file))
+      (ignore-errors
+        (with-temp-buffer
+          (let ((coding-system-for-read 'utf-8-unix))
+            (insert-file-contents file))
+          (let ((entry (read (current-buffer))))
+            ;; md5 の衝突や手で置いたファイルで別のディレクトリの一覧を使わない
+            (and (equal (plist-get entry :dir) key) entry)))))))
+
+(defun zellij-send--slash-cache-write (key entry)
+  "作業ディレクトリ KEY の一覧 ENTRY をディスクに書く。失敗しても止めない。"
+  (let ((file (zellij-send--slash-cache-file key)))
+    (when file
+      (with-demoted-errors "zellij-send: スラッシュコマンド一覧を保存できません: %S"
+        (make-directory (file-name-directory file) t)
+        (let ((coding-system-for-write 'utf-8-unix)
+              (print-length nil)
+              (print-level nil))
+          (with-temp-file file
+            (prin1 (plist-put (copy-sequence entry) :dir key) (current-buffer))))))))
+
 (defun zellij-send--slash-cached ()
-  "カレントバッファのディレクトリの一覧を返す。無ければ nil。"
-  (gethash (zellij-send--slash-cache-key) zellij-send--slash-cache-table))
+  "カレントバッファのディレクトリの一覧を返す。無いか古ければ nil。
+メモリに無ければディスクから読む（Emacs を再起動した直後でも打ち込まずに
+済むように）。古くなっていたら捨てる——呼び出し側は nil を見て取り直す。"
+  (let* ((key (zellij-send--slash-cache-key))
+         (entry (or (gethash key zellij-send--slash-cache-table)
+                    (zellij-send--slash-cache-read key))))
+    (when entry
+      (if (zellij-send--slash-cache-valid-p
+           entry (zellij-send--slash-cache-fingerprint))
+          (progn (puthash key entry zellij-send--slash-cache-table)
+                 (plist-get entry :entries))
+        (remhash key zellij-send--slash-cache-table)
+        nil))))
 
 (defun zellij-send--slash-cache-put (alist)
-  "ALIST をカレントバッファのディレクトリの一覧として覚える。"
-  (puthash (zellij-send--slash-cache-key) alist zellij-send--slash-cache-table))
+  "ALIST をカレントバッファのディレクトリの一覧として覚え、ディスクにも書く。
+打ち切った一覧（truncated）をここに渡さないこと。"
+  (let ((key (zellij-send--slash-cache-key))
+        (entry (list :entries alist
+                     :time (float-time)
+                     :fingerprint (zellij-send--slash-cache-fingerprint))))
+    (puthash key entry zellij-send--slash-cache-table)
+    (zellij-send--slash-cache-write key entry)))
+
+(defun zellij-send--slash-cache-drop ()
+  "カレントバッファのディレクトリの一覧を、メモリからもディスクからも捨てる。"
+  (let* ((key (zellij-send--slash-cache-key))
+         (file (zellij-send--slash-cache-file key)))
+    (remhash key zellij-send--slash-cache-table)
+    (when (and file (file-exists-p file))
+      (with-demoted-errors "zellij-send: %S"
+        (delete-file file)))))
 
 (defvar zellij-send--slash-arg-cache-table (make-hash-table :test 'equal)
   "引数の候補メニューのキャッシュ。
@@ -2757,7 +2886,8 @@ DEPTH は何段目か。候補は入れ子になる（`/plugin' → `enable' →
 （`zellij-send-slash-prefetch' が non-nil なら黒板バッファを開いた時点で
 先読みしてあるので、たいてい待ち時間は無い）。
 REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数の候補を
-取り直す。
+取り直す。一覧はディスクにも保存してあり（`zellij-send-slash-cache-directory'）、
+Emacs を再起動してもそのまま使う。REFRESH はその保存も捨てる。
 
 コマンドを選ぶと引数も尋ねる。`/effort' のようにヒント（`[low|medium|…]'）
 が出るものは候補から選び、`<path>' はディレクトリ補完で選ぶ。`/config' や
@@ -2780,6 +2910,9 @@ REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数�
   (when (zellij-send--slash-collecting-p)
     (user-error "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
   (when refresh
+    ;; ディスクに保存した一覧も捨てる。取り直しに失敗しても古い一覧が
+    ;; 次回の起動で復活しないように
+    (zellij-send--slash-cache-drop)
     (zellij-send--slash-arg-cache-clear))
   (let ((buf (current-buffer)))
     (if (and (zellij-send--slash-cached) (not refresh))
