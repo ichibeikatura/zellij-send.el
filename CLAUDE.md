@@ -1,997 +1,137 @@
 # CLAUDE.md
 
-このファイルは、このリポジトリでコードを扱う際の Claude Code へのガイダンスです。
+## このファイルの規約（先に読むこと）
 
-## プロジェクト概要
+- **追記型ではない。更新型である。** 書き足す前に、既存の項目を直すか統合できないか考える。
+  古くなった記述は消す。同じことを 2 か所に書かない。
+- 入れてよいもの: 動かせない制約、恒久的な設計判断とその理由、禁止事項。
+- 入れてはいけないもの: セッションごとの作業ログ、やったことの時系列、TODO の消化記録、
+  **同じ内容をコードコメントが既に持っているもの**（ここにはコメントの場所だけ書く）。
+- **上限 200 行。** 超えたら古い項目を統合するか、該当コードのコメントへ移す。
+- 実測の詳細（表・数値・再現手順）はコードコメント（`;;` の調査メモ）に一本化する。
+  ここに置くのは「何が動かせないか」の一行と、詳しく書いてある場所だけ。
+- 2026-10 以前の長い版（実測の表を含む）は git 履歴の `be6c0c8:CLAUDE.md` にある。
 
-Emacs から zellij セッション上の AI エージェント（主に Claude Code）に日本語テキストを送る Emacs パッケージ。
-`M-x zellij-send` でセッションを選択し、専用バッファ（`*ai-セッション名*`）で入力・確認・返信を行う。
-このパッケージは 2 つの要素で成り立つ:
-- *ai-SESSION* バッファ（黒板）: ユーザーが入力するための主インターフェース
-- zellij セッション本体: detached（attach クライアントなし）でバックグラウンドで動く実体
+## プロジェクトの前提（壊してはいけない）
 
-**attach クライアントは不要**（zellij 0.44+ で実機検証済み）。新規セッションは
-`zellij attach --create-background` で detached のまま作り、`zellij run` で claude を
-起動して返る pane-id（`terminal_N`）を保持し、以後すべての送受信を `--pane-id` 指定で行う。
-focused pane への送信（pane-id 指定なし）はクライアントがいないと届かないため、
-pane-id 不明の既存セッションに送る場合のみ使う（ターミナル側で attach していれば動く）。
-かつては eat による attach を必須としていたが、eat 連携が原因のフリーズが解消できず全廃した。
+Emacs から detached な zellij セッションで動く AI エージェント（claude / codex / agy）を
+操作する Emacs パッケージ。成り立ちの中心は 2 点で、どちらも改善の名目で壊さない。
 
-## 開発環境
+1. **エージェントは Emacs より長生きする。** `zellij attach --create-background` で作り、
+   pane-id 指定で送受信する。Emacs の再起動・フレームを閉じる・ターミナルからの
+   `zellij attach` のどれでも同じセッションが続く。
+   → ACP / agent-shell（stdio でエージェントを子プロセスにする）方式には移らない。
+2. **文章を作るのは普通の Emacs バッファ。** vterm / eat を使わないので、Emacs 内で動く
+   入力メソッド（ddSKK など）が生きる。eat は attach 起因のフリーズが解消できず全廃した。
+   → vterm / eat を再導入しない。
 
-- Emacs 31、`lexical-binding: t`
-- 依存: `transient` 0.4以上（必須）、`markdown-mode`（オプション）
-- zellij **0.44 以上**（dump-screen の STDOUT 出力・`--pane-id` 指定に依存）
-- パッケージ管理: elpaca 想定
+## 開発環境・検証
 
-## アーキテクチャ
+- Emacs 28.1+（`lexical-binding: t`）。依存は `transient`（必須）と `markdown-mode`（任意）だけ。
+  外部コマンドは `zellij` 0.44+ / `sh` / `python3` のみ。**新しい依存を足さない**
+- テスト（zellij を呼ばない純関数と、バッファ更新の振る舞い）:
+  `emacs -Q --batch -L . -l ert -l test/zellij-send-test.el -f ert-run-tests-batch-and-exit`
+- バイトコンパイル（警告を増やさない）:
+  `emacs -Q --batch -L . -f batch-byte-compile zellij-send.el zellij-send-dashboard.el`
+- zellij を叩く経路は、`ZELLIJ_SOCKET_DIR` を分けた使い捨てサーバで手で確かめる
+  （普段のダッシュボードが自動接続しないように。パスは 104 バイト未満）
+- GUI の描画を確かめるときは別の `emacs -Q` を使い、既定フォントは
+  `:font "Mplus 1 code-14"` で指定する（`:family` + `:height` は `-Q` で効かない）
 
-```
-Emacs バッファ (*ai-SESSION*)  [zellij-send--pane-id を保持]
-  ├─ 入力: C-c C-c → zellij-send--send → zellij action paste/write 13（--pane-id 指定）
-  ├─ 表示: zellij action dump-screen → STDOUT 直読み → バッファ更新（非同期 / make-process + sentinel）
-  ├─ 自動受信: zellij subscribe の常駐プロセス（NDJSON）＋ Stop フック (emacsclient)
-  ├─ ログ: Stop フックが transcript から assistant 出力を .zellij-send/claude-log.md に追記
-  └─ UI: transient メニュー (C-c C-a)
-```
+## 禁止事項
 
-### zellij コマンドの呼び出し方針
+- **zellij 呼び出しに同期呼び出し（`call-process` など）を入れない。** 全部 `make-process` +
+  sentinel。引数は文字列のリストで渡し、シェル文字列を組まない。ユーザーテキストの前に `--`
+- **sentinel / プロセスフィルタの中でミニバッファを開かない。** `run-at-time 0` で抜けてから聞く
+  （その中では quit が抑止され C-g が効かない）
+- **ペインに打ち込む機能は `zellij-send--claude-confirmed-p` で守る。** 推測の
+  `zellij-send--claude-p`（不明なら既定コマンドで代用する）は読むだけの機能にしか使わない
+- **未確認の CLI を対応表に足さない**（`zellij-send-number-reply-commands` /
+  `zellij-send-slash-support-alist` / `zellij-send-progress-file-alist`）。
+  エージェントの自己申告は信用しない（agy は `/compact` が「ある」と答え、実機が否定した）
+- **日付入りの実測コメントを消さない・書き換えない。** 変えるときは新しい実測を日付付きで追記する
+- **画面の形に新しい仮定を置かない。** 置くなら実機で確かめ、日付と版をコメントに残す
+- 本体（`zellij-send.el`）からダッシュボードを require しない・シンボルを参照しない。
+  依存は dashboard → 本体の一方向（メニュー `d` は `require ... noerror` で遅延ロード）
+- 打ち切った（`truncated`）スラッシュコマンド・引数の一覧をキャッシュしない
+- 1 タスク 1 コミット。指示されていないリファクタ・整形・リネームを混ぜない
 
-- **すべての zellij 呼び出しは非同期**（`make-process` + sentinel）。同期 `call-process` は禁止（Emacs の UI をブロックしフリーズの温床になる）
-- 引数は個別の文字列として渡し、**シェル文字列結合は行わない**（コマンドインジェクション防止）。ユーザーテキストの直前に `--` を置き、`-` 始まりのテキストがオプション扱いされるのを防ぐ
-- 汎用ヘルパー: `(zellij-send--zellij-async args &optional callback)` — callback に exit code を渡す
-- 送信: `(zellij-send--send session text &optional callback)` — paste → 成功後に write 13 を sentinel で連鎖。callback には成功 t / 失敗 nil。カレントバッファの `zellij-send--pane-id` を呼び出し時に取り込むため、**必ず対象バッファをカレントにして呼ぶ**（返信バッファには pane-id をコピーしてある）
-- スクリーン取得: `(zellij-send--dump-screen-async session callback)` — STDOUT 直読み（zellij 0.44+、tmpfile 不使用）。コールバックは要求元バッファをカレントにした状態で呼ばれる
-- ペイン起動: `(zellij-send--run-in-session-async session dir command callback)` — `zellij run` の STDOUT から pane-id を抽出して callback に渡す
+## 動かせない制約（詳細はコメントの場所へ）
 
-**送信後の後処理は成功コールバック内で行う**: バッファクリア（`zellij-send-send`）や返信バッファのクローズ（`zellij-send--reply-send`）は送信成功後に実行し、失敗時に入力テキストを失わないようにする。成功時も送信開始時の `buffer-chars-modified-tick` と比較し、途中で編集されていたらクリア・クローズ・ウィンドウ復元を行わない。
+### 背景セッションの大きさ
+`attach --create-background` のセッションは 50 桁 × 48 行に固定。**`COLUMNS` / `LINES` は
+新規サーバでも効かない**（2026-07-28、zellij 0.44.3）。唯一効くのは目的の大きさの pty で
+一瞬 attach → detach すること（`zellij-send--resize-session`。ペインを作る前に行う）。
+この attach は全面非同期・出力を捨てる `:filter` 必須・watchdog で必ず殺す
+（Emacs が pty を読まないと zellij サーバが書き込みでブロックし、セッション全体が固まる）。
 
-**sentinel の中でミニバッファ入力をしない**: sentinel / プロセスフィルタは quit が抑止された状態で走ることがあり、その中で `completing-read` や `read-directory-name` を呼ぶと C-g が効かない・入力が壊れる。非同期結果を受けてユーザーに質問する場合は `(run-at-time 0 nil #'FUNC ARGS)` で sentinel を抜けてから行う（`zellij-send` → `zellij-send--select-session` がこの形）。
+### subscribe
+`zellij subscribe` は `--pane-id` 必須、viewport は毎回フル、行末はペイン幅ぶん空白で
+パディングされる。**存在しないセッションでも終了コード 0 で何も流さない**、
+**セッションが消えても終了しない**——成否は初回イベントの有無で見て、後始末は
+`kill-buffer-hook` で行う。詳細は `zellij-send.el` の「自動受信（zellij subscribe）」節。
 
-**セッション一覧のパース**: `zellij-send--parse-sessions` は `NAME [Created ...]` 形式の行だけを採用し、EXITED セッションと「セッション 0 件」の案内文（`No active zellij sessions found.`）を除外する。先頭トークンを無条件に拾うと案内文から `No` というセッション名が生まれる。
+### 行末の空白の削り方
+受信した行を `string-trim` / `[ \t]+$` で削らない（2 乗時間で Emacs が止まる）。
+`zellij-send--trim-end` を使う（docstring に計測あり）。
 
-### Enter キー送信の注意点
+### 終了コードが当てにならないもの
+- `list-sessions` は 0 件でも exit 1（案内文で見分ける。`zellij-send--list-sessions-async`）
+- `subscribe` は失敗しても exit 0（上記）
+- タイムアウト・失敗を「セッション 0 件」と読まない（生きている黒板を kill してしまう）
 
-テキストに `\n` を含めても Enter にならない。必ず 2 ステップに分ける:
-```
-zellij action paste --pane-id terminal_N -- "テキスト"
-zellij action write --pane-id terminal_N -- 13    ; 0x0D = CR = Enter
-```
+### セッションの終了
+エージェントが `/exit` で落ちてもペインは `EXITED=true` で残り、セッションは消えない。
+終了は `list-panes --all` の EXITED 列で見て `delete-session --force` で消す
+（`zellij-send--await-agent-exit`）。判定できないときに t を返さない。
 
-**本文は `write-chars` ではなく `paste` で送る**（2026-07-28 実測で決定）:
+### 画面から取れないもの
+alt-screen の TUI にはスクロールバックが無く（`dump-screen --full` も効かない）、
+長文の送信は `[Pasted text #1 +N lines]` に畳まれる。過去の会話は transcript（JSONL）から読む。
 
-- `write-chars` は改行を LF のまま渡す。**Claude Code は LF では送信を確定しない**
-  （実測: 3 行を `write-chars` で送っても入力欄に 3 行入るだけで送信されない）ため
-  Claude Code 相手なら壊れないが、**シェルは LF で確定する**（実測: zsh ペインに 2 行送ると
-  1 行目が実行された）。`zellij-send-default-command` は変更可能なので防御的に `paste` を使う
-- `paste` は**受け手が bracketed paste を有効にしている時だけ**マーカーで包む。
-  有効にしていないペイン（canonical mode の `cat` 等）には素の文字列が渡るので、
-  `[200~` がリテラルで現れる心配はない。切替用の defcustom は不要
-- **`ESC[200~` を手で組んではいけない**。単独の
-  `zellij action write -- 27 91 50 48 48 126` は zellij の入力パーサに食われてペインに届かない
-  （実測で確認。`ESC[200~Q` のように余分なバイトを足すと素通しされる）。
-  全バイトを 1 回の `write` にまとめれば届くが、日本語は 1 文字 3 バイトなので argv が肥大する
-- 副作用: 長文は Claude Code の入力欄で `[Pasted text #1 +59 lines]` に畳まれる
-  （実測 60 行）。内容は完全に送信されるが、`*ai-SESSION*` バッファには
-  本文ではなくプレースホルダが映る
-- `paste` は zellij 0.44.0 で追加（#4817）。必要バージョンの引き上げは不要
+## 設計判断（理由つき）
 
-### ANSI エスケープの除去
+- **エージェント 1 体 = zellij セッション 1 つ。** 名前はディレクトリ名 + 2 桁連番
+  （`myproj00`）。バッファ・履歴・subscribe・終了がセッション単位のまま効く
+- **機能の分岐はバッファローカルの `zellij-send--command` で行う。**
+  `zellij-send-default-command` は新規作成時の既定値でしかない。pane-id を替えるときは
+  コマンドを nil でも代入し、subscribe を張る前に確定させる（先読みが `/` を打つため）
+- **ペインは TITLE ではなく `list-panes --all` の COMMAND 列で選ぶ**（TITLE は当てにならない）
+- **本文は `write-chars` ではなく `paste` で送る。** `write-chars` は LF を素通しし、
+  シェルでは行ごとに実行される。Enter は別に `write 13`
+- **送信後の後処理（クリア・返信バッファを閉じる）は成功コールバックの中で、送信開始時の
+  `buffer-chars-modified-tick` と比べてから行う。** 失敗・途中編集で下書きを失わない
+- **黒板は編集中（`buffer-modified-p`）・クリア後（`zellij-send--user-cleared`）は書き換えない。**
+  ただし `zellij-send--last-change-time` / `--last-content` は記録し続ける
+- **transcript は明示選択。** 更新日時から所属を推測して自動で選ばない
+  （同じディレクトリに複数エージェントがいるため）
+- **ダッシュボードは状態判定で zellij を呼ばない。** 呼ぶのは 15 秒ごとのセッション検出だけ。
+  実測仕様は `.claude/skills/zellij-send-dashboard/SKILL.md`
+- **モードライン通知は持たない**（再描画のたびに全バッファを走査するため 2026-07 に撤去）
 
-`zellij-send--strip-ansi` で 4 段階除去する。**順序が意味を持つ**ので入れ替えないこと:
+## 実測の置き場所（再調査しないこと）
 
-```elisp
-"\033\\][^\a\033]*\\(?:\a\\|\033\\\\\\)"  ; 1. OSC（BEL または ST 終端）
-"\033[PX^_][^\033]*\033\\\\"              ; 2. DCS / SOS / PM / APC（ST 終端）
-"\033\\[[0-9;?]*[A-Za-z]"                 ; 3. CSI
-"\033[ -/]+[0-~]"                         ; 4a. nF エスケープ（ESC ( B など）
-"\033."                                   ; 4b. その他の 2 文字（ESC =、ESC 7）
-```
+| 話題 | 場所 |
+|---|---|
+| AskUserQuestion の画面と操作 | `zellij-send.el`「AskUserQuestion（選択肢プロンプト）への回答」節の冒頭 |
+| スラッシュコマンドの補完メニュー・引数 | `zellij-send.el`「スラッシュコマンド」節の冒頭と「引数を読む」 |
+| 黒板の桁揃え・記号の字形 | `zellij-send-grid-align` ほか `--grid-*` の docstring |
+| 末尾を追う・選択中の保留 | `zellij-send--update-buffer` の前のコメント |
+| CLI ごとの差（記号・数字キー・`/compact`） | `zellij-send-prompt-marker-alist` / `zellij-send-number-reply-commands` / `zellij-send-slash-support-alist` |
+| transcript の場所・題名 | `zellij-send--transcript-*` の docstring |
+| ダッシュボード・QR・/usage | `.claude/skills/zellij-send-dashboard/SKILL.md` |
 
-最後の 2 文字規則を先に走らせてはいけない。`ESC ]` の 2 文字だけを食って
-`0;title` とベル文字が本文に残る。同じ理由で `ESC ( B` は 3 バイトなので
-nF 規則が必要（2 文字規則だけだと `B` が残る。テストで検出した実バグ）。
+### コードに無い CLI の実測（2026-09-07、zellij 0.45.1）
 
-**どこで効いているか**（2026-07-28 実測）:
-
-- `list-sessions` の出力には**今もカラーコードが入る**（`ESC[32;1m...`）。ここは現役
-- `dump-screen` は `--ansi` を付けない限り**平文を返す**（実測: ESC を含む行が 0）。
-  こちらは保険として通しているだけ
-
-### テスト
-
-```sh
-emacs -Q -batch -L . -l ert -l test/zellij-send-test.el -f ert-run-tests-batch-and-exit
-```
-
-zellij を必要としない純粋な関数だけを対象にする（`--strip-ansi` / `--parse-sessions`）。
-zellij を叩く経路は使い捨てセッションを作って手で確認する。
+- codex: Ctrl+U は入力欄を **1 行ずつ**しか消さない（claude / agy は 1 回で空）。
+  codex の入力欄を片付ける処理を書くならここに注意
+- codex: 長文は `[Pasted Content N chars]` に畳まれる（2399 字・1565 字は畳まれ、1000 字は畳まれない）
+- agy: 信頼確認の画面だけ番号が無い（`> Yes, I trust this folder`）。キー透過モードで操作する
+- agy: Esc 1 回で中断できる。補完メニューは 5 件 + `↓ N more` の形
 
 ## コーディング規約
 
-### 命名規則
-
-| パターン | 用途 |
-|---|---|
-| `zellij-send-FOO` | ユーザー向け `M-x` コマンド、`defcustom`、`defvar` |
-| `zellij-send--FOO` | 内部関数・変数（公開しない） |
-| `zellij-send--FOO` (defvar-local) | バッファローカル状態 |
-
-### defcustom の流儀
-
-```elisp
-(defcustom zellij-send-FOO default-value
-  "日本語の説明。"
-  :type 'string   ; または 'number 'boolean など
-  :group 'zellij-send)
-```
-
-### バッファローカル変数
-
-`defvar-local` で宣言し、`setq-local` で設定する:
-```elisp
-(defvar-local zellij-send--session nil "...")
-;; 設定時:
-(setq-local zellij-send--session session)
-```
-
-### インタラクティブ関数のガード
-
-バッファ外から呼ばれた場合は `user-error` で即終了:
-```elisp
-(defun zellij-send-FOO ()
-  "説明。"
-  (interactive)
-  (unless zellij-send--session
-    (user-error "zellij-send バッファ外では使えません"))
-  ...)
-```
-
-### エラーメッセージ・メッセージ
-
-日本語で書く。`user-error` はユーザー操作ミス、`error` はプログラムエラー。
-
-### セクション構成
-
-`zellij-send.el` は `;;;` 見出しで区切る。現在の並びは
-`grep "^;;; " zellij-send.el` で確認し、**新しい関数は既存の見出しの下に置く**
-（末尾に足さない）。
-
-## AskUserQuestion への回答（調査済み・再調査不要）
-
-2026-07-29 に Claude Code v2.1.220 + zellij 0.44.3（320 桁の背景セッション）で
-実測した画面仕様。**同じ調査を繰り返さないこと。**
-
-```
-←  ☐ 好きな色  ☒ 好きな果物  ✔ Submit  →   ← 質問タブ（☒ = 回答済み）
-
-好きな果物はどれですか（複数選択可）？      ← 質問文
-
-❯ 1. [ ] りんご                            ← ❯ = カーソル、[ ] = 複数選択
-  定番。シャキシャキした食感。              ← 説明（折り返すことがある）
-  2. [✔] みかん
-  5. [ ] Type something                    ← 自由入力
-     Submit
-────────────────────────────
-  6. Chat about this
-
-Enter to select · Tab/Arrow keys to navigate · Esc to cancel
-```
-
-- **数字キーが直接効く**。単一選択なら数字 1 つで即確定して次の質問へ自動で進み、
-  複数選択なら数字がその選択肢のトグルになる（**カーソルは動かない**）。
-  したがってカーソル移動量を数える必要が無い（折り返しで必ずずれる）。
-  折り返しに強いので、**移動量を数える実装に書き換えないこと**
-- ←/→ が質問タブの移動。Tab は前進のみでラップしない
-- 複数選択の質問からは → で「Review your answers」へ直行できる
-- **自由入力（Type something）にカーソルがある間は ←/→ が入力欄内のカーソル移動になり、
-  タブ移動にならない**。この状態から確定するには ↓（直下は必ず `Submit` 行）→ Enter。
-  ここを → で済ませようとして無限ループを踏んだ（数字キーが入力欄に打ち込まれ、
-  ラベルが `自由入力テスト4444…` に育った）
-- 本文は `paste` で入れる。単一選択ならそのまま Enter で確定、複数選択では Enter 不要
-- 最終確認は `❯ 1. Submit answers / 2. Cancel`。数字で選べる。
-  **この画面にはヒント行（`Enter to select · …`）が出ない**ので、ヒント行だけを
-  検出条件にすると確認画面で止まる（実機の通し確認で踏んだ）
-- 質問が 1 つだけの単一選択にはタブ行も確認画面も無く、選んだ時点で確定する。
-  ヒント行の文言も `Enter to select · ↑/↓ to navigate · Esc to cancel` に変わるので、
-  `Tab/Arrow` を検出条件にしてはいけない
-
-### 実装（`zellij-send-answer-question` / `C-c C-q` / メニュー `u`）
-
-`zellij-send--askq-parse` が黒板バッファの内容（subscribe で 26〜40 ms 遅れの生画面）を
-そのまま読んで質問・選択肢・チェック状態を取り出し、ミニバッファで選ばせて数字キーを送る。
-`zellij` を追加で呼ばない（画面は既に手元にある）。
-
-- **自動起動は `run-at-time 0` 経由**（`zellij-send--askq-maybe-auto` →
-  `--askq-auto-open`）。`zellij-send--update-buffer` は subscribe のプロセスフィルタから
-  呼ばれるので、そこで直接 `completing-read` を開くと C-g が効かない
-- カーソル合わせ（`--askq-focus`、自由入力のときだけ必要）は 1 つずつ動かして
-  毎回画面で確認する。移動量の一括計算は折り返しでずれる
-- 歯止めは 2 段階: 同じ署名の画面が 3 回続いたら中止、加えて
-  `zellij-send-askq-max-rounds`（既定 12）を超えたら無条件で中止。
-  画面が毎回変わりながら空回りする不具合が実在したので、署名だけでは足りない
-
-#### 自動起動の既定はキー透過モード（2026-08-12）
-
-`zellij-send-askq-auto` は 3 値（`keys` / `minibuffer` / nil、既定 `keys`）。
-**t は `minibuffer` に読み替える**（`zellij-send--askq-auto-method` が正規化する）。
-ミニバッファ版は選択肢のラベルしか出せず、説明や事例が要る質問に答えられないため
-既定を替えた。キー透過モードなら黒板の生画面をそのまま読みながら数字キーで答えられる。
-
-- 入る/抜けるのは `--askq-keys-enter` / `--askq-keys-exit`。自動で入ったことは
-  `zellij-send--askq-keys-auto`（バッファローカル）で覚え、**質問が画面から消えたときに
-  自動で抜けるのはこの場合だけ**。ユーザーが `C-c C-t` で入れたモードは切らない。
-  手で抜けたらこのフラグも落とす（`zellij-send-keys-mode` の無効化側）
-- **ウィンドウは `display-buffer` するだけで選択しない**。選択待ちのたびに
-  フォーカスを奪わないため。キーを届けるにはユーザーが自分でそのウィンドウへ移る
-- キー透過モード中はバッファが read-only になるが、`--update-buffer` は
-  `with-silent-modifications`（= `inhibit-read-only`）で書くので**画面更新は止まらない**
-- `zellij-send-keys-mode` はファイルの後方で定義されるので、askq セクションの
-  頭に `(defvar zellij-send-keys-mode)` の前方宣言を置いてある（バイトコンパイル警告対策）
-
-## スラッシュコマンド（調査済み・再調査不要）
-
-2026-07-29 に Claude Code v2.1.220 + zellij 0.44.3（320 桁の背景セッション）で
-実測した補完メニューの仕様。**同じ調査を繰り返さないこと。**
-
-```
-  /doctor       Health-check the user's Claude Code setup and fix issues: diagnose …
-                MCP servers, and plugins versus their context cost and disable …   ← 折り返し
-  /ndl          国立国会図書館(NDL)のデジタルコレクション…  (user)
-─────────────────────────────────────────────────────────── ↯ ─   ← 入力枠の上罫線
-❯ /
-───────────────────────────────────────────────────────────
-```
-
-- 一覧はペインの補完メニューからしか取れない。**CLI には出す口が無い**
-  （`claude --help` のサブコマンドにも無い。確認済み）
-- **メニューは 4 行しか出ない**。説明が折り返すと 1 画面 2 件。実測 102 件を
-  得るには ↓ を送りながら読み続けるしかない（`zellij-send--slash-collect`、約 8 秒）。
-  取得結果は `zellij-send--slash-cache`（バッファローカル）に覚え、`C-u` で取り直す
-- ↓ はカーソルを 1 件動かす。**カーソルが最下段に着いて初めて窓が 1 件ずつ動く**。
-  送る回数は毎回「見えている件数 - 1」にする（1 件重なりが残る）。
-  折り返しで 1 画面の件数が変わるので、**一定量を飛ばす実装にしてはいけない**
-- 一覧は末尾から先頭へ折り返す。**折り返しをまたぐ回だけ窓が飛び、末尾が落ちる**
-  （実測で `/verify` が 1 件だけ落ちた）。`zellij-send--slash-tail` が
-  `/` を打ち直して **↑ を 1 回**送り、先頭で折り返した末尾の 1 画面を拾う
-- **画面が前回と同じ間は ↓ を送らない**。描画待ちの画面を基準に送ると位置がずれる
-- `/name ` まで打つと**引数のヒントがゴースト表示**される。
-  `[low|medium|high|…]`（角括弧・選択肢）と `<path>`（山括弧・自由入力）の
-  **両方の形がある**。`/agents` のように引数を取らないものは末尾の空白ごと消えて
-  `/name` のまま。これが「引数が要るか」の唯一の判定材料
-- `/config` は例外で、ヒントではなく設定キーの一覧がメニューに出る。ヒント無しと
-  同じ扱い（引数なしで送る）にしてある。対話画面はキー透過モードで操作する
-- 入力欄は **Ctrl+U（21）で消す。Esc では消えない**（実測。Esc の後に `/` を足すと
-  `/c/` のようになりメニューが出なくなる）
-- **`paste` で送ったテキストは補完メニューを開かない**。`/effort high` を paste して
-  Enter でそのまま実行できるので、送信は既存の `zellij-send--send` でよい
-- 一覧の取得も引数の判定も**ペインの入力欄を実際に打って**行う。だから
-  `zellij-send--slash-idle-p` で入力欄が空（またはプレースホルダ `Try "…"`）で
-  あることを必ず確かめる。ユーザーがターミナル側で書きかけたテキストを
-  Ctrl+U で消さないため。選択肢プロンプトが出ている間は矢印がそちらに効くので、
-  `zellij-send--askq-parse` が非 nil のときも触らない
-- 画面は黒板バッファではなく毎回 `dump-screen` で取る。黒板はユーザーが編集中
-  （`buffer-modified-p`）だと更新が止まるので当てにできない
-- 入力欄は**一番下の `❯ ` 行**。会話ログにも `❯ /effort high` のような行が残るので、
-  最初に見つけた `❯` を入力欄にしてはいけない
-
-### 実装（`zellij-send-slash-command` / `C-c C-s` / メニュー `/`）
-
-```
-zellij-send-slash-command
-  ├─ --slash-collect      入力欄が空か確かめ、`/` を打ってメニューを開く
-  │    └─ --slash-scroll  ↓ を送りながら読む（見えている件数から回数を決める）
-  │         └─ --slash-tail        メニューを開き直し ↑ 1 回で末尾を拾う
-  │              └─ --slash-gather-finish  Ctrl+U で片付けて返す
-  ├─ --slash-choose       completing-read（初期入力 `/`、説明は注釈）
-  ├─ --slash-probe-arg    入力欄が空か確かめ、`/name ` を打つ
-  │    └─ --slash-probe-read  ヒントか候補メニューかを見分ける
-  │         └─ --slash-scroll     メニューなら全件集める（同じ関数）
-  └─ --slash-run          引数を尋ね、候補なら次の段を聞き直して送る
-```
-
-**メニューを集める経路はコマンド一覧と引数の候補で共有する**。出る場所も
-スクロールの癖も同じで、違うのは「打つ文字列」と「行の形」だけなので、
-その差は SPEC の plist（`--slash-command-spec` / `--slash-arg-spec`）に
-閉じ込めてある。`--slash-scroll` / `--slash-tail` / `--slash-gather-finish` は
-SPEC を受け取るだけで中身は 1 つ。
-
-- 純関数は `--slash-input-text` / `--slash-idle-p` / `--slash-menu-entries` /
-  `--slash-arg-entries` / `--slash-arg-hint` / `--slash-hint-values` /
-  `--slash-hint-kind` / `--slash-arg-append` / `--slash-probe-text`。
-  zellij を呼ばないのでテストがある（`test/` の
-  `zellij-send-test-slash-*`）。画面を読む規則を変えるときはここを直す
-- **ミニバッファは必ず `run-at-time 0` を挟んでから開く**（`--slash-choose` /
-  `--slash-run` の呼び出し）。sentinel の中で `completing-read` を開くと
-  C-g が効かない。AskUserQuestion と同じ約束
-- 歯止めは `zellij-send-slash-max-rounds`（既定 200。引数の候補は
-  `zellij-send-slash-arg-max-rounds`、既定 40）と「3 回続けて進まなければ
-  終了」の 2 段階。待ち時間は `zellij-send-slash-settle-delay`（既定 0.25 秒）
-
-### 引数の補完（調査済み・再調査不要）
-
-2026-09-06 に Claude Code v2.1.263 + zellij 0.45.1 で実測。
-`/name ` まで打ったときにペインが返すものは **2 通りしかない**。
-
-```
-❯ /effort  [low|medium|high|xhigh|max|ultracode|auto]   ← (1) ゴーストのヒント
-❯ /add-dir  <path>
-
-  autoScroll=                true | false               ← (2) 候補メニュー（/config）
-  enable          Enable an installed plugin            ←     （/plugin）
-  cost-optimize                                         ←     （/claude-api。説明なし）
-  Documents/     directory                              ←     （/add-dir ~/Doc）
- ↯ ─
-❯ /config
-```
-
-- **出るのはどちらか片方**。ヒントが出るコマンドにメニューは出ない
-- **ヒントは引数が空のときだけ出る**（`/name ` の空白が 1 つだけの状態）。
-  `/plugin enable ` のような深い段では出ないので読みに行かない
-- 候補メニューは**コマンド一覧と同じ場所・同じ操作感**。行の形だけが違う
-  （先頭に `/` が付かない）。スクロールの癖（カーソルが最下段に着いてから
-  窓が 1 件ずつ動く・末尾で先頭へ折り返す）も同じ
-- **候補は入れ子になる**。`/plugin ` → `enable` → `/plugin enable ` →
-  プラグイン名。`/config ` → `autoScroll=` → `/config autoScroll=` →
-  `autoScroll=true`。1 段で終わりにせず、選ぶたびに聞き直すこと
-- **候補はトークン全体で返る**（`autoScroll=` の次は `autoScroll=true`）。
-  足すのではなく置き換える。**置き換えるかどうかを画面から推測してはいけない**
-  ——プラグイン名が偶然そのトークンで始まることがある。打った側が
-  「末尾は書きかけか（OPEN）」を覚えて `--slash-arg-append` に渡す
-- **メニューは一度に 12 件で頭打ち**（`/config` も `/plugin install` も 12 件で
-  先頭へ折り返した。数百あるプラグインも 12 件しか出ない）。絞り込みは
-  **打った文字**でしかできないので、候補に無い値を打ったら「絞り込みの
-  打ちかけ」として扱い、空白を足さずにもう一度聞く（`install` → `air` →
-  `airwallex-…`）
-- **`<path>` はペインに聞かない**。ディレクトリ候補は途中まで打たないと
-  出てこないので、Emacs 側の `read-directory-name` の方が速い
-- **打つ前に必ず入力欄が空か確かめる**（`--slash-idle-p`）。書きかけのテキストの
-  後ろに打ち足すと、相手の入力を壊したうえに画面も読み違える（実機で踏んだ）
-
-### 先読みとキャッシュ
-
-- キャッシュは**作業ディレクトリごと**（`zellij-send--slash-cache-table`、
-  キーは `file-truename` した `default-directory`）。一覧の中身を決めるのは
-  プロジェクトのコマンドとスキルなので、同じディレクトリなら結果は同じ。
-  2 つ目以降のセッションは取得ゼロで開ける（実測で確認）
-- `zellij-send--subscribe-start`（＝ペインに繋がった時点）から
-  `zellij-send--slash-prefetch-maybe` を呼び、`zellij-send-slash-prefetch-delay`
-  （既定 5 秒）後に黙って取りに行く。取れなければ
-  `zellij-send-slash-prefetch-retries`（既定 4）回まで置き直して再試行する
-  ——起動直後は信頼確認などで入力欄が空でないことがあるため
-- 先読み中は `zellij-send--slash-prefetching`（バッファローカル）が真になり、
-  `zellij-send--slash-msg` が進捗・失敗メッセージを黙らせる。**動的束縛は使えない**
-  （コールバックが sentinel / タイマーをまたぐので `let` が生き残らない）
-- **取得中に入力欄が `/` 以外になったら即中止する**（`--slash-scroll` の先頭の分岐）。
-  ユーザーがターミナル側で打ち始めた合図なので、Ctrl+U で片付けずに手を引く。
-  このとき**部分的な一覧は返さない**（nil を返す）。中途半端な一覧を
-  キャッシュに焼き付けると、以後ずっと欠けたまま出てしまう。
-  実測: 中止後の入力欄は `/ユーザーの入力` になる（先頭の `/` は残るが、
-  相手の入力は消えない）
-
-### 決めたこと（2026-07-29）
-
-- **一覧は画面から拾う**。静的リストを持たない。Claude Code の更新・スキルの
-  増減とずれないことを優先し、代わりに取得コスト（約 8 秒）はキャッシュで吸収する
-- **引数は決まるまで聞き直す**（2026-09-06 に変更）。ヒント型は 1 回で終わり
-  （`a|b|c` なら補完候補、`<path>` はディレクトリ補完、それ以外は自由入力）、
-  メニュー型は選ぶたびに次の段を聞く。歯止めは
-  `zellij-send--slash-arg-max-depth`（5 段）。ヒントも候補も無ければ聞かずに送る
-- **引数の候補は完全な一覧だけキャッシュする**（`--slash-arg-cache-table`。
-  キーは ディレクトリ＋コマンド＋ここまでの引数＋書きかけか）。打ち切った
-  一覧は入れない。`C-u` でコマンド一覧と一緒に捨てる
-- **対話画面が出るコマンドは送るところまで**。自動でキー透過モードに入ったりしない
-  （`/clear` のように対話画面が出ないコマンドでも read-only になってしまうため）
-- **一覧は先読みする**（黒板バッファがペインに繋がった数秒後に一度）。
-  初回の 8 秒を体感させないため。ペインにキーを送るのが嫌なら
-  `zellij-send-slash-prefetch` を nil にする
-- **`/compact`（`c`）と `/clear`（`C`）のメニュー項目は外した**。`/` で全部送れる
-  ようになったので二重に置かない。`zellij-send-compact` /
-  `zellij-send-cc-clear` は M-x 用に残す（前者はダッシュボードの `c` が呼ぶ。
-  依存は dashboard → 本体の一方向なので消してはいけない）
-
-## 複数の CLI に対応する（claude / codex / …）
-
-**エージェント 1 体 = zellij セッション 1 つ**なので、動いているコマンドも
-セッション（＝黒板バッファ）ごとに違う。`zellij-send-default-command` は
-**新規作成時の既定値でしかない**。機能の分岐には必ずバッファローカルの
-`zellij-send--command` を使うこと。
-
-```
-zellij-send--command        ← このバッファのペインで動いているコマンド（生の文字列）
-  └─ --command-name         ← エージェント名を取り出す（純関数・テストあり）
-       └─ --buffer-command  ← 空なら --default-command で代用
-            └─ --claude-p   ← Claude Code 専用機能はこれで囲う
-```
-
-- **`--command-name` は先頭トークンを見るが、それが
-  `zellij-send-interpreters` のときだけ残りを探す**。codex は
-  `node /opt/homebrew/bin/codex` として COMMAND 列に出る（実測）ので
-  インタプリタ対応は要るが、**全トークンを無条件に見ると
-  `cat /tmp/claude` も claude と判定する**（astra のレビューで指摘）。
-  この判定は先読みの許可条件に使うので、誤って claude と読む方が危険
-- **既存セッションのコマンドは `list-panes --all` の COMMAND 列から復元する**。
-  `list-panes`（`--all` 無し）の **TITLE は当てにならない**——ターミナルから
-  作ったセッションではペインのタイトルがセッション名になっていることがある
-  （実測: codex のペインのタイトルが `zellij-send`）
-- 列の読み方は `zellij-send--pane-field`（ヘッダ行から列位置を求める）に
-  一本化してある。`--parse-pane-exited` と `--parse-pane-command` の共通基盤。
-  TITLE・COMMAND・CWD に空白が入るので**位置の決め打ちは禁止**
-- **コマンドは subscribe を張る前に確定させる**。`--subscribe-start` が
-  スラッシュコマンドの先読みを呼ぶので、`zellij-send--command` が空のままだと
-  claude 以外のペインに `/` を打ち込んでしまう。経路は 3 つあり
-  （`zellij-send-attach-session-async` / `--spawn-session` /
-  `--subscribe-ensure` の pane-id 不明時）、**どれもこの順序を守ること**
-- **判定は 2 つある。読むだけか、打ち込むかで使い分ける**
-  - `--claude-p`（`--buffer-command` 経由）はコマンド不明時に
-    `zellij-send-default-command` で代用する。transcript 表示・出力ログ・
-    ヘッダ表示など、外しても実害の無い**読むだけ**の機能に使う
-  - `--claude-confirmed-p`（`--agent-name` 経由）は代用しない。
-    **ペインに打ち込む機能はすべてこちら**——スラッシュコマンドの補完と
-    先読み、AskUserQuestion の操作と自動起動、数字での回答、
-    Remote Control、`/compact` `/clear`。代用すると「不明 = claude」で
-    codex の入力欄に打ち込む
-- **pane-id を替えるときはコマンドを nil でも代入する**。`(when command …)`
-  にすると検出に失敗したときに前のペインのコマンドが残り、別の CLI を
-  claude だと思い込む（astra のレビューで指摘）
-- **ペインは TITLE ではなく COMMAND 列で選ぶ**（`--parse-terminal-panes` →
-  `--pick-pane`）。`list-panes --all` を 1 回だけ叩いて pane-id と
-  コマンドを同時に決める。生きているペインを優先し、全部 EXITED なら
-  同じ順で終了済みから選ぶ（最後の画面を読めるように）
-
-### どの機能がどこまで効くか
-
-| | claude | codex / その他 |
-|---|---|---|
-| 送信（paste + write 13）・履歴・返信バッファ | ○ | ○ |
-| subscribe による画面表示・ダッシュボード | ○ | ○ |
-| **キー透過モード（`C-c C-t`）** | ○ | ○ |
-| 中断（Esc）・セッション終了 | ○ | ○ |
-| 選択肢の検出・ハイライト（`❯` `›` `>`） | ○ | ○ |
-| transcript 表示（`a`）・出力ログ（`l`） | ○ | — |
-| スラッシュコマンド補完（`/`）・先読み | ○ | — |
-| AskUserQuestion の解析（`u`・自動起動） | ○ | — |
-| 数字での回答（`n` / ダッシュボードの `1` `2` `3`） | ○ | agy ○ / codex × |
-| Remote Control の QR（ダッシュボードの `r`） | ○ | — |
-| 使用状況バー（`/usage` 相当） | ○ | — |
-| `/compact` `/clear`（`zellij-send-slash-support-alist`） | ○ | codex ○ / agy は `/clear` のみ |
-
-**画面を解釈しない機能はどのコマンドでも動く**。選択肢・権限ダイアログ・
-設定画面は、claude 以外ではキー透過モードで操作する（あれは画面を読まないので
-どの TUI にも効く）。claude 専用機能は `user-error` でその旨を伝えて止まる。
-
-claude 専用にしてあるのは上の表の 3 つに加えて、Remote Control の QR
-（`/remote-control` を打ち込む）と出力ログ（`l`。Stop フックが書くのは
-claude のログ）。**「claude 専用」ではなく対応表で持つもの**が 2 つある:
-
-- `zellij-send-number-reply-commands`（既定 `("claude" "agy")`）——
-  数字での回答。codex は数字キーを受け付けないので入れない
-- `zellij-send-slash-support-alist`——`/compact` は claude と codex、
-  `/clear` は 3 つとも
-
-**未確認の CLI をこれらの一覧に足さないこと。** 送り方は本文と同じ
-`paste` + CR なので、受け手が選択として扱わなければ別の操作になる。
-
-### agy（Antigravity CLI）の実測（2026-09-07 / agy 1.1.27 + zellij 0.45.1）
-
-**同じ調査を繰り返さないこと。** 実行ファイル名は `agy`（`antigravity` ではない）。
-`~/.local/bin/agy` は 169 MB のネイティブバイナリなので、COMMAND 列には
-インタプリタを介さず `agy` とだけ出る。
-
-- **新規作成フローがそのまま通る**。`--spawn-session` で
-  attach --create-background → 320×80 に拡幅 → `zellij run` →
-  pane-id 取得（`terminal_1`）→ `--command` に `agy` を保存、まで確認
-- **許可ダイアログは `> 1. Yes` の形**（記号が ASCII の `>`）。
-  行の形は claude / codex と同じ。ただし **ASCII の `>` は
-  `zellij-send-prompt-marker-alist` で agy のバッファにだけ効かせる**
-  （全 CLI で有効にすると本文中の markdown 引用 `> 1. …` を誤検出し、
-  ダッシュボードの数字キーが「選択のつもりの入力」を送ってしまう。
-  astra のレビューで指摘）。agy 内での誤検出は残る、という限界つき。
-  また**信頼確認の画面だけは番号が無い**（`> Yes, I trust this folder` /
-  `No, exit`）ので検出できない。そこはキー透過モードで操作する
-- **数字キーが直接効き、`paste` + CR の数字でも確定する**（両方実測）。
-  だから `zellij-send-number-reply-commands` に入れてある
-- **Esc 1 回で中断できる**（許可ダイアログごとターンが取り消され、
-  入力欄に戻った）
-- **Ctrl+U で入力欄が 1 回で空になる**（codex は 1 行ずつしか消えない）
-- **処理中の表示は `esc to cancel`**。claude と codex の
-  `esc to interrupt` と違うので、`zellij-send-dashboard-working-regexp`
-  の既定を `esc to \(?:interrupt\|cancel\)` にしてある
-- **`/compact` は無い**。補完メニューで `/comp` と打つと `No matches`。
-  **本人は「ある」と答えたが実機は否定した**（自己申告を信用しないこと）。
-  `/clear`（Clear conversation and start a new one）はある。近いのは
-  `/context`（Visualize current context usage）だが別物
-- 補完メニューは **5 件 + `↓ 41 more`** の形で残り件数を自分で出す
-  （claude の 4 行固定より読みやすい）。全 46 件。ヒント行は
-  `↑/↓ Navigate · enter Select · tab Complete`
-- **プロジェクトごとの指示ファイルは `GEMINI.md`**。**実機で確認済み**:
-  合言葉を書いた `GEMINI.md` を置いた使い捨てディレクトリで agy を起動し、
-  「規約ファイルを読んだか」と聞いてその合言葉が返ることを確認した。
-  `AGENTS.md` と `.gemini/rules/*.md` も読むというのは本人の申告のみ。
-  **agy の自己申告は当てにならない**（`/compact` の件）ので、
-  対応表に足すときは必ず実機で確かめること
-- 入力欄の記号は `>` 単独。ダッシュボードの「状況」列から外すため
-  ノイズ条件の記号にも `>` を足してある
-
-### codex の実測（2026-09-07 / codex CLI + zellij 0.45.1）
-
-**同じ調査を繰り返さないこと。**
-
-- **選択 UI の行の形は claude と同じ**。記号だけが違う
-  （claude `❯ 1. …` / codex `› 1. …`）。信頼確認ダイアログ
-  （`Do you trust the contents of this directory?`）でも同じ形だった。
-  `zellij-send-prompt-marker-regexp`（`[❯›>]`）で拾える
-- **ただし codex は数字キーを選択として受け付けない**。信頼確認の画面に
-  `write -- 49`（`1`）を送っても何も起きず `Press enter to continue` の
-  ままで、Enter で確定した。**claude の AskUserQuestion は数字が直接効く**
-  ので、ここが最大の差。だから `zellij-send-reply-number` と
-  ダッシュボードの数字キーは claude 限定にしてある
-  （`--assert-number-reply`）。他の CLI はキー透過モードの ↑↓ + RET
-- **`paste` + `write 13` で送信は確定する**（実測: 1565 字の 1 行が
-  1 メッセージとして届き、返答があった）
-- **複数行の日本語も 1 つの入力として入る**。行ごとに実行されない
-  （bracketed paste が効いている）。`--` を置いてあるので
-  `3行目 -- ハイフン始まりの行` もそのまま通った
-- **長文は `[Pasted Content N chars]` に畳まれる**（claude の
-  `[Pasted text #1 +59 lines]` と同じ症状）。実測: 2399 字（80 行）と
-  1565 字（1 行）は畳まれ、1000 字（1 行）と 59 字（30 行）は畳まれなかった。
-  **黒板バッファには本文ではなくプレースホルダが映る**
-- **Ctrl+U は 1 行ずつしか消さない**（claude は入力欄ごと消える）。
-  codex の入力欄を片付ける実装を書くならここに注意。いまは
-  スラッシュコマンドの経路が claude 限定なので影響しない
-- **処理中の表示は `• Working (2s • esc to interrupt)`** で、
-  `zellij-send-dashboard-working-regexp` の既定 `esc to interrupt` が
-  そのまま一致する。ただし入力欄のプレースホルダは
-  `› Ask Codex to do anything` なので、ダッシュボードの「状況」列から
-  外すノイズ条件に**その行だけを狭く**足してある（`›` で始まる行を
-  全部捨てると `› 1. …` の選択肢まで消える）
-
-### 新規セッションのコマンド選択
-
-- `[New]`: ディレクトリの後にコマンドを聞く（`--prompt-command`。既定は
-  `zellij-send-default-command` なので RET で従来どおり）
-- `zellij-send-add-agent`（メニュー `+`）: **いまのバッファと同じコマンドを
-  引き継ぐ**。`C-u` を付けたときだけ聞く
-- **ミニバッファは sentinel に入る前に済ませる**。`add-agent` は
-  `list-sessions` の前にコマンドを確定させてある（sentinel 内の
-  `completing-read` は C-g が効かない。この約束はファイル全体で共通）
-
-## キー透過モード（`zellij-send-keys-mode` / `C-c C-t`）
-
-黒板バッファは既にペインの生画面を映しているので、足りないのは打つ側だけ、という発想。
-有効な間、↑↓←→ / RET / TAB / ESC / DEL / 印字文字を
-`zellij-send--send-keys` でペインへ流す（印字文字は `self-insert-command` の remap で拾い、
-UTF-8 バイト列に分解して送る）。画面を解釈しないので、AskUserQuestion に限らず
-権限ダイアログや `/model` の選択にも効く。
-
-有効中はバッファを read-only にする。誤って編集すると `buffer-modified-p` が真になり、
-自動更新が止まって画面が固まったように見えるため。
-
-## ダッシュボード（zellij-send-dashboard.el）
-
-`M-x zellij-send-dashboard` / メニュー `d`。全セッションを tabulated-list で一覧する。
-**依存は一方向**: dashboard → 本体。本体から `zellij-send-dashboard` を require せず、
-メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
-遅延ロードする。本体からダッシュボードのシンボルを参照しないこと。
-
-状態判定・キー・Remote Control の QR・使用状況（`/usage` 相当）の実測仕様は
-`.claude/skills/zellij-send-dashboard/SKILL.md` に分けてある（触るときに読み込まれる）。
-
-## バッファの設計思想
-
-`*ai-SESSION*` バッファは「黒板」として使う:
-- 固定ヘッダなし（バッファ全体がコンテンツ）
-- セッション情報は `header-line-format` に表示
-- ユーザーが編集中（`buffer-modified-p` = t）は自動更新で上書きしない
-- `zellij-send--user-cleared` フラグ: ユーザーが意図してクリアした場合に Stop フック・自動更新の上書きを防ぐ
-- 更新時は point と `window-start` を復元する（`zellij-send--update-buffer`）。毎回 `point-min` に飛ばすと更新のたびに読んでいる位置が失われる
-- **ただし末尾にいたら末尾を追う**（2026-10-05）。送信成功で黒板を空にすると point が 1 になり、
-  位置を保つだけだと以後ずっと先頭に留まって、回答が出る下端が見えなかった。更新前に窓の point が
-  末尾なら、更新後も末尾に置いて最下段を窓の下端に合わせる。上へ動かせば追わなくなり、`M->` で戻れば再び追う。
-  基準は**バッファの point ではなく窓の point**（選択されていない窓では両者が別物になる）
-- **下端合わせは `with-selected-window` + `(recenter -1)` で行う。行数で数えてはいけない**
-  （2026-10-06、GUI の `emacs -Q` + Mplus 1 code-14 + 実画面 498 行で実測）。
-  日本語や記号の行は既定の行より背が高く、`vertical-motion` で窓の高さ（36 行）ぶん戻ると
-  ピクセルでは 35 行しか収まらない。point が見切れるので再描画が窓の中央へ寄せ直し、
-  最終行が上から 325px・下に 270px の空白という表示になっていた（毎回）。`recenter` は
-  ピクセルで数えるので合う。ただし**その記号が初めて出た 1 回だけ**は字体が未読み込みで
-  背の高さが分からず中央に寄る。次の受信で直る（窓の point は末尾のままなので追い続ける）
-- **選択中（region が有効で、黒板が選択ウィンドウに出ている間）は書き換えない**。
-  `erase-buffer` はマーク（marker）を point-min に潰すので、C-SPC で置いたマークが
-  受信のたびに先頭へ飛ぶ（2026-09-14 に `emacs -Q -nw` の実機再現で確認）。最新の
-  1 つだけ `zellij-send--pending-content` に保留し、選択が解けたら反映する。
-  - 判定は `region-active-p`。**`mark-active` 単独で見てはいけない**
-    （`transient-mark-mode` 無効だと真のまま残り、更新が永久に止まる）
-  - 解除の合図は `deactivate-mark-hook` / `post-command-hook` /
-    `window-selection-change-functions`（どれもバッファローカル、`--mode-setup` で登録）。
-    **`deactivate-mark-hook` を外さないこと**: コマンドループが mark を解除するのは
-    `post-command-hook` より後なので、それだけだと C-g の後も次のコマンドまで反映されない
-  - 反映は `run-at-time 0` で抜けてから（`deactivate-mark` はコマンドの途中からも呼ばれる）
-  - 保留中に編集・クリアされたら反映せず捨てる。送信成功・クリア・transcript 表示・
-    `show-live` も `--pending-drop` で捨てる（捨てないと選択を解いた瞬間に古い画面が復活する）
-  - subscribe の「画面と同じなら書かない」分岐は、保留があるときは素通しする
-    （A → 保留 B → A と戻ったときに B を残さないため）
-  - 保留しない通常の更新でも、マークの位置は point と同じく数値で戻す
-- **モードライン通知は持たない**（2026-07-27 撤去）。`global-mode-string` への `:eval` 登録は再描画のたびに全バッファを走査するうえ、状態表示は別途 `zellij-send-dashboard.el` で扱う。作業中/完了の検知（`zellij-send-ready-regexp` / `--is-ready` / `--notifying` / `--was-busy`）も併せて削除済み
-- 数字キー（`1`/`2`/`3`）の即送信も撤去。プロンプト表示後にバッファへ本文を書くと数字が誤送信されるため。選択肢の送信は `C-c C-a` → `n`（`zellij-send-reply-number`）。プロンプト行のハイライトは維持
-
-## 黒板の桁揃え（調査済み・再調査不要）
-
-2026-09-15 に Emacs 32.0.50（GUI、`set-language-environment 'Japanese`、
-既定フォント `Mplus 1 code-14`）で実測。**同じ調査を繰り返さないこと。**
-`zellij-send-grid-align`（既定 t）で切り替える。
-
-表示がずれていた原因は 2 つ:
-
-- **曖昧幅の文字（`─` `←` `●` `█` `…` など）を Emacs は 2 桁で数える**。zellij は 1 桁。
-  日本語環境は `char-width-table` の上に「JIS X 0208 を 2 にする表」と
-  「曖昧幅を 2 にする表」を親子で積む（`use-cjk-char-width-table`）。
-  **一番下の親が Unicode 本来の幅**で zellij と一致するので、黒板でだけそれを
-  `setq-local` する（`--root-char-width-table`）
-- **GUI の描画幅は `char-width-table` では変わらない**。字形の幅で決まる。
-  既定フォントに無い記号は代わりのフォントで描かれ、`─` が Hiragino Sans の 14px、
-  `❯` が JetBrainsMono の 8px、`✻` が 10px、`⎿` が 14px とばらばらだった（ASCII は 7px）
-- ほかに、320 桁の画面が窓の幅で**折り返されていた**（`truncate-lines` が nil）
-
-GUI の字形の直し方で分かったこと:
-
-- **フォントセットはバッファごとに持てない**。`face-remap-add-relative` の `:fontset` も効かなかった
-- **`buffer-display-table` の字形にフェイスを付ける方法はバッファ単位で効く**。
-  文字側のフェイス（太字・選択肢ハイライトの overlay）に重ねても幅は崩れない。
-  フェイスは名前しか付けられないので、(字体 . 倍率) ごとに作る（`--grid-face`）
-- 日本語等幅フォント（PlemolJP35 / HackGen35）は ASCII も 8px なので、等倍では揃わない。
-  **字体を縮めて 1 桁の px に合わせる**（`--grid-pick-face`、倍率 1.0〜0.65）。
-  実測では Menlo 0.875 で罫線・矢印の大半、STIX Two Math で `⏺`（0.8）と
-  `⎿`（1.0）、`※` は STIX Two Math 0.7 で揃った
-- `:family` が無視されて代わりのフォントのまま縮むことがある（`❯` は Menlo を
-  指定しても JetBrainsMono で描かれた）。**px が合えばよい**ので、字体名ではなく
-  測った幅で判定する
-- **先に全範囲（約 1000 文字）を測ってはいけない**。字体の読み込みで初回 0.64 秒
-  固まり、subscribe のプロセスフィルタの中で起きる。画面に出た記号だけを測って
-  共有の display-table に足していく（`--grid-fit-symbols`）。それでも**初回だけ
-  約 0.4 秒**かかる（`emacs -Q` の起動直後。字体の読み込み）。2 回目以降は 0.05 ms
-- 検証は**別の GUI Emacs を `-Q` で起動して**行う（普段の Emacs に読み込まない）。
-  このとき既定フォントは `:font "Mplus 1 code-14"` で指定すること。
-  `:family` + `:height` だと `-Q` では効かず Helvetica（プロポーショナル）になり、
-  ずれを誤検出する（実際に踏んだ）
-
-折り返しの切り替え:
-
-- **既定は折り返す**（`zellij-send-wrap-screen`、既定 t。2026-09-15 に変更）。
-  表が出るより文章を読む方が多いため。表を見るときだけ `zellij-send-toggle-wrap`
-  （メニュー `w`）で切る。切り替えはバッファローカルの `zellij-send--wrap` に
-  持つので、受信（`--update-buffer`）しても戻らない
-- 折り返しを切った黒板では、画面を映している間（`--update-buffer`）だけ
-  `truncate-lines` を t にする。この切り替えは `zellij-send-grid-align` とは独立
-- **書き始めたら nil に戻す**（`first-change-hook`）。黒板は入力欄も兼ねるので、
-  長い下書きが右に隠れないようにする。`--update-buffer` は
-  `with-silent-modifications` で書くのでこのフックを通らない
-- transcript を表示したら nil（文章なので折り返す）
-
-## 自動受信（zellij subscribe）
-
-セッションごとに `zellij subscribe` の常駐プロセスを 1 本持つ。**2 秒ポーリングは廃止**
-（`zellij-send-poll-interval` / `--poll` / `--start-polling` / `--stop-polling` を削除）。
-
-```sh
-zellij --session NAME subscribe --pane-id terminal_N --format json
-```
-
-イベントは NDJSON（1 行 1 オブジェクト）:
-
-```json
-{"event":"pane_update","is_initial":true,"pane_id":"terminal_1","scrollback":null,"viewport":["行1","行2"]}
-```
-
-### 実測で分かった注意点（2026-07-28 / zellij 0.44.3）
-
-- **`--pane-id` は必須**。pane-id 不明なら `--detect-pane-async` で先に特定してから張る
-  （`zellij-send--subscribe-ensure` がこれをやる）
-- **`viewport` は差分ではなく毎回フル**の行配列。`string-join` して既存の
-  `zellij-send--update-buffer` にそのまま渡せる。**再接続時に `dump-screen` で
-  取り直す必要はない**（初回配信がフルなので勝手に整合する）
-- **`viewport` の各行はペイン幅ぶんスペースで右パディングされている**
-  （`dump-screen` はされない。2026-07-29 実測）。320 桁の背景セッションでは
-  1 行あたり数百文字の空白が付き、実データで **24407 文字 → 2175 文字（91% が空白）**
-  だった。`zellij-send--process-dump` が行末空白と末尾の連続空行を落とすので、
-  **この処理を外さないこと**。ANSI 除去より後に削る（エスケープが残っていると
-  行末を判定できない）
-- **受信した行の行末を `string-trim` / `[ \t]+$` で削らない**。
-  空白の連なりの各位置で後戻りして 2 乗時間になる。生の JSON 行への `string-trim` が
-  1 イベント 70 ms かかり、作業中（スピナーの描画で毎秒 7〜9 イベント）に
-  Emacs が半分以上止まっていた（2026-10-02 実測。「命令を出した後に重い」の原因）。
-  行末は `zellij-send--trim-end`（`[^ \t][ \t]*\'`。照合の開始が非空白文字に限られるので線形時間）で削る。結合前に行ごとに削るのは
-  GC を減らすため（割り当て 1/8）
-- **1 イベント約 8 KB**で複数回に分かれて届く。プロセスフィルタは**行単位の
-  バッファリングが必須**（`zellij-send--subscribe-pending`）
-- **セッションが消えても subscribe は終了しない**。`delete-session --force` の後も
-  17 秒以上生き続けた。**プロセスの死を検知手段にできない**。`kill-buffer-hook` で
-  確実に殺すのが唯一の後始末（`zellij-send--subscribe-stop`）
-- **存在しないセッションを指定すると終了コード 0** のまま何も流れない。終了コードで
-  成否を判定できないので、`zellij-send-subscribe-initial-timeout`（既定 15 秒）以内に
-  初回イベントが来なければ失敗とみなす（存在しない pane-id は exit 2）
-- 意図的に止めるときは **sentinel を `ignore` に差し替えてから** `delete-process` する。
-  そうしないと自前の再接続が走る
-
-### 性能（実測）
-
-| | subscribe | 旧ポーリング |
-|---|---|---|
-| アイドル 20 秒 | イベント 1 件（初回配信のみ） | dump-screen プロセス 10 個 |
-| 定常状態のプロセス数 | セッションあたり 1 本（3 セッションで 3 本を確認） | 2 秒ごとに生成 |
-| 画面変化 → バッファ反映 | **26〜40 ms** | 最大 2000 ms |
-| 応答ストリーミング中 | 2.1 events/sec | — |
-
-### 更新抑止と変化時刻
-
-`buffer-modified-p` が真、または `zellij-send--user-cleared` が真のときはバッファを
-書き換えない。ただし **`zellij-send--last-change-time` は抑止中も更新し続ける**。
-ダッシュボードの「作業中」判定はこれを見るので、編集中の変化を取りこぼさない。
-
-## 自動受信・出力ログ（Stop フック）
-
-Claude Code 停止時に `~/.claude/hooks/stop-zellij-send.sh` が 2 つの処理を行う:
-1. フック stdin の JSON から `transcript_path` と `cwd` を取り、最新の assistant 出力を
-   `CWD/.zellij-send/claude-log.md`（`zellij-send-log-file` と対応）に時刻付きで追記（python3 使用）
-2. `emacsclient` → `zellij-send--on-claude-stop` でバッファを更新。`;;;###autoload` が必須
-
-ログは `C-c C-a` → `l`（`zellij-send-open-log`）で開く。
-
-## 会話履歴の表示（`zellij-send-show-response` / メニュー `a`）
-
-`a` は Claude Code のときだけ **transcript の JSONL を読んで会話を最初から黒板に流す**。
-Claude Code 以外（`zellij-send-default-command` が claude で始まらない）と `C-u a` は
-従来どおり `dump-screen --full`。
-
-- transcript の場所は `~/.claude/projects/SLUG/*.jsonl`。SLUG は cwd の
-  **英数字以外をすべて `-` に置換**したもの（`/Users/mck/.claude` →
-  `-Users-mck--claude`。2026-08-02 に実在ディレクトリ名で確認）
-- transcript は初回に明示選択し、バッファローカルの `zellij-send--transcript-path` に保持する。
-  更新日時による所属の推測は禁止。選択済みファイルが消えたらエラーとし、別ファイルへ
-  自動で切り替えない。`zellij-send-select-transcript` で選び直せる。
-- **選択の候補は `MM-DD HH:MM  サイズ  題名` の行にする**（UUID のパスは出さない）。
-  題名は JSONL の **`ai-title` 行**（`{"type":"ai-title","aiTitle":"…"}`）から取る。
-  2026-09-09 に手元の 86 本で実測: 会話が進むたび追記されるので**末尾側にあり、
-  末尾から最も遠いもので 47 KB**。だから全文は読まず
-  `zellij-send-transcript-peek-bytes`（既定 128 KB）だけ両端を読む
-  （14 本で 26 ms）。`ai-title` が無い履歴（実測 86 本中 4 本。どれも
-  スラッシュコマンドだけのセッション）は最初のユーザー発言で代用し、
-  それも無ければ `(題名なし)`。**`<local-command-caveat>` の行は飛ばす**——
-  中身が毎回同じ英文なので題名にならない
-- 候補は**更新日時の新しい順**。並べるだけで、自動では選ばない。補完 UI に
-  五十音順へ崩されないよう `display-sort-function` を `identity` にした
-  補完表（`--transcript-table`）を渡す。候補行が重なったものにだけ UUID を足す
-- 出すのは `user` / `assistant` 行のみ。ブロックは
-  **text / thinking / tool_use / tool_result を全部出す**。
-  `mode` / `ai-title` / `file-history-snapshot` などの行は会話ではないので捨てる
-- **`tool_result` は role が `user`** だが、ユーザーの発言ではないので見出しは `tool` にする
-- **画像ブロックは base64 を出さず要約に置き換える**（`--transcript-block`）。
-  実測で 89692 文字の 1 行になっていた。`[画像 image/png 66 KB]` の形にする
-- **長い 1 行は切る**（`--transcript-clip`、既定 2000 文字）。行数制限
-  （`--max-block-lines`）では止まらない。`tool_use` の入力は `json-encode` した
-  改行なしの 1 行なので、`Write` 1 回で 6918 文字になった（実測）。
-  **切るのは行数を数える前**（順序を入れ替えると長い 1 行が生き残る）
-- **`zellij-send--update-buffer` を使ってはいけない**。あれはプロンプト検出と
-  AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆する。直接 insert する
-- 表示後は `zellij-send--user-cleared` を立てる。これをしないと
-  **26〜40 ms 後の subscribe イベントに上書きされて消える**
-- 生画面に戻す経路は `zellij-send-show-live`（メニュー `g`）。`--user-cleared` と
-  `buffer-modified-p` の**両方**を落としてから `dump-screen` で取り直す。
-  **解除はコールバックの中ではなく取得を投げる前に行う**——`--user-cleared` が
-  立ったままだと `--update-buffer` が書き込みを拒み、コールバックが空振りする。
-  編集済みのバッファでは下書きを捨てる確認を挟む（クリア `x` や送信でも
-  `--user-cleared` は nil に戻るが、取り直しはしない）
-- 純関数は `--transcript-slug` / `--transcript-entries` / `--transcript-format` /
-  `--transcript-trim` / `--transcript-clip` / `--transcript-block` /
-  `--transcript-ai-title` / `--transcript-first-user` / `--transcript-label` /
-  `--claude-p`（旧 `--transcript-claude-p`。多 CLI 対応で
-  バッファローカルの `zellij-send--command` を見るようになった）。
-  テストが `test/` にある
-
-## スクリーン取得の限界（調査済み・再調査不要）
-
-2026-07-28 に zellij 0.44.3 + Claude Code v2.1.220 で実測した結果。
-**同じ調査を繰り返さないこと。**
-
-### `--full` は Claude Code に効かない
-
-`dump-screen --full` はスクロールバックまで取るオプションだが、
-**alt-screen の TUI には仕様上スクロールバックが無い**ため viewport と同じ内容しか返らない。
-
-対照実験（claude に 1〜40 を 1 行ずつ列挙させ、28 行のペインで比較）:
-
-| 対象 | viewport | `--full` |
-|---|---|---|
-| claude ペイン（alt-screen） | 28 行（22〜40 のみ） | **28 行。同一。1〜21 は取れない** |
-| 通常ペイン（`seq 1 200`） | 27 行 | 200 行（1 から全部） |
-
-`--full` 自体は正常。**流れて消えた会話は画面からは絶対に取れない**ので、
-transcript（Claude Code が書く JSONL）から読む。経路は 2 つ:
-`C-c C-a` → `a`（`zellij-send-show-response`、下記）と `l`（`zellij-send-log-file`、
-Stop フックが追記）。
-`zellij-send-show-response` に `--full` を付けてあるのは、alt-screen でない
-コマンドを `zellij-send-default-command' にした場合のためだけ。
-
-### alt-screen リサイズ由来の表示崩れ（zellij#5311）は再現しない
-
-<https://github.com/zellij-org/zellij/issues/5311> の「リサイズすると dump-screen が
-見えていない行まで返してステータス領域が二重に出る」現象は **0.44.3 では再現しなかった**。
-拡大（320×80）・縮小（100×24）・会話履歴あり・リサイズ 3 往復・`--full` 併用の
-いずれでも、ダンプ行数はペイン行数と一致しステータス行の重複も無し。
-
-## セッションの終了（zellij-send-quit）
-
-**エージェントが終了してもセッションは消えない**（2026-07-28 実測）。`/exit` で claude が
-落ちてもペインは残り、`list-sessions` にセッションが居続ける。したがって
-「セッションが消えるのを待つ」実装は必ずタイムアウトする。
-
-終了の判定には **`zellij action list-panes --all` の `EXITED` 列**を使う:
-
-```
-TAB_ID TAB_POS TAB_NAME PANE_ID TYPE TITLE COMMAND CWD FOCUSED FLOATING EXITED X Y ROWS COLS
-0 0 Tab #1 terminal_1 terminal claude claude - true false true 0 1 48 50
-```
-
-- 列は 2 個以上の空白区切りだが、**TITLE と COMMAND 自体に空白が入る**
-  （例: `caffeinate -i -t 300`）。位置の決め打ちは禁止。`zellij-send--parse-pane-exited`
-  はヘッダ行から `PANE_ID` と `EXITED` の列位置を求め、フィールド数がヘッダと
-  一致しない行は読み飛ばす
-- 判定できないときは `:unknown` を返し、**絶対に t を返さない**。t は
-  「セッションを消してよい」の合図なので、誤検出が最も危険
-- pane-id 不明のセッションでは `list-sessions` の消滅を見る（ターミナル側で
-  閉じられた場合に効く）。`:timeout` を「0 件」と解釈しないこと
-- 終了を検出したら結局 `delete-session --force` で消す（セッションは自然には消えない）。
-  `zellij-send-quit-timeout`（既定 10 秒）を超えたら待つのをやめて同じ強制削除に落ちる
-
-実測: アイドル状態の claude セッションなら **1.3 秒**で検出・削除できる（旧実装は固定 2 秒待ち）。
-
-## 新規セッション作成
-
-セッション名は**ディレクトリ名 + 2 桁の連番**（`myproj00`）。1 体目から番号を付ける。
-同じプロジェクトで複数エージェントを立てるためで、**エージェント 1 体 = zellij セッション 1 つ**。
-バッファ名がセッション名と 1 対 1 のまま（`*ai-myproj01*`）なので、履歴・subscribe・
-`zellij-send-quit`・ダッシュボードはどれも既存の仕組みのまま効く。
-
-- `zellij-send--numbered-session-name` が空いている最小の番号を選ぶ。候補の除外集合は
-  `zellij-send--taken-session-names`（`list-sessions` の結果 **＋ 開いている黒板バッファの
-  `zellij-send--session`**）。作成直後でまだ一覧に出ないセッションと衝突させないため
-- `zellij-send--session-base` は**末尾 2 桁だけ**を剥がす。数字を貪欲に剥がすと
-  `project200`（= `project2` の 1 体目）の基底名が `project` になる
-- 追加は `zellij-send-add-agent`（メニュー `+`）。いまのバッファの `default-directory` と
-  基底名を引き継ぐのでディレクトリを聞かない。`list-sessions` のコールバックは sentinel の
-  中なので、**`run-at-time 0` を挟んでから** `--spawn-session`（`switch-to-buffer` を含む）を呼ぶ
-- 実体の作成は `zellij-send--spawn-session`（セッション名と dir を受け取る）。
-  `zellij-send--create-new-session` はディレクトリを尋ねて名前を決めるだけの薄い層
-- **起動時に Remote Control を付けられる**（`zellij-send-remote-control`、既定 nil）。
-  `zellij-send--launch-command` が claude のときだけ `--remote-control SESSION` を足す。
-  `zellij-send--command` には**付ける前の**コマンドを入れる。付いたまま引き継ぐと
-  `add-agent` で前のセッション名がスマホ側に重複するので、既存の
-  `--remote-control [NAME]` は外してから付け直す。ダッシュボードの `r`（画面を読んで
-  QR を取る）より壊れにくい
-
-`zellij-send--spawn-session` のフロー（すべて非同期）:
-1. `zellij attach --create-background NAME` — detached セッション作成（tty 不要）
-2. `zellij-send--resize-session` — 一瞬 attach して 320×80 に広げる（下記）。
-   **ペインを作る前**に行うこと。後から作るペインが拡幅後のサイズを継承する
-3. 0.5 秒待って `zellij --session NAME run --cwd DIR --name CMD -- CMD` — claude ペインを起動
-4. `zellij run` の STDOUT から pane-id（`terminal_N`）を抽出し、黒板バッファの
-   `zellij-send--pane-id` に保存
-
-### 背景セッションの大きさ（調査済み・再調査不要）
-
-**`COLUMNS` / `LINES` を渡してもセッションの大きさは変わらない**（2026-07-28、
-zellij 0.44.3 で実測）。かつて `zellij-send--process-environment` から
-これを渡していたが、効果が無いことを確認したので削除した。**環境変数の経路を
-復活させないこと**（`zellij-send-session-size` という名前は今も使っているが、
-意味が「拡幅用クライアントの pty サイズ」に変わっている。下記参照）。
-
-`ZELLIJ_SOCKET_DIR` で隔離したまっさらなサーバを立てて検証した結果:
-
-| 条件 | 実測（rows cols） |
-|---|---|
-| 新規サーバ + `COLUMNS=320 LINES=80` | 48 50 |
-| 新規サーバ + `COLUMNS=200 LINES=60` | 48 50 |
-| 新規サーバ + COLUMNS/LINES なし | 48 50 |
-| 稼働中サーバ + `COLUMNS=320 LINES=80` | 47 104 |
-
-サーバ起動時であっても環境変数は見られていない。旧ドキュメントの
-「未指定だと 25 桁 × 24 行」も誤り。実際は **50 桁 × 48 行**で、25 桁に見えたのは
-50 桁を 2 ペインで分割していたため。CLI にも設定ファイルにも背景セッションの
-既定サイズを決める項目は無く、浮動ペインの `--width` もビューポートに丸められる。
-
-### 回避策（実装済み）: 一瞬だけ attach して広げる
-
-唯一効くのが「目的の大きさの pty を持つクライアントで一瞬 attach して detach する」方法。
-サイズは detach 後も残り、後から `zellij run` で足したペインも継承する。
-`zellij-send--resize-session` がこれを行い、`[New]` の新規作成フローが
-**ペインを作る前に**呼ぶ（`zellij-send-session-size`、既定 `(320 . 80)`）。
-既存セッションは `M-x zellij-send-resize-session` で後から広げられる。
-
-**このパッケージは attach クライアント（eat）起因のフリーズが解消できず eat を
-全廃した経緯がある。** 触るときは以下を必ず守ること:
-
-1. **全面非同期**。同期呼び出しを一切挟まない
-2. **出力を捨てるフィルタ（`:filter #'ignore`）を必ず置く**。Emacs が pty を
-   読まないと zellij サーバがクライアントへの書き込みでブロックし、セッション
-   全体が入力不可になる。**旧デッドロックの原因はこれ**
-3. **detach に失敗しても必ず殺す**。`zellij-send-resize-timeout`（既定 8 秒）の
-   watchdog で `delete-process` する。キーバインドを変えている環境では
-   `Ctrl+o d` が効かない
-
-実測（2026-07-28）:
-
-| 経路 | 結果 |
-|---|---|
-| 正常系（detach が効く） | 2.0 秒で完了。48×50 → **78×320**。プロセス残留なし |
-| watchdog 経路（detach を送る前に強制 kill） | 4.0 秒で完了。**セッションは生存**し拡幅も有効（58×200）。残留なし |
-| 新規作成フル経路 | 拡幅 → claude 起動 → pane-id 取得 → subscribe 開始まで通し |
-| 拡幅後の送受信 | 送信 OK・subscribe に反映 OK・プロセス生存（デッドロックなし） |
-
-なお**ターミナルから作ったセッションはそのターミナルの幅になる**（実測 209 桁）ので、
-この問題は zellij-send が `[New]` で作った背景セッションに限る。
-既存セッションのサイズは後から変えられない（作り直しが必要）。
-
-### 縦に長くして履歴を読む（調査済み・再調査不要）
-
-2026-10-03 に Claude Code v2.1.287（haiku）+ zellij 0.45 で、320×80 と 320×500 の
-背景セッションを並べて同じ指示（1〜300、301〜450、451〜600 を出力）を送って実測した。
-ターミナルの文字を小さくして過去の発言を読む代わりに、行数を増やせば黒板で読める。
-
-- **500 行にすると会話全体が黒板に映る**。最初の指示から 300 行の返答まで 310 行が
-  そのまま見えた（80 行では末尾 75 行だけ）。合計が画面を超えると、**直近の約 500 行**が
-  映る（1 回目の返答の途中から下）
-- `dump-screen --full` は今も画面ぶんしか返さない（80 行のペインで 78 行）。
-  スクロールバックは無いので、500 行より古い発言は transcript（`a`）で読む
-- 拡幅は `zellij-send--resize-session` がそのまま効く（ペインは 498 行 × 320 桁）
-- **入力欄は最下段に描かれる**ので、会話が短いうちは本文と入力欄の間が空行で埋まる
-  （起動直後は 498 行中 485 行が空行）。`--process-dump` が連なりを
-  `zellij-send-max-blank-lines`（既定 2）まで詰める。詰めた後の画面は 14 行、
-  処理は 1 回 0.5 ms（バイトコンパイル済み）。QR の抽出は空行を読み飛ばすので影響しない
-- **重さはほぼ変わらない**:
-
-| | 80 行 | 500 行 |
-|---|---|---|
-| 1 イベントの大きさ | 26 KB | 159 KB |
-| Emacs の受信処理（実イベント・バイトコンパイル済み） | 0.5 ms | 2.0 ms |
-| GUI の再描画（`emacs -Q`） | 約 2 ms | 1.9 ms |
-| claude の CPU 時間（3 往復） | 4.9 秒 | 4.7 秒 |
-| zellij サーバの CPU 時間 | 0.22 秒 | 0.32 秒 |
-
-  イベントは作業中のピークで毎秒 10 回なので、500 行でも Emacs の負荷は約 2%。
-  これは受信処理を線形時間にした後の数字（「自動受信」の節）。正規表現の末尾錨で
-  行末を削っていたころは、500 行で 1 イベント 19 ms（未コンパイル）かかった
-- 計測は `ZELLIJ_SOCKET_DIR` を分けた使い捨てサーバで行う（普段のダッシュボードが
-  自動接続しないように）。**パスは 104 バイト未満にする**こと。長いと
-  `session name must be less than 0 characters` で作れない（実際に踏んだ）
-
-## 既存セッションへの接続（pane-id の復元）
-
-`zellij-send-attach-session-async` が、ユーザーに何も聞かずに黒板バッファを用意する:
-
-- cwd: `zellij action dump-layout` の先頭 `cwd "..."`
-- pane-id: `zellij action list-panes`（`PANE_ID  TYPE  TITLE` の表）から
-  TYPE=terminal の行を拾い、TITLE が `zellij-send-default-command` と一致する
-  ペインを優先。無ければ最初の端末ペイン
-
-これにより **pane-id はバッファローカルでも復元できる**（Emacs 再起動後も
-attach クライアント無しで送信できる）。`M-x zellij-send` の既存セッション選択と
-ダッシュボードの自動接続（`zellij-send-dashboard-auto-connect` / `G`）は
-どちらもこの関数を使う。ディレクトリを尋ねるのは新規セッション作成時だけ。
-
-### セッションの検出（ダッシュボードの 2 本目のタイマー）
-
-再描画タイマー（既定 3 秒、バッファを読むだけ）とは別に、
-`zellij-send-dashboard-scan-interval`（既定 15 秒）の検出タイマーを持つ。
-**`zellij` を呼ぶのはこちらだけ**。`zellij-send-dashboard--sync-sessions` が
-`list-sessions` と突き合わせ、未接続セッションに接続し、消えたセッションの
-バッファを kill する（`--prune-gone`）。守るべき点:
-
-- **タイムアウト（`:timeout`）・失敗（`:error`）を「0 件」と解釈しない**。そのまま
-  prune すると zellij が一時的に応答しないだけで全行が消える。成否は `listp` で見る。
-  なお **0 件でも `list-sessions` は exit 1**（`No active zellij sessions found.` を
-  stderr に出す。2026-10-03 実測）なので、終了コードだけでは失敗と決められない。
-  stderr は stdout と同じバッファで受けて文言で見分ける（別バッファだと sentinel の
-  時点で届いていないことがある）
-- **編集中（`buffer-modified-p`）のバッファは kill しない**。書きかけの入力を失う
-- `--scanning` フラグで多重起動を防ぐ（応答が 15 秒を超えても `zellij` を重ねない）
-- ダッシュボードを閉じたら `--stop-timers` で両方止める
+- 公開は `zellij-send-FOO`、内部は `zellij-send--FOO`。バッファローカル状態は `defvar-local`
+- docstring・メッセージは日本語。`user-error` は操作ミス、`error` はプログラムの誤り
+- 新しい関数は既存の `;;;` 見出しの下に置く（末尾に足さない）
+- 純関数を足したら `test/zellij-send-test.el` にテストを足す。入力は実画面を模した固定文字列
