@@ -1858,6 +1858,21 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (kill-buffer buf)
       (delete-directory dir t))))
 
+;;; スピナーの照合
+
+(ert-deftest zellij-send-test-dashboard-spinner-case ()
+  "スピナーは小文字の文言だけに一致する。質問のヒント行の Esc to cancel は拾わない。"
+  (dolist (case `(("✳ Frobnicating… (12s · esc to interrupt)" . t)
+                  ("• Working (2s • esc to interrupt)" . t)
+                  ("⣾ Generating... esc to cancel" . t)
+                  (,zellij-send-test--askq-single . nil)
+                  (,zellij-send-test--askq-lone . nil)))
+    (with-temp-buffer
+      (setq-local zellij-send--last-content (car case))
+      (let ((case-fold-search t))     ; 利用者の既定（t）に左右されないこと
+        (should (eq (and (zellij-send-dashboard--spinner-p (current-buffer)) t)
+                    (cdr case)))))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

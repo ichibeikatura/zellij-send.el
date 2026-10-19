@@ -300,10 +300,15 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
     (or (zellij-send--last-screen) "")))
 
 (defun zellij-send-dashboard--spinner-p (buf)
-  "BUF の画面にスピナー行があれば non-nil。"
+  "BUF の画面にスピナー行があれば non-nil。
+**大文字小文字を区別して照合する**。スピナーの文言は 3 つの CLI とも小文字
+（`esc to interrupt' / `esc to cancel'）だが、AskUserQuestion のヒント行は
+`… · Esc to cancel' と大文字で始まる。区別しないと、質問を待っている画面を
+「作業中」の証拠として拾っていた。"
   (let* ((screen (zellij-send-dashboard--screen buf))
          ;; スピナーは画面下部にしか出ない。全体を毎回走査しないよう末尾に限定する。
-         (start (max 0 (- (length screen) 4000))))
+         (start (max 0 (- (length screen) 4000)))
+         (case-fold-search nil))
     (string-match-p zellij-send-dashboard-working-regexp screen start)))
 
 (defun zellij-send-dashboard--prompt-p (buf)
