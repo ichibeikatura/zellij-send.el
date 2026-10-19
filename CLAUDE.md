@@ -109,9 +109,11 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 - **黒板は編集中（`buffer-modified-p`）・クリア後（`zellij-send--user-cleared`）は書き換えない。**
   ただし `zellij-send--last-change-time` / `--last-content` は記録し続ける
 - **画面を解析する処理は黒板の中身（`buffer-string`）を読まない。** 黒板は下書き・
-  クリア・transcript 表示で画面と食い違う。打ち込む処理（AskUserQuestion・スラッシュ
-  コマンド）はそのつど `dump-screen` で取り直し、読むだけの処理（ダッシュボード）は
-  `zellij-send--last-screen` を読む。例外は `--update-buffer` 直後の自動起動の判定
+  クリア・transcript 表示で画面と食い違ううえ、表示形（罫線を削り空行を詰めた形）で
+  ある。パーサが読むのは正規形（`--normalize-screen`）だけで、表示形を作るのは
+  `--update-buffer` の中の `--screen-for-display` だけ。打ち込む処理（AskUserQuestion・
+  スラッシュコマンド）はそのつど `dump-screen` で取り直し、読むだけの処理
+  （ダッシュボード）は `zellij-send--last-screen` を読む
 - **transcript は明示選択か、状態フックが知らせたもの。** 更新日時から所属を推測して
   自動で選ばない（同じディレクトリに複数エージェントがいるため）。ユーザーの選択が優先
 - **作業中・選択待ち・待機は本体が導く**（`zellij-send-session-state`）。ダッシュボードが

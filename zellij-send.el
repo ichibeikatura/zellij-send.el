@@ -177,7 +177,9 @@ zellij は罫線 `─' や矢印 `←' などの曖昧幅の文字を 1 桁で�
 Claude Code は入力欄を画面の最下段に描くので、会話が短いうちは本文と
 入力欄の間が空行で埋まる。`zellij-send-session-size' で 500 行に広げた
 セッションでは、起動直後の黒板が約 485 行の空行になった（2026-10-03 実測）。
-これより長い空行の連なりは、この数まで詰める。"
+これより長い空行の連なりは、この数まで詰める。
+詰めるのは黒板に映すときだけで（`zellij-send--screen-for-display'）、
+画面の解析には効かない。"
   :type '(choice (const :tag "詰めない" nil) natnum)
   :group 'zellij-send)
 
@@ -681,8 +683,14 @@ codex の計測）。表のように列の間が大きく空いた画面で起�
             (if (= end (length string)) string (substring string 0 end)))
         ""))))
 
-(defun zellij-send--process-dump (raw)
-  "dump-screen / subscribe の生テキスト RAW を整形して返す。
+(defun zellij-send--normalize-screen (raw)
+  "dump-screen / subscribe の生テキスト RAW を、ペインの画面の正規形にして返す。
+`\\r' を除き、ANSI を除き、各行の行末の空白を落とし、末尾の空行を落とす。
+ここまでが「ペインの画面」で、**画面を解析する処理はこの形だけを読む**。
+黒板に映すための整形（罫線を削る・空行を詰める）は
+`zellij-send--screen-for-display' が別に行う。表示の好み
+（`zellij-send-max-blank-lines'）が解析に効かないようにするため。
+
 zellij は `--ansi' を付けない限りエスケープを除去済みの平文を返すので、
 `zellij-send--strip-ansi' はここでは保険として通しているだけ。
 
@@ -690,17 +698,25 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
 スペースで右パディングして返す（`dump-screen' は返さない）ので、320 桁に
 広げた背景セッションでは 1 行あたり数百文字の空白が付いてくる（2026-07-29 実測）。
 末尾の連続空行もまとめて落とす。ANSI 除去より後に行うこと
-（エスケープが残ったままだと行末を正しく判定できない）。
-
-本文の途中の長い空行は `zellij-send-max-blank-lines' まで詰める。"
-  (let* ((text (replace-regexp-in-string
-                "^─+" ""
-                (zellij-send--strip-ansi
-                 (replace-regexp-in-string "\r" "" raw))))
+（エスケープが残ったままだと行末を正しく判定できない）。"
+  (let* ((text (zellij-send--strip-ansi
+                (replace-regexp-in-string "\r" "" raw)))
          (text (mapconcat (lambda (line) (zellij-send--trim-end line '(?\s ?\t)))
                           (split-string text "\n") "\n")))
     ;; 画面下端の空行（パディングだけの行）を落とす
-    (setq text (zellij-send--trim-end text '(?\n)))
+    (zellij-send--trim-end text '(?\n))))
+
+(defun zellij-send--screen-for-display (screen)
+  "正規形の SCREEN（`zellij-send--normalize-screen'）を、黒板に映す形にして返す。
+行頭の `─' の連なりを削り、長い空行の連なりを `zellij-send-max-blank-lines'
+まで詰める。呼ぶのは `zellij-send--update-buffer' だけ。
+
+2026-10-19 までは、この 2 つも受信時に行っていた（`zellij-send--process-dump'）。
+その結果をパーサが読んでいたので、罫線の残骸を相手にする処理
+（`zellij-send--slash-border-p'）が要り、空行を詰める設定で解析の結果が
+変わりえた。表示の整形を解析から切り離すために分けた。"
+  (let ((text (zellij-send--trim-end
+               (replace-regexp-in-string "^─+" "" screen) '(?\n))))
     ;; 本文と最下段の入力欄の間に挟まった空行を詰める。照合は改行の位置から
     ;; だけ始まり、連なりを 1 回読むだけなので線形時間
     (if (natnump zellij-send-max-blank-lines)
@@ -713,7 +729,8 @@ zellij は `--ansi' を付けない限りエスケープを除去済みの平文
 (defun zellij-send--dump-screen-async (session callback &optional full)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。
 カレントバッファに `zellij-send--pane-id' があればそのペインをダンプする。
-取得できたら整形済み文字列を、失敗時は nil を引数にして CALLBACK を呼ぶ。
+取得できたら画面の正規形（`zellij-send--normalize-screen'）を、失敗時は nil を
+引数にして CALLBACK を呼ぶ。
 CALLBACK は要求元バッファをカレントにした状態で呼ばれる。
 
 FULL が非 nil なら `--full' を付けてスクロールバックまで取る。
@@ -741,7 +758,7 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
        (when (memq (process-status proc) '(exit signal))
          (let ((content
                 (when (zerop (process-exit-status proc))
-                  (zellij-send--process-dump
+                  (zellij-send--normalize-screen
                    (with-current-buffer out-buf (buffer-string))))))
            (ignore-errors (kill-buffer out-buf))
            (ignore-errors (kill-buffer err-buf))
@@ -1777,53 +1794,76 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
              (not (zellij-send--defer-update-p)))
     (run-at-time 0 nil #'zellij-send--pending-resume (current-buffer))))
 
-(defun zellij-send--update-buffer (content)
-  "バッファを CONTENT で更新し、プロンプト検出・ハイライトを実行する。
+(defun zellij-send--update-buffer (content &optional if-changed)
+  "黒板をペインの画面 CONTENT で更新し、プロンプト検出・ハイライトを実行する。
+CONTENT は画面の正規形（`zellij-send--normalize-screen'）。黒板には
+`zellij-send--screen-for-display' を通した形を映す。
 カーソル位置・マーク・ウィンドウの表示開始位置は可能な範囲で復元する
 （自動更新のたびに読んでいる箇所が先頭へ飛ぶのを防ぐため）。
 選択中（`zellij-send--defer-update-p'）は書き換えず、最新の内容だけを
-`zellij-send--pending-content' に取っておく。"
-  (if (zellij-send--defer-update-p)
+`zellij-send--pending-content' に取っておく。
+
+IF-CHANGED が non-nil なら、黒板に同じ表示形がもう映っていて保留も無いとき
+は何もしない（subscribe は画面が変わらなくてもイベントを送ってくる）。
+保留があるときは同じ内容でも書き直す（A → 保留 B → A と戻ったときに、
+古い B を保留したままにしないため）。
+
+「同じか」は表示形どうしで比べる。正規形と黒板の中身を比べると、罫線や
+空行の扱いが違うので必ず食い違う。`--last-content' の前回値と比べる形に
+しないのは、送信後に空にした黒板などを、画面が変わるまで空のまま残すため。"
+  (let ((text (zellij-send--screen-for-display content)))
+    (cond
+     ((zellij-send--defer-update-p)
       ;; 画面と同じ内容に戻ったなら、保留するものは無い
       (setq zellij-send--pending-content
-            (unless (string= content (buffer-string)) content))
-    (zellij-send--pending-drop)
-    (let* ((win (get-buffer-window (current-buffer) t))
-           ;; 選択されていない窓では、窓の point とバッファの point が別物になる。
-           ;; ユーザーが見ているのは窓の方なので、窓があればそちらを基準にする
-           (pos (if (window-live-p win) (window-point win) (point)))
-           (follow (= pos (point-max)))
-           (mark (mark t))
-           (wstart (and (window-live-p win) (window-start win))))
-      (with-silent-modifications
-        (erase-buffer)
-        (insert content))
-      (zellij-send--grid-apply t content)
-      ;; 末尾にいたら末尾を追う（ターミナルや `M-x compile' と同じ）。送信に
-      ;; 成功すると黒板を空にするので、送った直後は自動でここに入り、最新の
-      ;; 回答が出る下端が見え続ける。上へ動かして読み始めたら追うのをやめる
-      (goto-char (if follow (point-max) (min pos (point-max))))
-      ;; `erase-buffer' はマークも point-min に潰す。point と同じく位置で戻す
-      (when mark
-        (set-marker (mark-marker) (min mark (point-max))))
-      (when (window-live-p win)
-        (set-window-point win (point))
-        (cond
-         (follow
-          ;; 最下段を窓の下端に合わせる。行数（`vertical-motion'）で開始位置を
-          ;; 決めてはいけない。日本語や記号の行は既定の行より背が高いので
-          ;; ピクセルでは収まらず、再描画が point を窓の中央へ寄せ直す
-          ;; （実測: 36 行の窓で最終行が上から 325px、下に 270px の空白）。
-          ;; `recenter' はピクセルで数えるが、選択中の窓にしか効かない
-          (with-selected-window win
-            (recenter -1)))
-         (wstart
-          (set-window-start win (min wstart (point-max)) t)))))
-    (set-buffer-modified-p nil)
-    (if (zellij-send--detect-prompt)
-        (zellij-send--highlight-prompt)
-      (zellij-send--clear-prompt-highlight))
-    (zellij-send--askq-maybe-auto)))
+            (unless (string= text (buffer-string)) content)))
+     ((and if-changed
+           (null zellij-send--pending-content)
+           (string= text (buffer-string)))
+      nil)
+     (t
+      (zellij-send--update-buffer-1 content text)))))
+
+(defun zellij-send--update-buffer-1 (content text)
+  "黒板を表示形 TEXT で書き換える。CONTENT はその元の画面（正規形）。
+`zellij-send--update-buffer' の下請け。"
+  (zellij-send--pending-drop)
+  (let* ((win (get-buffer-window (current-buffer) t))
+         ;; 選択されていない窓では、窓の point とバッファの point が別物になる。
+         ;; ユーザーが見ているのは窓の方なので、窓があればそちらを基準にする
+         (pos (if (window-live-p win) (window-point win) (point)))
+         (follow (= pos (point-max)))
+         (mark (mark t))
+         (wstart (and (window-live-p win) (window-start win))))
+    (with-silent-modifications
+      (erase-buffer)
+      (insert text))
+    (zellij-send--grid-apply t text)
+    ;; 末尾にいたら末尾を追う（ターミナルや `M-x compile' と同じ）。送信に
+    ;; 成功すると黒板を空にするので、送った直後は自動でここに入り、最新の
+    ;; 回答が出る下端が見え続ける。上へ動かして読み始めたら追うのをやめる
+    (goto-char (if follow (point-max) (min pos (point-max))))
+    ;; `erase-buffer' はマークも point-min に潰す。point と同じく位置で戻す
+    (when mark
+      (set-marker (mark-marker) (min mark (point-max))))
+    (when (window-live-p win)
+      (set-window-point win (point))
+      (cond
+       (follow
+        ;; 最下段を窓の下端に合わせる。行数（`vertical-motion'）で開始位置を
+        ;; 決めてはいけない。日本語や記号の行は既定の行より背が高いので
+        ;; ピクセルでは収まらず、再描画が point を窓の中央へ寄せ直す
+        ;; （実測: 36 行の窓で最終行が上から 325px、下に 270px の空白）。
+        ;; `recenter' はピクセルで数えるが、選択中の窓にしか効かない
+        (with-selected-window win
+          (recenter -1)))
+       (wstart
+        (set-window-start win (min wstart (point-max)) t)))))
+  (set-buffer-modified-p nil)
+  (if (zellij-send--detect-prompt)
+      (zellij-send--highlight-prompt)
+    (zellij-send--clear-prompt-highlight))
+  (zellij-send--askq-maybe-auto content))
 
 ;;; 自動受信（zellij subscribe）
 
@@ -1878,7 +1918,9 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
         ;; 約 8 倍のごみが出て、GC（1 回 10 ms）が 1.5 イベントに 1 回
         ;; 走っていた（2026-10-02 実測）。正式な行末処理は ANSI 除去の後に
         ;; `--process-dump' がやるので、ここは量を減らすだけ
-        (let ((content (zellij-send--process-dump
+        ;; （2026-10-19 に `--process-dump' を `--normalize-screen' と
+        ;; `--screen-for-display' に分けた。ここで通すのは前者）
+        (let ((content (zellij-send--normalize-screen
                         (mapconcat (lambda (line)
                                      (zellij-send--trim-end line '(?\s ?\t)))
                                    viewport "\n"))))
@@ -1887,13 +1929,11 @@ region を残したまま別のウィンドウへ移ったときに表示を固�
             (setq zellij-send--last-content content
                   zellij-send--last-change-time (float-time)))
           ;; 書き換えは、ユーザーが編集中でもクリア直後でもないときだけ。
-          ;; 保留があるときは画面と同じ内容でも渡す（A → 保留 B → A と
-          ;; 戻ったときに、古い B を保留したままにしないため）
+          ;; 黒板に同じものが映っていれば書き換えない（`--update-buffer' の
+          ;; IF-CHANGED）。比べるのは表示形どうし
           (when (and (not (buffer-modified-p))
-                     (not zellij-send--user-cleared)
-                     (or zellij-send--pending-content
-                         (not (string= content (buffer-string)))))
-            (zellij-send--update-buffer content)))))))
+                     (not zellij-send--user-cleared))
+            (zellij-send--update-buffer content t)))))))
 
 (defun zellij-send--subscribe-filter (buf out)
   "subscribe プロセスの出力 OUT を BUF で行単位に解釈する。"
@@ -2477,9 +2517,10 @@ v2.1.303。`  ❯ /ndl   国立国会図書館…'）。それが無かった頃
 コマンドを「引数なし」と誤判定する。")
 
 (defun zellij-send--slash-border-p (line)
-  "LINE が入力枠の罫線（またはその残骸）なら non-nil。
-`zellij-send--process-dump' が行頭の ─ を削るので、罫線は
-\" ↯ ─\" のような短い残骸になって残る。"
+  "LINE が入力枠の罫線なら non-nil。
+`─' だけの行と、v2.1.220 の頃の `──── ↯ ─' の形の両方に当たる。
+2026-10-19 までは受信時に行頭の ─ を削っていたので、罫線は
+\" ↯ ─\" のような短い残骸や空行になって届いていた（その形も読める）。"
   (string-match-p "\\`[[:space:]↯─]*\\'" line))
 
 (defun zellij-send--slash-input-text (screen)
@@ -4227,8 +4268,9 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
     (zellij-send-keys-mode -1))
   (setq zellij-send--askq-keys-auto nil))
 
-(defun zellij-send--askq-maybe-auto ()
-  "画面更新のたびに呼ばれ、質問が出た瞬間だけ回答 UI を開く。
+(defun zellij-send--askq-maybe-auto (screen)
+  "画面更新のたびに呼ばれ、SCREEN に質問が出た瞬間だけ回答 UI を開く。
+SCREEN は書き込んだ画面の正規形（黒板の中身は表示形なので読まない）。
 質問が消えたときは、自動で入ったキー透過モードを元に戻す。
 
 `zellij-send--askq-parse' は Claude Code の AskUserQuestion の画面だけを
@@ -4238,7 +4280,7 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
   ;; 自動起動は数字キーの送信やキー透過モードへの切り替えを伴うので、
   ;; 推測ではなく**確定したコマンド**で判断する
   (let ((now (and (zellij-send--claude-confirmed-p)
-                  (zellij-send--askq-parse (buffer-string)) t)))
+                  (zellij-send--askq-parse screen) t)))
     (cond
      ((and now
            (not zellij-send--askq-active)

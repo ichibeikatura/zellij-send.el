@@ -15,6 +15,7 @@
 ;; 閾値（1 回 10 ms）は 2026-10-19 に Apple M1 / Emacs 32.0.50 で測って決めた:
 ;;
 ;;   画面 1 枚の整形（`zellij-send--process-dump'）     今 1.9 ms  退行 43 ms
+;;   （同日、受信時の整形は `zellij-send--normalize-screen' に分けた）
 ;;   27 KB の行の受信（`zellij-send--subscribe-handle-line'）今 0.6 ms  退行 43 ms
 ;;
 ;; 退行の欄は、行末の空白を `[ \t]+$'（`string-trim-right' も同じ）で削った
@@ -48,8 +49,8 @@
   (let* ((line (concat "A" (make-string 318 ?\s) "B"))
          (screen (mapconcat #'identity (make-list 78 line) "\n"))
          (ms (zellij-send-bench--ms
-              (lambda () (zellij-send--process-dump screen)))))
-    (message "process-dump: %.2f ms" ms)
+              (lambda () (zellij-send--normalize-screen screen)))))
+    (message "normalize-screen: %.2f ms" ms)
     (should (< ms zellij-send-bench--limit-ms))))
 
 (ert-deftest zellij-send-bench-subscribe-handle-line ()

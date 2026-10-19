@@ -48,43 +48,53 @@
     (should (equal (zellij-send--strip-ansi plain) plain)))
   (should (equal (zellij-send--strip-ansi "") "")))
 
-;;; zellij-send--process-dump
+;;; zellij-send--normalize-screen / zellij-send--screen-for-display
 
-(ert-deftest zellij-send-test-process-dump-trailing-spaces ()
+(ert-deftest zellij-send-test-normalize-screen-trailing-spaces ()
   "subscribe の viewport が付ける行末パディングを削る。"
-  (should (equal (zellij-send--process-dump
+  (should (equal (zellij-send--normalize-screen
                   (concat "日本語の行" (make-string 300 ?\s) "\n"
                           (make-string 320 ?\s) "\n"
                           "次の行" (make-string 10 ?\s)))
                  "日本語の行\n\n次の行")))
 
-(ert-deftest zellij-send-test-process-dump-trailing-blank-lines ()
+(ert-deftest zellij-send-test-normalize-screen-trailing-blank-lines ()
   "画面下端の連続空行（パディングだけの行）をまとめて落とす。"
-  (should (equal (zellij-send--process-dump
+  (should (equal (zellij-send--normalize-screen
                   (concat "本文\n" (make-string 320 ?\s) "\n   \n\n"))
                  "本文")))
 
-(ert-deftest zellij-send-test-process-dump-keeps-inner-blanks-and-indent ()
+(ert-deftest zellij-send-test-normalize-screen-keeps-inner-blanks-and-indent ()
   "本文中の空行と行頭のインデントは保つ。"
-  (should (equal (zellij-send--process-dump "  上\t \n\n  下  ")
+  (should (equal (zellij-send--normalize-screen "  上\t \n\n  下  ")
                  "  上\n\n  下")))
 
 ;; 入力欄が最下段にあるので、500 行の画面では起動直後に約 485 行の空行が挟まる
-(ert-deftest zellij-send-test-process-dump-collapses-blank-run ()
-  "長い空行の連なりを `zellij-send-max-blank-lines' まで詰め、短いものは残す。"
+(ert-deftest zellij-send-test-screen-for-display-collapses-blank-run ()
+  "長い空行の連なりを `zellij-send-max-blank-lines' まで詰め、短いものは残す。
+詰めるのは表示形だけで、正規形（パーサが読む形）は設定に左右されない。"
   (let ((raw (concat "ロゴ\n\n本文" (make-string 485 ?\n) "❯ 入力欄\n\n  ⏵⏵ auto")))
     (let ((zellij-send-max-blank-lines 2))
-      (should (equal (zellij-send--process-dump raw)
+      (should (equal (zellij-send--screen-for-display raw)
                      "ロゴ\n\n本文\n\n\n❯ 入力欄\n\n  ⏵⏵ auto"))
       ;; ちょうど上限の連なりはそのまま
-      (should (equal (zellij-send--process-dump "上\n\n\n下") "上\n\n\n下")))
+      (should (equal (zellij-send--screen-for-display "上\n\n\n下") "上\n\n\n下")))
     (let ((zellij-send-max-blank-lines 0))
-      (should (equal (zellij-send--process-dump raw)
+      (should (equal (zellij-send--screen-for-display raw)
                      "ロゴ\n本文\n❯ 入力欄\n  ⏵⏵ auto")))
     (let ((zellij-send-max-blank-lines nil))
-      (should (equal (zellij-send--process-dump raw)
+      (should (equal (zellij-send--screen-for-display raw)
                      (concat "ロゴ\n\n本文" (make-string 485 ?\n)
-                             "❯ 入力欄\n\n  ⏵⏵ auto"))))))
+                             "❯ 入力欄\n\n  ⏵⏵ auto"))))
+    (let ((zellij-send-max-blank-lines 0))
+      (should (equal (zellij-send--normalize-screen raw) raw)))))
+
+(ert-deftest zellij-send-test-screen-for-display-borders ()
+  "罫線の行頭の ─ は表示形でだけ削る。正規形は罫線をそのまま持つ。"
+  (let ((raw "本文\n────────\n❯ 入力欄\n──────── ↯ ─\n  ⏵⏵ auto\n────"))
+    (should (equal (zellij-send--normalize-screen raw) raw))
+    (should (equal (zellij-send--screen-for-display (zellij-send--normalize-screen raw))
+                   "本文\n\n❯ 入力欄\n ↯ ─\n  ⏵⏵ auto"))))
 
 (ert-deftest zellij-send-test-trim-end ()
   "末尾の指定文字だけを落とし、途中と先頭は残す。"
@@ -93,17 +103,17 @@
   (should (equal (zellij-send--trim-end "" '(?\s)) ""))
   (should (equal (zellij-send--trim-end "上\n\n下\n\n" '(?\n)) "上\n\n下")))
 
-(ert-deftest zellij-send-test-process-dump-wide-inner-gap ()
+(ert-deftest zellij-send-test-normalize-screen-wide-inner-gap ()
   "列の間が大きく空いた行も、行末だけ削って中の空白は保つ。
 正規表現で行末を削っていたころは、この形で 1 画面 45 ms かかっていた。"
   (let* ((line (concat "A" (make-string 318 ?\s) "B"))
          (raw (mapconcat #'identity (make-list 78 (concat line "  ")) "\n")))
-    (should (equal (zellij-send--process-dump raw)
+    (should (equal (zellij-send--normalize-screen raw)
                    (mapconcat #'identity (make-list 78 line) "\n")))))
 
-(ert-deftest zellij-send-test-process-dump-strips-ansi-then-spaces ()
+(ert-deftest zellij-send-test-normalize-screen-strips-ansi-then-spaces ()
   "ANSI を除去した結果の行末空白も削る（除去順の確認）。"
-  (should (equal (zellij-send--process-dump "本文\033[0m   \n")
+  (should (equal (zellij-send--normalize-screen "本文\033[0m   \n")
                  "本文")))
 
 ;;; zellij-send--parse-sessions
@@ -317,7 +327,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
 
 ;;; スラッシュコマンド（補完メニューの読み取り）
 
-;; 画面は `zellij-send--process-dump' を通した後の形にしてある。
+;; 画面は `zellij-send--process-dump'（2026-10-19 に `--normalize-screen' と
+;; `--screen-for-display' に分けた）を通した後の形にしてある。罫線の残骸の形は
+;; 今の正規形とは違うが、パーサはどちらも読めるので古い形の見本として残す。
 ;; 罫線の行頭の ─ は削られて " ↯ ─" のような残骸になり、行末の空白は消える
 ;; （2026-07-29 に zellij 0.44.3 + Claude Code v2.1.220 で実測した画面が元）。
 

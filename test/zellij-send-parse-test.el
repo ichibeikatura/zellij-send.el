@@ -42,8 +42,8 @@
 
 (defun zellij-send-parse-test--screen (name)
   "fixture NAME を、パーサが受け取るのと同じ形の画面にして返す。
-dump-screen の生の出力を、本体が受信後に通す処理にかける。"
-  (zellij-send--process-dump (zellij-send-parse-test--raw name)))
+dump-screen の生の出力を、本体が受信後に通す処理（正規形）にかける。"
+  (zellij-send--normalize-screen (zellij-send-parse-test--raw name)))
 
 (defmacro zellij-send-parse-test--with-command (command &rest body)
   "黒板のコマンドを COMMAND にした一時バッファで BODY を実行する。"
@@ -376,6 +376,25 @@ dump-screen の生の出力を、本体が受信後に通す処理にかける�
                    "@@ -1,2 +1,2 @@\n-x\n+X\n y\n"))
     (should (equal (zellij-send--diff-hunk "x\ny" "x\nY")
                    "@@ -1,2 +1,2 @@\n x\n-y\n+Y\n"))))
+
+;;; 表示の設定は解析に効かない
+
+(ert-deftest zellij-send-parse-test-max-blank-lines-independent ()
+  "`zellij-send-max-blank-lines' を 0 にしても 10 にしても、解析の結果が変わらない。"
+  (dolist (name '("askq-single" "askq-multi" "askq-review" "slash-menu-top"
+                  "slash-menu-tail" "slash-arg-config" "slash-hint-effort" "idle"))
+    (let ((results
+           (mapcar (lambda (n)
+                     (let ((zellij-send-max-blank-lines n))
+                       (let ((screen (zellij-send-parse-test--screen name)))
+                         (list (zellij-send--askq-parse screen)
+                               (zellij-send--slash-menu-entries screen)
+                               (zellij-send--slash-arg-entries screen)
+                               (zellij-send--slash-input-text screen)))))
+                   '(0 2 10 nil))))
+      (should (equal (nth 0 results) (nth 1 results)))
+      (should (equal (nth 0 results) (nth 2 results)))
+      (should (equal (nth 0 results) (nth 3 results))))))
 
 ;;; subscribe の 1 イベント
 
