@@ -4573,7 +4573,8 @@ _LATER は将来のスクリプトが足す引数の受け皿。フックのス�
 (define-obsolete-variable-alias 'zellij-send-dashboard-working-regexp
   'zellij-send-working-regexp "0.1.0")
 
-(defcustom zellij-send-working-regexp "esc to \\(?:interrupt\\|cancel\\)"
+(defcustom zellij-send-working-regexp
+  "esc to \\(?:interrupt\\|cancel\\)\\|^[^[:space:]] [^[:space:]]+… ([0-9]+[smh]"
   "AI が処理中であることを示す、画面上のスピナー行の正規表現。
 
 CLI ごとの文言（すべて実測）:
@@ -4584,7 +4585,19 @@ CLI ごとの文言（すべて実測）:
 
 **agy だけ cancel** なので両方を拾う。ただし**本文をそのまま流し込んで
 いる間はこの行が出ない**ため、これだけでは処理中を取りこぼす
-（`zellij-send-active-window' による画面変化の検出と併用する）。"
+（`zellij-send-active-window' による画面変化の検出と併用する）。
+
+2026-10-19 実測（Claude Code v2.1.303 / zellij 0.45.1）: claude のスピナー行から
+`esc to interrupt' が消え、画面のどこにも出なくなった。いまの形は
+
+  考え中        `✽ Grooving… (4s · thinking with high effort)'
+  ツール実行中  `✳ Concocting… (7s · ↓ 92 tokens)'
+
+で、記号（✳ ✢ ✶ ✻ ✽ ·）と動詞は毎回変わる。そこで「行頭の記号 1 字 + 空白 +
+語 + `…' + ` (' + 秒数」を後ろの選択肢として足した。動き出した最初の 1 秒ほどは
+括弧が無い（`✢ Concocting…'）ので当たらないが、画面変化の検出が拾う。
+ターン終了後に残る `✻ Cooked for 29s · done 19:51' は `…' が無いので当たらない。
+字下げした本文の `… (3s' に当たらないよう、行頭の 1 字は空白以外に限る。"
   :type 'regexp
   :group 'zellij-send)
 

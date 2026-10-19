@@ -27,8 +27,8 @@ description: >-
 - **作業中・選択待ち・待機は本体が導く**（`zellij-send-session-state` の `:status`）。
   各セッションが最後に受け取った画面（`zellij-send-session-screen`）から毎回算出する。
   黒板の中身（`buffer-string`）は下書き・クリア・transcript 表示で画面と食い違うので読まない
-  - 作業中: スピナー行（`zellij-send-working-regexp`、既定
-    `esc to interrupt`）がある **か**、画面が
+  - 作業中: スピナー行（`zellij-send-working-regexp`。`esc to interrupt` と、
+    v2.1.303 の `✳ Concocting… (7s · …)` の形）がある **か**、画面が
     `zellij-send-active-window` 秒以内に変化した。
     **Claude Code は本文を流している間スピナー行を出さない**（実機で確認）ため、
     スピナーだけで判定すると回答中を「待機」と誤表示する。画面が動いていること

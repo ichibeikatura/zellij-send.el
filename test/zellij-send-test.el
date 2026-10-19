@@ -1924,10 +1924,18 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
 ;;; スピナーの照合
 
 (ert-deftest zellij-send-test-dashboard-spinner-case ()
-  "スピナーは小文字の文言だけに一致する。質問のヒント行の Esc to cancel は拾わない。"
+  "スピナーは小文字の文言だけに一致する。質問のヒント行の Esc to cancel は拾わない。
+v2.1.303 の claude は esc to interrupt を出さないので、秒数付きの形で拾う
+（文言は 2026-10-19 の実機の画面から）。"
   (dolist (case `(("✳ Frobnicating… (12s · esc to interrupt)" . t)
                   ("• Working (2s • esc to interrupt)" . t)
                   ("⣾ Generating... esc to cancel" . t)
+                  ("⏺ 本文\n✳ Concocting… (7s · ↓ 92 tokens)\n❯ " . t)
+                  ("✽ Grooving… (4s · thinking with high effort)" . t)
+                  ("· Concocting… (9s · ↓ 106 tokens)" . t)
+                  ("✻ Cooked for 29s · done 19:51" . nil)
+                  ("⏺ Running 1 shell command…" . nil)
+                  ("  字下げした本文の… (3s のような行" . nil)
                   (,zellij-send-test--askq-single . nil)
                   (,zellij-send-test--askq-lone . nil)))
     (with-temp-buffer
