@@ -26,11 +26,26 @@
 
 ;;; エントリポイント
 
+;; ここに置くのは「どのディレクトリに、どのコマンドで、どの名前で」を尋ねる
+;; 部分だけ。セッションを作る・繋ぐ処理は下の層の公開 API
+;; （`zellij-send-spawn-session' / `zellij-send-attach-session'）にある。
+
 (defun zellij-send--prompt-session-dir ()
   "作業ディレクトリをユーザーに選択させ、末尾スラッシュなしの絶対パスを返す。"
   (directory-file-name
    (expand-file-name
     (read-directory-name "作業ディレクトリ: " default-directory))))
+
+(defun zellij-send--prompt-command (&optional default)
+  "起動するコマンドを尋ねる。DEFAULT（既定は `zellij-send-default-command'）が初期値。
+候補は `zellij-send-agents' の名前だが、一覧に無いコマンドも入力できる。
+ミニバッファ入力を含むため、プロセス sentinel の中から呼ばないこと。"
+  (let* ((default (or default zellij-send-default-command))
+         (input (string-trim
+                 (completing-read (format "Command (default %s): " default)
+                                  (mapcar #'car zellij-send-agents)
+                                  nil nil nil nil default))))
+    (if (string-empty-p input) default input)))
 
 (defun zellij-send--session-base (session)
   "SESSION 名から末尾 2 桁の連番を取り除いた基底名を返す。
@@ -58,71 +73,12 @@ SESSIONS（zellij から取った一覧）に加え、黒板バッファが握�
 セッションと衝突しないようにするため。"
   (delete-dups
    (append (copy-sequence sessions)
-           (delq nil
-                 (mapcar (lambda (buf)
-                           (buffer-local-value 'zellij-send--session buf))
-                         (buffer-list))))))
+           (mapcar #'zellij-send-session-name (zellij-send-sessions)))))
 
-(defun zellij-send--setup-session-buffer (session dir)
-  "SESSION 用バッファを作成し default-directory を DIR に設定して表示する。
-作成したバッファを返す。"
-  (let ((buf (zellij-send--get-or-create-buffer session)))
-    (with-current-buffer buf
-      (setq-local default-directory (file-name-as-directory dir)))
-    (switch-to-buffer buf)
-    (goto-char (point-max))
-    buf))
-
-;;; セッションの作成と接続
-
-(defun zellij-send--spawn-session (session dir &optional command)
-  "SESSION という名前の detached zellij セッションを DIR に作り、ペインを起動する。
-COMMAND（既定は `zellij-send-default-command'）がそのペインで動く。
-attach クライアント（eat）は使わない: `zellij attach --create-background' で
-セッションを作り、`zellij run' で COMMAND を起動して返る pane-id を保持し、
-以後 --pane-id 指定で送受信する。
-黒板バッファは同期で用意して表示し、cwd・pane-id は後から埋まる。
-
-`zellij-send--command' はバッファを作った直後に入れる。subscribe の開始が
-スラッシュコマンドの先読みを呼ぶので、claude 以外のペインに `/' を
-打たないためにはペイン起動より前に確定していなければならない。"
-  (let* ((command (or command zellij-send-default-command))
-         (buf (zellij-send--setup-session-buffer session dir)))
-    (with-current-buffer buf
-      (setq-local zellij-send--command command))
-    (zellij-send--zellij-async
-     (list "attach" "--create-background" session)
-     (lambda (exit)
-       (if (not (zerop exit))
-           (message "zellij セッション作成に失敗しました (exit: %d)" exit)
-         ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
-         ;; あとから作るペインは拡幅後のサイズを継承する
-         (zellij-send--resize-session
-          session
-          (lambda (_resized)
-            ;; セッション初期化を待ってから claude ペインを起動
-            (run-with-timer
-             0.5 nil
-             (lambda ()
-               (zellij-send--run-in-session-async
-                session dir (zellij-send--launch-command command session)
-                (lambda (pane-id)
-                  (if (not pane-id)
-                      (message "%s の起動に失敗しました" command)
-                    (when (buffer-live-p buf)
-                      (with-current-buffer buf
-                        (setq-local zellij-send--pane-id pane-id)
-                        (zellij-send--subscribe-ensure)))
-                    ;; `attach --create-background' が生むデフォルト shell ペイン
-                    ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
-                    ;; 致命的ではないので結果は無視する。
-                    (zellij-send--zellij-async
-                     (list "--session" session "action" "close-pane"
-                           "--pane-id" "terminal_0")
-                     #'ignore)
-                    (message "セッション [%s] を作成しました (%s / %s)"
-                             session command pane-id)))))))))))
-    buf))
+(defun zellij-send--spawn-and-show (session dir command)
+  "SESSION を DIR に COMMAND で作り（`zellij-send-spawn-session'）、黒板を表示する。"
+  (switch-to-buffer (zellij-send-spawn-session session dir command))
+  (goto-char (point-max)))
 
 (defun zellij-send--create-new-session (known-sessions)
   "作業ディレクトリと起動するコマンドを尋ね、新しい zellij セッションを作る。
@@ -133,7 +89,7 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
          (session (zellij-send--numbered-session-name
                    (file-name-nondirectory dir)
                    (zellij-send--taken-session-names known-sessions))))
-    (zellij-send--spawn-session session dir command)))
+    (zellij-send--spawn-and-show session dir command)))
 
 (defun zellij-send-add-agent (&optional ask)
   "同じディレクトリにもう 1 体エージェントを立ち上げる。
@@ -145,42 +101,45 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
 コマンドはいまのバッファと同じものを引き継ぐ。ASK
 （\\[universal-argument]）を付けると別のコマンド（codex など）を選べる。"
   (interactive "P")
-  (zellij-send--assert-session)
-  (let* ((base (zellij-send--session-base zellij-send--session))
+  (let* ((name (or (zellij-send-session-name (current-buffer))
+                   (user-error "zellij-send バッファ外では使えません")))
+         (base (zellij-send--session-base name))
          (dir (directory-file-name (expand-file-name default-directory)))
-         (current (or zellij-send--command zellij-send-default-command))
+         (current (or (zellij-send-session-command (current-buffer))
+                      zellij-send-default-command))
          ;; ミニバッファは sentinel に入る前に済ませる
          (command (if ask (zellij-send--prompt-command current) current)))
     (message "セッション一覧を取得中...")
-    (zellij-send--list-sessions-async
+    (zellij-send-list-sessions
      (lambda (result)
        (pcase result
          (`(:ok ,sessions)
           (let ((session (zellij-send--numbered-session-name
                           base (zellij-send--taken-session-names sessions))))
             ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
-            (run-at-time 0 nil #'zellij-send--spawn-session session dir command)))
+            (run-at-time 0 nil #'zellij-send--spawn-and-show session dir command)))
          (`(:failed ,reason) (message "%s" reason)))))))
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。
 cwd と pane-id は zellij から取得するので、ディレクトリは尋ねない
-\(`zellij-send-attach-session-async' 参照)。pane-id が取れなかった
-場合のみ focused pane 送信になり、ターミナルでの attach が要る。"
-  (let ((known (get-buffer (zellij-send--buffer-name session))))
-    ;; バッファ生成は同期。cwd と pane-id は後から非同期で埋まる。
-    (switch-to-buffer (zellij-send--get-or-create-buffer session))
-    (goto-char (point-max))
-    (unless known
-      (zellij-send-attach-session-async
-       session
-       (lambda (buf)
-         (when (buffer-live-p buf)
-           (with-current-buffer buf
-             (message "セッション [%s] に接続しました%s" session
-                      (if zellij-send--pane-id
-                          (format " (%s)" zellij-send--pane-id)
-                        "（pane-id 不明: ターミナルで attach が必要です）")))))))))
+\(`zellij-send-attach-session' 参照)。pane-id が取れなかった
+場合のみ focused pane 送信になり、ターミナルでの attach が要る。
+黒板が既にあれば、それを開いて subscribe を確かめるだけ。"
+  (let* ((known (zellij-send-session-buffer session))
+         ;; バッファ生成は同期。cwd と pane-id は後から非同期で埋まる。
+         (buf (zellij-send-attach-session
+               session
+               (unless known
+                 (lambda (buf)
+                   (when (buffer-live-p buf)
+                     (let ((pane-id (zellij-send-session-pane-id buf)))
+                       (message "セッション [%s] に接続しました%s" session
+                                (if pane-id
+                                    (format " (%s)" pane-id)
+                                  "（pane-id 不明: ターミナルで attach が必要です）")))))))))
+    (switch-to-buffer buf)
+    (goto-char (point-max))))
 
 (defun zellij-send--select-session (sessions)
   "SESSIONS からセッションを選ばせ、対応するバッファを開く。
@@ -200,7 +159,7 @@ cwd と pane-id は zellij から取得するので、ディレクトリは尋�
   ;; 動かす（`zellij-send-start-session-watch'）。黒板がすべて消えたら止まる
   (zellij-send-start-session-watch)
   (message "セッション一覧を取得中...")
-  (zellij-send--list-sessions-async
+  (zellij-send-list-sessions
    (lambda (result)
      (pcase result
        (`(:ok ,sessions)

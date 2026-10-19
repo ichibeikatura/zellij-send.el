@@ -486,7 +486,7 @@ Claude Code（能力 `remote-control'）で、`zellij-send-remote-control' が
 
 ;;; セッション一覧の取得
 
-(defun zellij-send--list-sessions-async (callback)
+(defun zellij-send-list-sessions (callback)
   "list-sessions を非同期で実行し、結果を CALLBACK に渡す。結果は次のどちらか:
 
   (:ok SESSIONS)    SESSIONS はセッション名のリスト（0 件なら nil）
@@ -503,7 +503,11 @@ Claude Code（能力 `remote-control'）で、`zellij-send-remote-control' が
 stderr は別バッファに分けず stdout と同じバッファで受ける。分けると
 stderr 側のパイプが読み終わる前に sentinel が走ることがあり、
 0 件の案内文を見落として失敗と読む。案内文の行は
-`zellij-send--parse-sessions' が捨てる。"
+`zellij-send--parse-sessions' が捨てる。
+
+公開 API（ダッシュボードも使う）。2026-10-20 までは内部名
+`zellij-send--list-sessions-async' の別名だったので、取得の経路が 2 つに
+見えていた。"
   (let* ((out-buf (generate-new-buffer " *zellij-list-sessions*"))
          (done nil)
          timer proc)
@@ -1380,19 +1384,6 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
      (lambda (resized)
        (message "セッション [%s] の拡幅%s" session
                 (if resized "が完了しました" "は行いませんでした"))))))
-
-;;; セッションの作成と接続
-
-(defun zellij-send--prompt-command (&optional default)
-  "起動するコマンドを尋ねる。DEFAULT（既定は `zellij-send-default-command'）が初期値。
-候補は `zellij-send-agents' の名前だが、一覧に無いコマンドも入力できる。
-ミニバッファ入力を含むため、プロセス sentinel の中から呼ばないこと。"
-  (let* ((default (or default zellij-send-default-command))
-         (input (string-trim
-                 (completing-read (format "Command (default %s): " default)
-                                  (zellij-send--agent-names)
-                                  nil nil nil nil default))))
-    (if (string-empty-p input) default input)))
 
 (provide 'zellij-send-core)
 

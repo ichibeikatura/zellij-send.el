@@ -87,7 +87,7 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 `zellij-send--trim-end` を使う（docstring に計測あり）。
 
 ### 終了コードが当てにならないもの
-- `list-sessions` は 0 件でも exit 1（案内文で見分ける。`zellij-send--list-sessions-async`）
+- `list-sessions` は 0 件でも exit 1（案内文で見分ける。`zellij-send-list-sessions`）
 - `subscribe` は失敗しても exit 0（上記）
 - タイムアウト・失敗を「セッション 0 件」と読まない（生きている黒板を kill してしまう）
 

@@ -649,7 +649,7 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
                           #'zellij-send--await-agent-exit
                           session pane-id main-buf deadline))))))
      (t
-      (zellij-send--list-sessions-async
+      (zellij-send-list-sessions
        (lambda (result)
          (if (and (eq (car result) :ok) (not (member session (cadr result))))
              (progn
@@ -1146,10 +1146,22 @@ Stop フックが来ないため）。"
                              (message "選択 %d を送信 → [%s]" n session))))
       (zellij-send--clear-prompt-highlight))))
 
-(defalias 'zellij-send-list-sessions #'zellij-send--list-sessions-async
-  "zellij のセッション一覧を非同期で取って CALLBACK に渡す。
-渡すのは (:ok SESSIONS) か (:failed REASON)（REASON はユーザーに見せる文）。
-詳細は `zellij-send--list-sessions-async'。")
+;; zellij のセッション一覧（`zellij-send-list-sessions'）は zellij を呼ぶ層の
+;; zellij-send-core.el にある。(:ok SESSIONS) か (:failed REASON) を渡す。
+
+(defun zellij-send-session-buffer (session)
+  "SESSION の黒板バッファを返す。無ければ nil。"
+  (seq-find (lambda (buf) (equal (zellij-send-session-name buf) session))
+            (zellij-send-sessions)))
+
+(defun zellij-send-session-command (buf)
+  "黒板 BUF のペインで動いているコマンド（例: \"claude\"）を返す。判らなければ nil。
+`zellij-send-default-command' で代用しない（`zellij-send--command'）。"
+  (buffer-local-value 'zellij-send--command buf))
+
+(defun zellij-send-session-pane-id (buf)
+  "黒板 BUF の送信先ペインの ID（例: \"terminal_1\"）を返す。判らなければ nil。"
+  (buffer-local-value 'zellij-send--pane-id buf))
 
 ;; 黒板の用意と、zellij のセッション一覧との突き合わせ（セッションの監視）。
 ;; 2026-10-20 までダッシュボードが持っていたので、ダッシュボードを開かないと
@@ -1171,12 +1183,11 @@ Stop フックが来ないため）。"
   "SESSION 用バッファを返す。なければ作成して zellij-send-mode を有効化。
 
 subscribe を張り直すのは既存のバッファだけ。新しいバッファは呼び出し側
-（`zellij-send-attach-session-async' / `zellij-send--spawn-session'）が
+（`zellij-send-attach-session' / `zellij-send-spawn-session'）が
 pane-id とコマンドを決めてから張る。ここでも張ると、ペイン検出が
 2 本並んで走るうえ、新規作成ではセッションができる前に検出しに行く。
 NO-SUBSCRIBE が non-nil なら既存のバッファでも張らない（自分で検出して
-張る `zellij-send-attach-session-async' 用。`--connect-existing-session'
-はバッファを作ってから attach を呼ぶので、そこでは既存扱いになる）。"
+張る `zellij-send-attach-session' 用）。"
   (let* ((name (zellij-send--buffer-name session))
          (buf (get-buffer-create name)))
     (with-current-buffer buf
@@ -1192,12 +1203,32 @@ NO-SUBSCRIBE が non-nil なら既存のバッファでも張らない（自分�
               zellij-send--created-at (float-time))))
     buf))
 
-(defun zellij-send-attach-session-async (session &optional callback)
-  "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
+(defun zellij-send-attach-session (session &optional callback)
+  "既存の zellij セッション SESSION の黒板を、ユーザーに何も聞かずに用意して返す。
+黒板は同期で作って返し、cwd・pane-id は後から埋まる。
 cwd は `dump-layout' から、pane-id と動いているコマンドは
 `list-panes --all' を 1 回叩いて取得する（`zellij-send--detect-pane-async'）。
 pane-id が取れれば attach クライアント無しでも送信できる。
-用意できたら CALLBACK にバッファを渡す。"
+用意できたら CALLBACK にバッファを渡す。
+
+SESSION の黒板が既にあれば、取り直さずに subscribe を確かめ（切れていれば
+張り直す）、すぐ CALLBACK を呼ぶ。2026-10-20 までは入口
+（`zellij-send--connect-existing-session'）がこの区別をしていた。"
+  (let ((known (zellij-send-session-buffer session)))
+    (if known
+        (progn
+          (with-current-buffer known
+            (zellij-send--subscribe-ensure))
+          (when callback (funcall callback known))
+          known)
+      (zellij-send--attach-new-session session callback))))
+
+(define-obsolete-function-alias 'zellij-send-attach-session-async
+  #'zellij-send-attach-session "0.1.0")
+
+(defun zellij-send--attach-new-session (session callback)
+  "黒板の無い SESSION に黒板を作って繋ぎ、そのバッファを返す。
+CALLBACK は `zellij-send-attach-session' と同じ。"
   (let ((buf (zellij-send--get-or-create-buffer session t)))
     (zellij-send--session-cwd-async
      session
@@ -1225,7 +1256,59 @@ pane-id が取れれば attach クライアント無しでも送信できる。
           (unless pane-id
             (message "[%s] のペインを特定できませんでした。黒板を閉じて（C-x k）ダッシュボードの G か M-x zellij-send で繋ぎ直してください"
                      session))
-          (when callback (funcall callback buf))))))))
+          (when callback (funcall callback buf))))))
+    buf))
+
+(defun zellij-send-spawn-session (session dir &optional command)
+  "SESSION という名前の detached zellij セッションを DIR に作り、ペインを起動する。
+COMMAND（既定は `zellij-send-default-command'）がそのペインで動く。
+attach クライアント（eat）は使わない: `zellij attach --create-background' で
+セッションを作り、`zellij run' で COMMAND を起動して返る pane-id を保持し、
+以後 --pane-id 指定で送受信する。
+黒板バッファは同期で用意して返し、cwd・pane-id は後から埋まる。表示は
+呼び出し側が行う。
+
+`zellij-send--command' はバッファを作った直後に入れる。subscribe の開始が
+スラッシュコマンドの先読みを呼ぶので、claude 以外のペインに `/' を
+打たないためにはペイン起動より前に確定していなければならない。"
+  (let* ((command (or command zellij-send-default-command))
+         (buf (zellij-send--get-or-create-buffer session)))
+    (with-current-buffer buf
+      (setq-local default-directory (file-name-as-directory dir))
+      (setq-local zellij-send--command command))
+    (zellij-send--zellij-async
+     (list "attach" "--create-background" session)
+     (lambda (exit)
+       (if (not (zerop exit))
+           (message "zellij セッション作成に失敗しました (exit: %d)" exit)
+         ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
+         ;; あとから作るペインは拡幅後のサイズを継承する
+         (zellij-send--resize-session
+          session
+          (lambda (_resized)
+            ;; セッション初期化を待ってから claude ペインを起動
+            (run-with-timer
+             0.5 nil
+             (lambda ()
+               (zellij-send--run-in-session-async
+                session dir (zellij-send--launch-command command session)
+                (lambda (pane-id)
+                  (if (not pane-id)
+                      (message "%s の起動に失敗しました" command)
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        (setq-local zellij-send--pane-id pane-id)
+                        (zellij-send--subscribe-ensure)))
+                    ;; `attach --create-background' が生むデフォルト shell ペイン
+                    ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
+                    ;; 致命的ではないので結果は無視する。
+                    (zellij-send--zellij-async
+                     (list "--session" session "action" "close-pane"
+                           "--pane-id" "terminal_0")
+                     #'ignore)
+                    (message "セッション [%s] を作成しました (%s / %s)"
+                             session command pane-id)))))))))))
+    buf))
 
 (define-obsolete-variable-alias 'zellij-send-dashboard-auto-connect
   'zellij-send-auto-connect "0.1.0")
@@ -1234,7 +1317,7 @@ pane-id が取れれば attach クライアント無しでも送信できる。
   "non-nil なら `zellij-send-scan-interval' ごとに、まだ黒板の無い zellij
 セッションへ自動接続する（`zellij-send-start-session-watch'）。
 `zellij list-sessions' の各セッションについて cwd と pane-id を取得し
-（`zellij-send-attach-session-async'）、黒板バッファを用意する。
+（`zellij-send-attach-session'）、黒板バッファを用意する。
 ユーザーには何も尋ねない。nil ならダッシュボードの G を押したときだけ接続する。
 消えたセッションの黒板の片付け（`zellij-send-prune-gone'）は nil でも続ける。"
   :type 'boolean
@@ -1287,7 +1370,7 @@ zellij 側で終了したセッションの黒板を片付けるために使う
 
 (defconst zellij-send--prune-grace 30.0
   "作ってからこの秒数のうちは、`list-sessions' に無くても黒板を片付けない。
-新規作成（`zellij-send--spawn-session'）は黒板を先に作り、セッションは
+新規作成（`zellij-send-spawn-session'）は黒板を先に作り、セッションは
 `attach --create-background' が返ってからできる。その間に始まった検出の
 一覧には新しいセッションが載っていないので、片付けると作ったばかりの黒板を
 消してしまう。監視をダッシュボードの外でも動かすようにした（2026-10-20）ので、
@@ -1348,7 +1431,7 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
              (when new
                (message "セッションに接続中: %s" (string-join new ", "))
                (dolist (session new)
-                 (zellij-send-attach-session-async
+                 (zellij-send-attach-session
                   session
                   (lambda (_buf)
                     ;; 接続のたびに一覧へ反映する

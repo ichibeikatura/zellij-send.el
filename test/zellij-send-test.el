@@ -1652,13 +1652,13 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                    (lambda (&rest _) (setq polled t))))
           (dolist (result '((:failed "タイムアウト") (:ok ("proj00"))))
             (setq polled nil)
-            (cl-letf (((symbol-function 'zellij-send--list-sessions-async)
+            (cl-letf (((symbol-function 'zellij-send-list-sessions)
                        (lambda (cb) (funcall cb result))))
               (zellij-send--await-agent-exit "proj00" nil buf (+ (float-time) 60)))
             (should (buffer-live-p buf))
             (should polled))
           ;; 一覧に無いと確かめられたときだけ消す
-          (cl-letf (((symbol-function 'zellij-send--list-sessions-async)
+          (cl-letf (((symbol-function 'zellij-send-list-sessions)
                      (lambda (cb) (funcall cb '(:ok ("other00"))))))
             (zellij-send--await-agent-exit "proj00" nil buf (+ (float-time) 60)))
           (should-not (buffer-live-p buf)))
@@ -1686,7 +1686,7 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
         attached)
     (cl-letf (((symbol-function 'zellij-send-list-sessions)
                (lambda (cb) (funcall cb '(:ok ("zjs-new00")))))
-              ((symbol-function 'zellij-send-attach-session-async)
+              ((symbol-function 'zellij-send-attach-session)
                (lambda (session &optional _cb) (push session attached)))
               ((symbol-function 'message) #'ignore))
       (let ((zellij-send-auto-connect nil))
@@ -1750,12 +1750,47 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (zellij-send-stop-session-watch)
       (when (buffer-live-p owner) (kill-buffer owner)))))
 
+(ert-deftest zellij-send-test-attach-existing-session ()
+  "黒板が既にあるセッションは取り直さずに subscribe を確かめ、すぐ知らせる。"
+  (let ((buf (generate-new-buffer " *zjs-known*")) ensured called)
+    (unwind-protect
+        (cl-letf (((symbol-function 'zellij-send--subscribe-ensure)
+                   (lambda () (setq ensured (current-buffer))))
+                  ((symbol-function 'zellij-send--session-cwd-async)
+                   (lambda (&rest _) (error "取り直してはいけない"))))
+          (with-current-buffer buf
+            (zellij-send-mode)
+            (setq zellij-send--session "zjs-known00"))
+          (should (eq (zellij-send-session-buffer "zjs-known00") buf))
+          (should (eq (zellij-send-attach-session
+                       "zjs-known00" (lambda (b) (setq called b)))
+                      buf))
+          (should (eq ensured buf))
+          (should (eq called buf))
+          (should-not (zellij-send-session-buffer "zjs-none00")))
+      (kill-buffer buf))))
+
+(ert-deftest zellij-send-test-taken-session-names ()
+  "使用済みの名前は zellij の一覧と、黒板が握っている名前を合わせたもの。"
+  (let ((buf (generate-new-buffer " *zjs-taken*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (zellij-send-mode)
+            (setq zellij-send--session "zjs-taken00"))
+          (let ((taken (zellij-send--taken-session-names '("zjs-list00"))))
+            (should (member "zjs-list00" taken))
+            (should (member "zjs-taken00" taken))))
+      (kill-buffer buf))))
+
 (ert-deftest zellij-send-test-obsolete-watch-variables ()
   "ダッシュボードにあった検出の変数は、本体の新しい名前の別名として効く。"
   (dolist (pair '((zellij-send-dashboard-auto-connect . zellij-send-auto-connect)
                   (zellij-send-dashboard-scan-interval . zellij-send-scan-interval)
                   (zellij-send-dashboard-prune-gone . zellij-send-prune-gone)))
-    (should (eq (indirect-variable (car pair)) (cdr pair)))))
+    (should (eq (indirect-variable (car pair)) (cdr pair))))
+  (should (eq (indirect-function 'zellij-send-attach-session-async)
+              (indirect-function 'zellij-send-attach-session))))
 
 (ert-deftest zellij-send-test-dashboard-reads-last-screen ()
   "セッションの状態と状況列は、下書きではなく受け取った画面に追随する。"
@@ -2356,7 +2391,7 @@ C-u で捨てたものは戻らない。"
                (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
       (unwind-protect
           (progn
-            (zellij-send-attach-session-async "zjs-test99")
+            (zellij-send-attach-session "zjs-test99")
             (should (string-match-p "zjs-test99.*特定できませんでした" shown)))
         (when (get-buffer "*ai-zjs-test99*")
           (kill-buffer "*ai-zjs-test99*"))))))
