@@ -1331,13 +1331,16 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
 (define-obsolete-variable-alias 'zellij-send-dashboard-auto-connect
   'zellij-send-auto-connect "0.1.0")
 
-(defcustom zellij-send-auto-connect t
+(defcustom zellij-send-auto-connect nil
   "non-nil なら `zellij-send-scan-interval' ごとに、まだ黒板の無い zellij
 セッションへ自動接続する（`zellij-send-start-session-watch'）。
 `zellij list-sessions' の各セッションについて cwd と pane-id を取得し
 （`zellij-send-attach-session'）、黒板バッファを用意する。
 ユーザーには何も尋ねない。nil ならダッシュボードの G を押したときだけ接続する。
-消えたセッションの黒板の片付け（`zellij-send-prune-gone'）は nil でも続ける。"
+消えたセッションの黒板の片付け（`zellij-send-prune-gone'）は nil でも続ける。
+既定は nil。監視がダッシュボードの外でも動くようになった（2026-10-20）ので、
+t だと `zellij-send' を一度使っただけで、ターミナルで普段使いしている
+zellij セッションにも黒板ができてしまうため。"
   :type 'boolean
   :group 'zellij-send)
 

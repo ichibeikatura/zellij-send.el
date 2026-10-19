@@ -157,9 +157,7 @@ cwd と pane-id は zellij から取得するので、ディレクトリは尋�
   (interactive)
   ;; 消えたセッションの黒板を片付ける監視は、ダッシュボードを開かなくても
   ;; 動かす（`zellij-send-start-session-watch'）。黒板がすべて消えたら止まる。
-  ;; TODO(要・手元確認): `zellij-send-auto-connect'（既定 t）の自動接続も
-  ;; ダッシュボードの外で効くようになった。ターミナルで普段使いしている
-  ;; zellij セッションにも黒板ができるので、困るなら既定を見直す
+  ;; 未接続のセッションへの自動接続は `zellij-send-auto-connect'（既定 nil）
   (zellij-send-start-session-watch)
   (message "セッション一覧を取得中...")
   (zellij-send-list-sessions
