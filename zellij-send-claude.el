@@ -1371,7 +1371,10 @@ INFO は `zellij-send--slash-probe-arg' の結果。
             (info (cadr info)))
         (cond
          ((not ok)
-          (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
+          ;; 理由（入力欄が空でない・ペインを操作された など）を添える。
+          ;; 添えないと、直前に出た理由をこの文が上書きして、何が起きたか分からない
+          (message "引数の候補を取得できませんでした（%s）。ペインの状態を確認してください"
+                   (or info "理由不明")))
          ((plist-get info :hint)
           (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
             (zellij-send--slash-submit

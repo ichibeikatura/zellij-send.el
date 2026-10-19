@@ -235,6 +235,56 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
     (should-not (zellij-send--slash-arg-hint
                  (zellij-send-parse-test--screen "slash-arg-config") "/config"))))
 
+;;; 引数の確認を通しで（実画面を順に返す）
+
+(defun zellij-send-parse-test--probe (screens)
+  "SCREENS（fixture 名のリスト）を dump-screen の結果として順に返しながら、
+`/effort' の引数を確かめる。最後の画面は何度でも返す。結果と打ったキーを返す。"
+  (let ((queue screens) typed keys result)
+    (with-temp-buffer
+      (setq-local zellij-send--session "fixture00"
+                  zellij-send--pane-id "terminal_1"
+                  zellij-send--command "claude")
+      (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &optional _full)
+                   (funcall cb (zellij-send-parse-test--screen
+                                (if (cdr queue) (pop queue) (car queue))))))
+                ((symbol-function 'zellij-send--slash-write-chars)
+                 (lambda (_session text cb)
+                   (push text typed)
+                   ;; 打った後の画面に進める
+                   (when (cdr queue) (pop queue))
+                   (funcall cb t)))
+                ((symbol-function 'zellij-send--send-keys)
+                 (lambda (_session bytes &optional cb) (push bytes keys)
+                   (when cb (funcall cb 0))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args))))
+        (zellij-send--slash-probe-arg (current-buffer) "/effort" "" nil
+                                      (lambda (r) (setq result r)))
+        (list result (nreverse typed) (nreverse keys)
+              (zellij-send--op-current))))))
+
+(ert-deftest zellij-send-parse-test-probe-effort ()
+  "待機中のペインに `/effort ' を打ち、v2.1.303 のゴーストのヒントを読んで片付ける。"
+  (pcase-let ((`(,result ,typed ,keys ,op)
+               (zellij-send-parse-test--probe '("idle" "slash-hint-effort"))))
+    (should (equal result
+                   '(:ok (:hint "low|medium|high|xhigh|max|auto|ultracode [on|off]"))))
+    (should (equal typed '("/effort ")))
+    ;; 読み終えたら Ctrl+U で入力欄を空に戻し、操作も終えている
+    (should (equal keys '((21))))
+    (should-not op)))
+
+(ert-deftest zellij-send-parse-test-probe-refuses-busy-input ()
+  "入力欄が空でない（質問が出ている）ペインには打たずに断る。"
+  (pcase-let ((`(,result ,typed ,keys ,op)
+               (zellij-send-parse-test--probe '("askq-single"))))
+    (should (eq (car result) :aborted))
+    (should-not typed)
+    (should-not keys)
+    (should-not op)))
+
 ;;; 5. 選択肢プロンプトの検出（エージェントごとの記号）
 
 (ert-deftest zellij-send-parse-test-detect-prompt ()
