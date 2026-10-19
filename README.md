@@ -528,7 +528,7 @@ exit 0
 
 ### 3. State hook (optional; makes the dashboard's state reliable)
 
-Without hooks the dashboard infers **working** and **waiting** from the screen. With the hook below it prefers what Claude Code reports — a prompt was submitted, a question or permission is pending, the turn ended — so a session streaming plain prose stays **working**, and a change in the screen's layout cannot break the state. The blackboard is identified by `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID`, which the hook inherits from zellij.
+Without hooks the dashboard infers **working** and **waiting** from the screen. With the hook below it prefers what Claude Code reports — a prompt was submitted, a question or permission is pending, the turn ended. AskUserQuestion's questions and options also arrive verbatim, so `C-c C-q` shows the full option descriptions rather than the first wrapped line — so a session streaming plain prose stays **working**, and a change in the screen's layout cannot break the state. The blackboard is identified by `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID`, which the hook inherits from zellij.
 
 `~/.claude/hooks/state-zellij-send.sh` (requires `python3`):
 
@@ -550,11 +550,15 @@ def word(s):
 def lisp(s):
     return '"%s"' % str(s or "").replace("\\", "\\\\").replace('"', '\\"')
 detail = d.get("tool_name") or d.get("notification_type") or ""
-print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s)' % (
+questions = ""
+if d.get("hook_event_name") == "PreToolUse" and detail == "AskUserQuestion":
+    questions = json.dumps((d.get("tool_input") or {}).get("questions") or [],
+                           ensure_ascii=False)
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s %s)' % (
     word(os.environ.get("ZELLIJ_SESSION_NAME")),
     word(os.environ.get("ZELLIJ_PANE_ID")),
     word(d.get("hook_event_name")), word(detail),
-    lisp(d.get("transcript_path"))))
+    lisp(d.get("transcript_path")), lisp(questions)))
 PY
 )
 [ -n "$FORM" ] || exit 0

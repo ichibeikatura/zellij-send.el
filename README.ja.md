@@ -525,7 +525,7 @@ exit 0
 
 ### 3. 状態フック（任意。ダッシュボードの判定を確かにする）
 
-ダッシュボードの「作業中」「選択待ち」は、フックが無ければ画面から推します。下のフックを入れると、Claude Code が知らせる状態（入力を受けた・質問や許可を待っている・ターンが終わった）を画面より優先します。本文を流している間も「作業中」のままになり、画面の形が変わっても判定が崩れません。黒板は、フックが zellij から受け継ぐ `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID` で見分けます。
+ダッシュボードの「作業中」「選択待ち」は、フックが無ければ画面から推します。下のフックを入れると、Claude Code が知らせる状態（入力を受けた・質問や許可を待っている・ターンが終わった）を画面より優先します。AskUserQuestion の質問と選択肢も原文のまま受け取るので、`C-c C-q` のミニバッファには折り返しで切れない説明が出ます。本文を流している間も「作業中」のままになり、画面の形が変わっても判定が崩れません。黒板は、フックが zellij から受け継ぐ `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID` で見分けます。
 
 `~/.claude/hooks/state-zellij-send.sh`（`python3` が必要）:
 
@@ -547,11 +547,15 @@ def word(s):
 def lisp(s):
     return '"%s"' % str(s or "").replace("\\", "\\\\").replace('"', '\\"')
 detail = d.get("tool_name") or d.get("notification_type") or ""
-print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s)' % (
+questions = ""
+if d.get("hook_event_name") == "PreToolUse" and detail == "AskUserQuestion":
+    questions = json.dumps((d.get("tool_input") or {}).get("questions") or [],
+                           ensure_ascii=False)
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s" %s %s)' % (
     word(os.environ.get("ZELLIJ_SESSION_NAME")),
     word(os.environ.get("ZELLIJ_PANE_ID")),
     word(d.get("hook_event_name")), word(detail),
-    lisp(d.get("transcript_path"))))
+    lisp(d.get("transcript_path")), lisp(questions)))
 PY
 )
 [ -n "$FORM" ] || exit 0

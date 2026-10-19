@@ -1913,6 +1913,74 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (kill-buffer a)
       (kill-buffer b))))
 
+;;; AskUserQuestion をフックの質問で補う
+
+(defconst zellij-send-test--askq-hook-questions
+  (json-parse-string
+   "[{\"question\":\"テスト用です。好きな色はどれですか？\",\"header\":\"好きな色\",\"multiSelect\":false,
+      \"options\":[{\"label\":\"青\",\"description\":\"空や海の色。落ち着いた印象。画面では折り返して見えなかった続き。\"},
+                   {\"label\":\"赤\",\"description\":\"情熱的で目を引く色。\"},
+                   {\"label\":\"緑\",\"description\":\"自然や植物の色。目に優しい。\"}]},
+     {\"question\":\"好きな果物を選んでください\",\"header\":\"好きな果物\",\"multiSelect\":true,
+      \"options\":[{\"label\":\"りんご\",\"description\":\"定番\"}]}]"
+   :object-type 'alist :array-type 'list :null-object nil :false-object nil)
+  "フックの tool_input.questions を模したもの（質問文の頭は画面で折り返して見えない想定）。")
+
+(ert-deftest zellij-send-test-askq-enrich ()
+  "画面と照合できたら、ラベルと説明をフックの原文で置き換える。"
+  (let* ((q (zellij-send--askq-parse zellij-send-test--askq-single))
+         (e (zellij-send--askq-enrich q zellij-send-test--askq-hook-questions))
+         (opts (plist-get e :options)))
+    (should (equal (plist-get e :question) "テスト用です。好きな色はどれですか？"))
+    (should (equal (plist-get (nth 0 opts) :desc)
+                   "空や海の色。落ち着いた印象。画面では折り返して見えなかった続き。"))
+    ;; カーソルは画面のまま。原文に無い自由入力・Chat は画面のラベル
+    (should (plist-get (nth 0 opts) :focused))
+    (should (equal (mapcar (lambda (o) (plist-get o :label)) opts)
+                   '("青" "赤" "緑" "Type something." "Chat about this")))
+    ;; 元の q は書き換えない
+    (should (equal (plist-get (nth 0 (plist-get q :options)) :desc)
+                   "空や海の色。落ち着いた印象。"))))
+
+(ert-deftest zellij-send-test-askq-enrich-mismatch ()
+  "質問や選択肢が画面と合わなければ、画面から読んだものをそのまま使う。"
+  (let ((q (zellij-send--askq-parse zellij-send-test--askq-single)))
+    ;; 質問が合わない（別の質問が 2 つ）
+    (should (eq (zellij-send--askq-enrich
+                 q (list (car (last zellij-send-test--askq-hook-questions))
+                         (car (last zellij-send-test--askq-hook-questions))))
+                q))
+    ;; 質問は 1 つだが選択肢の並びが違う
+    (let ((swapped (copy-tree (car zellij-send-test--askq-hook-questions))))
+      (setf (alist-get 'options swapped)
+            (reverse (alist-get 'options swapped)))
+      (should (eq (zellij-send--askq-enrich q (list swapped)) q)))
+    ;; フックが無い・質問が無い
+    (should (eq (zellij-send--askq-enrich q nil) q))
+    (should-not (zellij-send--askq-enrich nil zellij-send-test--askq-hook-questions))
+    ;; 確認画面は補わない
+    (let ((r (zellij-send--askq-parse zellij-send-test--askq-review)))
+      (should (eq (zellij-send--askq-enrich r zellij-send-test--askq-hook-questions) r)))))
+
+(ert-deftest zellij-send-test-on-claude-hook-questions ()
+  "AskUserQuestion の PreToolUse でだけ質問を受け取る。"
+  (let ((b (generate-new-buffer " *zjs-hook-q*"))
+        (json "[{\"question\":\"Q\",\"options\":[{\"label\":\"A\",\"description\":\"d\"}]}]"))
+    (unwind-protect
+        (progn
+          (with-current-buffer b
+            (setq major-mode 'zellij-send-mode)
+            (setq-local zellij-send--session "proj00"))
+          (zellij-send--on-claude-hook "proj00" "1" "PreToolUse" "Bash" "" json)
+          (should-not (buffer-local-value 'zellij-send--hook-questions b))
+          (zellij-send--on-claude-hook "proj00" "1" "PreToolUse" "AskUserQuestion" "" "{壊れた")
+          (should-not (buffer-local-value 'zellij-send--hook-questions b))
+          (zellij-send--on-claude-hook "proj00" "1" "PreToolUse" "AskUserQuestion" "" json)
+          (should (equal (alist-get 'question
+                                    (car (buffer-local-value 'zellij-send--hook-questions b)))
+                         "Q")))
+      (kill-buffer b))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

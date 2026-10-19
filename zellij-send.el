@@ -3664,6 +3664,8 @@ nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。
 
 ;; キー透過モードは後ろのセクションで定義するので、ここでは前方宣言だけしておく
 (defvar zellij-send-keys-mode)
+;; 状態フックが知らせた質問も後ろのセクションで定義する
+(defvar zellij-send--hook-questions)
 
 (defvar-local zellij-send--askq-keys-auto nil
   "質問の自動起動でキー透過モードに入ったなら non-nil。
@@ -3796,6 +3798,63 @@ nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。
               (format "  — %s" (plist-get opt :desc))
             "")))
 
+(defun zellij-send--askq-squash (text)
+  "TEXT から空白をすべて取り除く（画面の折り返しと原文を比べるため）。"
+  (replace-regexp-in-string "[[:space:]]+" "" (or text "")))
+
+(defun zellij-send--askq-enrich (q questions)
+  "画面から読んだ質問 Q のラベルと説明を、フックの QUESTIONS で置き換えて返す。
+QUESTIONS は `zellij-send--hook-questions'。合わなければ Q をそのまま返す。
+
+画面からは、折り返した説明の 1 行目しか読めない（`zellij-send--askq-parse'）。
+フックの tool_input には質問・選択肢・説明が構造のまま入っているので、
+それを正本にする。ただし**画面と照合できたときだけ**使う——同じ質問かは
+質問文（画面の最後の行が原文の末尾と一致するか。質問が 1 つならそれ）で、
+選択肢の対応は番号順に画面のラベルが原文の頭と一致するかで確かめる。
+古い質問や読み違いを持ち込まないため。カーソル・チェック状態・
+自由入力などの付け足しの選択肢は、画面のものを使う（原文には無い）。
+
+質問を transcript から読まないのは、回答するまで transcript に書かれない
+ため（askq 節の冒頭の 2026-10-19 実測）。"
+  (let* ((screen-q (zellij-send--askq-squash (plist-get q :question)))
+         (matched (seq-filter
+                   (lambda (h)
+                     (let ((text (zellij-send--askq-squash (alist-get 'question h))))
+                       (and (not (string-empty-p screen-q))
+                            (string-suffix-p screen-q text))))
+                   questions))
+         (h (cond ((= (length matched) 1) (car matched))
+                  ((and (null matched) (= (length questions) 1)) (car questions))))
+         (hopts (and h (alist-get 'options h)))
+         (opts (plist-get q :options)))
+    (if (or (null hopts) (eq (plist-get q :kind) 'review)
+            (not (seq-every-p
+                  (lambda (i)
+                    (let ((o (seq-find (lambda (o) (= (plist-get o :num) (1+ i))) opts))
+                          (label (zellij-send--askq-squash
+                                  (alist-get 'label (nth i hopts)))))
+                      (and o
+                           (not (string-empty-p (zellij-send--askq-squash
+                                                 (plist-get o :label))))
+                           (string-prefix-p (zellij-send--askq-squash
+                                             (plist-get o :label))
+                                            label))))
+                  (number-sequence 0 (1- (length hopts))))))
+        q
+      (let ((new (copy-sequence q)))
+        (setq new (plist-put new :question (or (alist-get 'question h)
+                                               (plist-get q :question))))
+        (plist-put new :options
+                   (mapcar (lambda (o)
+                             (let ((ho (nth (1- (plist-get o :num)) hopts)))
+                               (if (not ho)
+                                   o
+                                 (let ((o (copy-sequence o)))
+                                   (setq o (plist-put o :label (alist-get 'label ho)))
+                                   (plist-put o :desc (or (alist-get 'description ho)
+                                                          (plist-get o :desc)))))))
+                           opts))))))
+
 (defun zellij-send--askq-read (prompt opts &optional multi)
   "OPTS から選ばせて、選ばれた選択肢のリストを返す。
 MULTI が non-nil なら複数選べる。"
@@ -3904,7 +3963,8 @@ sentinel を `run-at-time' で抜けてから行う。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq zellij-send--askq-answering nil)
-      (let ((q (zellij-send--askq-parse screen)))
+      (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
+                                         zellij-send--hook-questions)))
         (cond
          ((null screen)
           (setq zellij-send--askq-signature nil
@@ -4082,7 +4142,8 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 `zellij-send-answer-question' から sentinel を抜けた後に呼ばれる。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (let ((q (zellij-send--askq-parse screen)))
+      (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
+                                         zellij-send--hook-questions)))
         (cond
          ((null screen) (message "画面を取得できませんでした"))
          ((null q) (message "画面に選択肢プロンプトが見つかりません"))
@@ -4414,6 +4475,12 @@ zellij を呼ぶだけ無駄だった。取り直すのは subscribe が切れ�
 (defvar-local zellij-send--hook-state-time nil
   "`zellij-send--hook-state' を受け取った時刻（`float-time'）。")
 
+(defvar-local zellij-send--hook-questions nil
+  "PreToolUse フックが知らせた、直近の AskUserQuestion の質問。
+tool_input の questions をそのまま alist にしたもの（各要素は question・
+header・multiSelect・options（label・description））。回答の画面を読むときに
+`zellij-send--askq-enrich' がラベルと説明の正本として使う。")
+
 (defun zellij-send--hook-event-state (event detail)
   "フックの EVENT（hook_event_name）と DETAIL から状態を返す。対象外なら nil。
 DETAIL は PreToolUse などでは tool_name、Notification では notification_type。"
@@ -4448,13 +4515,14 @@ DETAIL は PreToolUse などでは tool_name、Notification では notification_
 
 ;;;###autoload
 (defun zellij-send--on-claude-hook (session pane event &optional detail transcript
-                                            &rest _later)
+                                            questions &rest _later)
   "Claude Code のフックから状態を受け取る（state-zellij-send.sh が呼ぶ）。
 SESSION と PANE はフックが継承した ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID、
 EVENT は hook_event_name、DETAIL は tool_name か notification_type、
-TRANSCRIPT はフックの transcript_path。
-対応する黒板の `zellij-send--hook-state' と
-`zellij-send--hook-transcript-path' を立てるだけで、zellij は呼ばない。
+TRANSCRIPT はフックの transcript_path、QUESTIONS は AskUserQuestion の
+PreToolUse のときだけ tool_input の questions（JSON の文字列）。
+対応する黒板の `zellij-send--hook-state'・`zellij-send--hook-transcript-path'・
+`zellij-send--hook-questions' を立てるだけで、zellij は呼ばない。
 emacsclient から呼ばれるので、すぐに返る。
 
 _LATER は将来のスクリプトが足す引数の受け皿。フックのスクリプトだけ
@@ -4471,7 +4539,18 @@ _LATER は将来のスクリプトが足す引数の受け皿。フックのス�
         (when (and (stringp transcript)
                    (string-suffix-p ".jsonl" transcript)
                    (file-readable-p transcript))
-          (setq zellij-send--hook-transcript-path transcript))))
+          (setq zellij-send--hook-transcript-path transcript))
+        (when (and (equal event "PreToolUse")
+                   (equal detail "AskUserQuestion")
+                   (stringp questions)
+                   (not (string-empty-p questions)))
+          (let ((parsed (ignore-errors
+                          (json-parse-string questions :object-type 'alist
+                                             :array-type 'list
+                                             :null-object nil
+                                             :false-object nil))))
+            (when (and parsed (listp parsed))
+              (setq zellij-send--hook-questions parsed))))))
     nil))
 
 ;;; エントリポイント
