@@ -4915,6 +4915,27 @@ Claude Code は本文を流している間スピナー行を出さないので�
         (case-fold-search nil))
     (string-match-p zellij-send-working-regexp screen start)))
 
+(defconst zellij-send--prompt-tail-lines 80
+  "選択待ちの判定（`zellij-send--screen-prompt-p'）で読む、画面の末尾の行数。
+選択肢は入力欄の代わりに画面の最下部へ出るので、全体を毎回読まない
+（ダッシュボードは 3 秒ごとにセッションの数だけ判定する）。
+
+2026-10-19 実測（Claude Code v2.1.303 / codex-cli 0.160.0 / Antigravity CLI 1.4.2、
+test/fixtures/）: 選択肢の塊（タブ行・Review・最初の選択肢）の先頭は、末尾から
+AskUserQuestion の複数選択で 18 行、単一選択で 15 行、最終確認で 13 行、
+agy の許可で 7 行、codex の選択で 3 行だった。余裕を見て 80 行にした。")
+
+(defun zellij-send--screen-tail (screen n)
+  "SCREEN の末尾 N 行を返す。N 行に満たなければ SCREEN をそのまま返す。
+後ろから改行を数えるだけなので、末尾の長さに比例する。"
+  (let ((pos (length screen))
+        (count 0))
+    (while (and pos (< count n))
+      (setq pos (and (> pos 0)
+                     (cl-position ?\n screen :end pos :from-end t))
+            count (1+ count)))
+    (if pos (substring screen (1+ pos)) screen)))
+
 (defun zellij-send--screen-prompt-p (screen)
   "SCREEN に選択肢プロンプトがあれば non-nil。カレントの黒板で呼ぶ。
 
@@ -4923,10 +4944,12 @@ Claude Code は本文を流している間スピナー行を出さないので�
 記号の正規表現（`zellij-send--detect-prompt'）に落ちる。2 つを別々の場所で
 使うと食い違いうる（構造の方は、ヒント行の無い最終確認画面も読める）。
 AskUserQuestion の形は Claude Code のものなので、その能力を持つと推測できる
-黒板（`zellij-send--capable-p'）でだけ試す。SCREEN が nil なら nil。"
+黒板（`zellij-send--capable-p'）でだけ試す。SCREEN が nil なら nil。
+読むのは末尾の `zellij-send--prompt-tail-lines' 行だけ。"
   (and screen
-       (or (and (zellij-send--capable-p 'askq) (zellij-send--askq-parse screen) t)
-           (zellij-send--detect-prompt screen))))
+       (let ((tail (zellij-send--screen-tail screen zellij-send--prompt-tail-lines)))
+         (or (and (zellij-send--capable-p 'askq) (zellij-send--askq-parse tail) t)
+             (zellij-send--detect-prompt tail)))))
 
 (defun zellij-send--hook-status (now changed-at)
   "カレントの黒板のフックが知らせた状態を、状態のシンボルにして返す。

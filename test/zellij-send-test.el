@@ -2130,6 +2130,27 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
             (zellij-send--markdown-fallback-check))))
       (should (= messages 1)))))
 
+;;; 選択待ちの判定は画面の末尾だけを読む
+
+(ert-deftest zellij-send-test-screen-tail ()
+  "末尾 N 行を切り出す。N 行に満たなければそのまま。"
+  (should (equal (zellij-send--screen-tail "a\nb\nc" 2) "b\nc"))
+  (should (equal (zellij-send--screen-tail "a\nb\nc" 3) "a\nb\nc"))
+  (should (equal (zellij-send--screen-tail "a\nb\nc" 9) "a\nb\nc"))
+  (should (equal (zellij-send--screen-tail "a\nb\n" 1) ""))
+  (should (equal (zellij-send--screen-tail "" 5) "")))
+
+(ert-deftest zellij-send-test-screen-prompt-p-tail ()
+  "選択肢が末尾にあれば拾い、本文に流れた古い選択肢（末尾から遠い）は拾わない。"
+  (with-temp-buffer
+    (setq-local zellij-send--command "claude")
+    (let ((filler (mapconcat (lambda (i) (format "⏺ 本文 %d" i))
+                             (number-sequence 1 100) "\n")))
+      (should (zellij-send--screen-prompt-p
+               (concat filler "\n" zellij-send-test--askq-single)))
+      (should-not (zellij-send--screen-prompt-p
+                   (concat "❯ 1. 古い選択肢\n  2. もう一つ\n" filler "\n❯ "))))))
+
 ;;; スピナーの照合
 
 (ert-deftest zellij-send-test-dashboard-spinner-case ()
