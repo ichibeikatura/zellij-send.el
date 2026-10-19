@@ -3600,6 +3600,9 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
 ;; 回答した後（212 秒後）で、tool_result の行と同時だった。回答待ちの間は
 ;; transcript に質問が無いので、ラベルと説明は画面から読むしかない。
 ;; 構造で取るなら PreToolUse フック（tool_input に questions が入る）が候補。
+;; → 実装した（`zellij-send--askq-enrich'）。2026-10-19 実測、同じ版で:
+;; 質問がペインに出た 6.35 秒の時点で、state-zellij-send.sh 経由の質問 2 つの
+;; 原文と「選択待ち」が既に黒板に届いていた（PreToolUse は描画より先に来る）。
 
 (defcustom zellij-send-askq-hint-regexp "^Enter to select · .*Esc to cancel"
   "AskUserQuestion の画面を見分けるための正規表現。
