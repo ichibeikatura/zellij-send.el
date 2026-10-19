@@ -3,9 +3,8 @@ name: zellij-send-dashboard
 description: >-
   zellij-send-dashboard.el（M-x zellij-send-dashboard / メニュー d）を読み書き
   するときの実測済み仕様。セッション一覧の状態判定（作業中・完了・選択待ち）、
-  tabulated-list の更新とキー（g / ? / r / G）、Remote Control の QR 取り込み、
-  /usage 相当の使用状況表示。トリガー例:
-  「ダッシュボード」「zellij-send-dashboard.el」「QR」「/usage」「使用状況バー」。
+  tabulated-list の更新とキー（g / ? / G）、/usage 相当の使用状況表示。トリガー例:
+  「ダッシュボード」「zellij-send-dashboard.el」「/usage」「使用状況バー」。
 ---
 
 # zellij-send ダッシュボードの実装ノート
@@ -64,33 +63,20 @@ description: >-
 - **`header-line-format` にキーヒントを置いても無駄**。直後の
   `tabulated-list-init-header` が列見出しで上書きする（かつてこれで
   ヒントが表示されていなかった）
-### Remote Control の QR（ダッシュボードの `r`）
+### Remote Control（QR の取り込みは撤去済み）
 
-`/remote-control` をペインに送り、Claude Code が描く QR を dump-screen で取り込む
-（QR 生成器は不要）。実機検証で判明した注意点:
+ダッシュボードの `r`（`/remote-control` のメニューをカーソルで辿り、QR を SVG に起こす）は
+撤去した。起動時の `--remote-control SESSION`（本体の `zellij-send-remote-control`）が
+画面を読まない経路として残り、起動済みのセッションはキー透過モードでメニューを操作する。
+メニューの実測（項目の説明が折り返すので移動量を行数で数えると `Disconnect this session`
+を選ぶ、接続に 10 秒以上かかる、など）と旧実装は git 履歴の
+`ede1d97:zellij-send-dashboard.el` にある。
 
-- **メニューはカーソル移動量を「行数」で数えてはいけない**。項目の説明文が折り返して
-  複数行になるため、行数で数えると `Show QR code` を通り越して
-  `Disconnect this session` を選んでしまう（実際に踏んだ）。項目ラベルの並びで数え、
-  さらに **Enter の前に `❯` が `Show QR code` にあることを確認する**
-  （`zellij-send-dashboard--qr-confirm-and-enter`）
-- **接続に 10 秒以上かかる**。固定待ちではなくタイムアウト付きポーリングにする
-  （`zellij-send-dashboard--wait-for-screen`）
-- 取り込み後は必ず `Esc`（バイト 27）を送ってペインをプロンプトに戻す。
-  メニューに留まると以後の送信が壊れる
-- **QR は文字ではなく SVG 画像で描く**。半角ブロック（█=上下 / ▀=上 / ▄=下）から
-  モジュール行列を復元し、白地に黒＋静穏帯 4 モジュールで描画する
-  （`zellij-send-dashboard--qr-matrix` / `--qr-image`）。文字のまま貼るとフォントの
-  字形に左右されて読み取れない（M PLUS 等でブロック字形が行高を超える）。
-  SVG が使えない環境向けにテキスト版も残し、その場合は `char-width-table` を
-  バッファローカルに差し替えてブロック文字を 1 桁にする（既定は 2 桁＝
-  East Asian Ambiguous で、そのままだと横に伸びる）
+### 使用状況バーの描き方
 
-**フォント依存の描画は避ける**: 使用状況バーも同じ理由でブロック文字をやめ、
-空白に `:background` を付けて描くのが既定（`zellij-send-dashboard-usage-bar-style`
+**フォント依存の描画は避ける**: 使用状況バーはブロック文字をやめ（M PLUS 等では字形が
+行高を超えて崩れる）、空白に `:background` を付けて描くのが既定（`zellij-send-dashboard-usage-bar-style`
 の `face`）。グリフに頼らないのでフォントの字形に影響されない。
-- ローカルセッションを claude.ai に露出させる操作なので `yes-or-no-p` で必ず確認し、
-  待機中のセッションに限る（作業中のペインに文字を打ち込まない）
 
 ### 使用状況（/usage 相当）
 

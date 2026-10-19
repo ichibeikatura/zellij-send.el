@@ -127,7 +127,7 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 | 末尾を追う・選択中の保留 | `zellij-send--update-buffer` の前のコメント |
 | CLI ごとの差（記号・数字キー・`/compact`） | `zellij-send-prompt-marker-alist` / `zellij-send-number-reply-commands` / `zellij-send-slash-support-alist` |
 | transcript の場所・題名 | `zellij-send--transcript-*` の docstring |
-| ダッシュボード・QR・/usage | `.claude/skills/zellij-send-dashboard/SKILL.md` |
+| ダッシュボード・/usage | `.claude/skills/zellij-send-dashboard/SKILL.md` |
 
 ### コードに無い CLI の実測（2026-09-07、zellij 0.45.1）
 

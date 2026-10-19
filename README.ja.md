@@ -182,7 +182,7 @@ TUI が機嫌よく動くペインへ zellij-send に届けさせてください
 | 会話を最初から読む（`a`）・出力ログ（`l`） | ○ | — | — | — |
 | スラッシュコマンド補完（`/`） | ○ | — | — | — |
 | AskUserQuestion への回答（`u` / 自動起動） | ○ | — | — | — |
-| Remote Control の QR・使用状況バー | ○ | — | — | — |
+| 使用状況バー | ○ | — | — | — |
 
 下の 4 行は Claude Code の画面の形や transcript を読むので、他の CLI では `user-error` で止まります。選択肢・権限ダイアログ・設定画面は**キー透過モード**で操作してください（画面を解釈しないので、どの TUI にも効きます）。
 
@@ -268,7 +268,6 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 | `l`         | そのセッションのログを開く         |
 | `i`         | 処理を中断（Esc を送る）           |
 | `c`         | `/compact` を送信                  |
-| `r`         | Remote Control に接続して QR 表示  |
 | `Q`         | セッションを終了（`C-c C-a q` と同じ） |
 | `g`         | 手動更新（`revert-buffer`）        |
 | `G`         | 未接続の zellij セッションに接続   |
@@ -280,17 +279,12 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 
 `Q` は確認のうえ `/exit` を送り、エージェントの終了を待ってから zellij セッションを削除します。`zellij-send-quit-timeout`（既定 10 秒）以内に終了しなければ強制削除します。
 
-### Remote Control の QR（`r`）
+### Remote Control
 
-カーソル行のセッションを [Remote Control](https://claude.ai/code) に接続し、Claude Code が描く QR コードを `*zellij-qr-セッション名*` に画像で表示します。セッション URL はキルリングにコピーします。ローカルのセッションを claude.ai 側に出す操作なので必ず確認を求め、**待機中のセッションでのみ**実行できます。
+ダッシュボードからは [Remote Control](https://claude.ai/code) に接続しません。方法は 2 つあります。
 
-**最初からスマホで使うなら `zellij-send-remote-control` を `t` に**してください。新しく作る Claude Code のセッションが `claude --remote-control セッション名` で起動し、QR を読まなくても claude.ai やモバイルアプリにセッション名で出ます。
-
-| 変数 | 意味 |
-|---|---|
-| `zellij-send-dashboard-remote-control-timeout` | 画面が出るまで待つ上限秒数（既定 40 秒） |
-| `zellij-send-dashboard-remote-control-poll` | 待機中のポーリング間隔（既定 1.5 秒） |
-| `zellij-send-dashboard-qr-module-size` | QR の 1 モジュールのピクセル数（既定 4） |
+- **最初から付ける（推奨）:** `zellij-send-remote-control` を `t` にします。新しく作る Claude Code のセッションが `claude --remote-control セッション名` で起動し、QR を読まなくても claude.ai やモバイルアプリにセッション名で出ます。
+- **起動済みのセッションを繋ぐ:** `C-c C-s` で `/remote-control` を送り、Claude Code のメニュー（QR の表示を含む）をキー透過モード（`C-c C-t`）で操作します。
 
 ### 表示の設定
 

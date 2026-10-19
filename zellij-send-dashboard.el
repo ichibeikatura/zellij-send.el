@@ -33,10 +33,6 @@
 (require 'subr-x)
 (require 'color)                        ; 使用状況バーの色を薄める
 
-(declare-function svg-create "svg")
-(declare-function svg-rectangle "svg")
-(declare-function svg-image "svg")
-
 (defgroup zellij-send-dashboard nil
   "Dashboard for zellij-send sessions."
   :group 'zellij-send)
@@ -158,24 +154,6 @@ zellij 側で終了したセッションの行を消すために使う。
   "使用状況のリセット時刻に添えるタイムゾーン表記。
 nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。"
   :type '(choice (const :tag "自動" nil) string)
-  :group 'zellij-send-dashboard)
-
-(defcustom zellij-send-dashboard-qr-module-size 4
-  "QR 画像 1 モジュールあたりのピクセル数。
-33 モジュールの QR なら 4 で約 165px。大きすぎる・小さすぎる場合に調整する。"
-  :type 'integer
-  :group 'zellij-send-dashboard)
-
-(defcustom zellij-send-dashboard-remote-control-timeout 40.0
-  "Remote Control の画面が出るまで待つ上限秒数。
-claude.ai への接続に 10 秒以上かかることがあるため、固定待ちではなく
-この時間まで画面をポーリングする。"
-  :type 'number
-  :group 'zellij-send-dashboard)
-
-(defcustom zellij-send-dashboard-remote-control-poll 1.5
-  "Remote Control 待ちのポーリング間隔（秒）。"
-  :type 'number
   :group 'zellij-send-dashboard)
 
 (defcustom zellij-send-dashboard-usage-light-ratio 0.4
@@ -690,275 +668,6 @@ ARG（\\[universal-argument]）付きなら Claude Code でも画面を取得す
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send-quit)))
 
-;;; Remote Control（QR 表示）
-
-;; Claude Code の Remote Control はセッションを claude.ai / モバイルアプリに
-;; 橋渡しする。QR は Claude Code 自身が半角ブロック文字（▀▄█）で描くので、
-;; dump-screen した文字列をそのまま貼れば QR 生成器は要らない。
-;; ただしブロック文字は East Asian Ambiguous で char-width が 2 になる環境が
-;; あり、そのままだと QR が横に 2 倍伸びて読み取れない。表示用バッファでは
-;; char-width-table をバッファローカルに差し替えて 1 桁にする。
-
-(defconst zellij-send-dashboard--qr-chars
-  '(?█ ?▀ ?▄ ?▌ ?▐ ?░ ?▒ ?▓)
-  "QR の描画に使われるブロック文字。表示時に幅 1 桁へ矯正する。")
-
-(defun zellij-send-dashboard--extract-qr (screen)
-  "SCREEN からブロック文字だけで構成された連続行（QR）を返す。無ければ nil。"
-  (let ((qr (seq-filter
-             (lambda (line)
-               (let ((s (string-trim line)))
-                 (and (not (string-empty-p s))
-                      (string-match-p "[█▀▄]" s)
-                      ;; ブロック文字と空白だけの行に限る（本文行を拾わない）
-                      (not (string-match-p "[[:alnum:]]" s)))))
-             (split-string screen "\n"))))
-    (when (> (length qr) 4) qr)))
-
-(defun zellij-send-dashboard--extract-url (screen)
-  "SCREEN から Remote Control のセッション URL を返す。無ければ nil。
-URL はペイン幅で折り返されるため、行頭の空白ごと改行を畳んでから探す。"
-  (let ((joined (replace-regexp-in-string "[ \t]*\n[ \t]*" "" screen)))
-    (when (string-match "https://claude\\.ai/code/[A-Za-z0-9_-]+" joined)
-      (match-string 0 joined))))
-
-(defun zellij-send-dashboard--qr-matrix (lines)
-  "QR の半角ブロック行 LINES からモジュール行列（真偽値の行のリスト）を作る。
-1 文字が上下 2 モジュールを表す: █=両方 ▀=上 ▄=下 空白=なし。
-左右の空白列は切り落とす（余白は SVG 側で付ける）。"
-  (let* ((width (apply #'max (mapcar #'length lines)))
-         (rows nil))
-    (dolist (line lines)
-      (let ((top (make-vector width nil))
-            (bot (make-vector width nil)))
-        (dotimes (i width)
-          (let ((c (if (< i (length line)) (aref line i) ?\s)))
-            (cond ((eq c ?█) (aset top i t) (aset bot i t))
-                  ((eq c ?▀) (aset top i t))
-                  ((eq c ?▄) (aset bot i t)))))
-        (push top rows)
-        (push bot rows)))
-    (setq rows (nreverse rows))
-    ;; 末尾の空行を削る（最終行の下半分は余りなので必ず空になる）
-    (while (and rows (not (seq-some #'identity (car (last rows)))))
-      (setq rows (butlast rows)))
-    ;; 全行が空白の列を左右から削る
-    (let ((left 0) (right (1- width)))
-      (while (and (< left width)
-                  (not (seq-some (lambda (r) (aref r left)) rows)))
-        (setq left (1+ left)))
-      (while (and (> right left)
-                  (not (seq-some (lambda (r) (aref r right)) rows)))
-        (setq right (1- right)))
-      (mapcar (lambda (r) (seq-subseq r left (1+ right))) rows))))
-
-(defun zellij-send-dashboard--qr-image (lines)
-  "QR の行 LINES から SVG 画像を作って返す。作れなければ nil。
-文字で描くとフォントの字形に左右されて読み取れないため、画像にする。
-スキャンできるよう、テーマに関係なく白地に黒で描く。"
-  (when (and (display-graphic-p) (image-type-available-p 'svg)
-             (require 'svg nil t))
-    (ignore-errors
-      (let* ((matrix (zellij-send-dashboard--qr-matrix lines))
-             (rows (length matrix))
-             (cols (length (car matrix)))
-             (m zellij-send-dashboard-qr-module-size)
-             (quiet (* m 4))                     ; QR 規格の静穏帯は 4 モジュール
-             (w (+ (* cols m) (* 2 quiet)))
-             (h (+ (* rows m) (* 2 quiet)))
-             (svg (svg-create w h)))
-        (svg-rectangle svg 0 0 w h :fill "white")
-        (let ((y quiet))
-          (dolist (row matrix)
-            (dotimes (x cols)
-              (when (aref row x)
-                (svg-rectangle svg (+ quiet (* x m)) y m m :fill "black")))
-            (setq y (+ y m))))
-        (svg-image svg :scale 1.0 :ascent 'center)))))
-
-(defun zellij-send-dashboard--show-qr (session screen)
-  "SESSION の SCREEN から QR と URL を取り出して専用バッファに表示する。"
-  (let ((qr (zellij-send-dashboard--extract-qr screen))
-        (url (zellij-send-dashboard--extract-url screen))
-        (buf (get-buffer-create (format "*zellij-qr-%s*" session))))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t)
-            (image nil))
-        (erase-buffer)
-        (special-mode)
-        ;; ブロック文字を 1 桁にする（2 桁のままだと QR が横に伸びて読めない）
-        (setq-local char-width-table (copy-sequence char-width-table))
-        (dolist (c zellij-send-dashboard--qr-chars)
-          (set-char-table-range char-width-table (cons c c) 1))
-        (setq-local line-spacing 0)
-        (setq-local cursor-type nil)
-        (insert (propertize (format " Remote Control — [%s]\n\n" session)
-                            'face 'bold))
-        (cond
-         ((null qr)
-          (insert (propertize " QR コードを取得できませんでした。\n\n"
-                              'face 'warning)))
-         ;; 画像で描ければそちらを使う（文字だとフォント次第で読めない）
-         ((setq image (zellij-send-dashboard--qr-image qr))
-          (insert " ")
-          (insert-image image)
-          (insert "\n\n"))
-         (t (insert (mapconcat #'identity qr "\n") "\n\n")))
-        (if url
-            (insert " " (propertize url 'face 'link) "\n\n"
-                    (propertize " スマホでスキャンするか、上の URL を開いてください。\n"
-                                'face 'shadow))
-          (insert (propertize " URL も取得できませんでした。ペインを直接確認してください。\n"
-                              'face 'warning)))
-        (goto-char (point-min))))
-    (display-buffer buf)
-    (when url (kill-new url) (message "URL をキルリングにコピーしました"))))
-
-(defun zellij-send-dashboard--wait-for-screen (buf session pred deadline on-ok on-timeout)
-  "SESSION の画面が PRED を満たすまでポーリングする。
-満たしたら ON-OK に画面文字列を渡して呼ぶ。DEADLINE（`float-time' 値）を
-過ぎたら ON-TIMEOUT に最後の画面を渡して呼ぶ。
-claude.ai への接続時間は読めないので固定待ちにはしない。"
-  (zellij-send-dump-screen
-   buf
-   (lambda (screen)
-     (cond
-      ((and screen (funcall pred screen)) (funcall on-ok screen))
-      ((> (float-time) deadline) (funcall on-timeout screen))
-      (t
-       (run-at-time zellij-send-dashboard-remote-control-poll nil
-                    #'zellij-send-dashboard--wait-for-screen
-                    buf session pred deadline on-ok on-timeout))))))
-
-(defun zellij-send-dashboard--deadline ()
-  "Remote Control 待ちの締切時刻を返す。"
-  (+ (float-time) zellij-send-dashboard-remote-control-timeout))
-
-(defun zellij-send-dashboard--qr-step-capture (buf session)
-  "QR が描かれるまで待ち、バッファに映してからペインを Esc で戻す。"
-  (zellij-send-dashboard--wait-for-screen
-   buf session
-   (lambda (screen) (zellij-send-dashboard--extract-qr screen))
-   (zellij-send-dashboard--deadline)
-   (lambda (screen)
-     (zellij-send-dashboard--show-qr session screen)
-     ;; ペインをプロンプトに戻す（メニューに留まると以後の送信が壊れる）
-     (zellij-send-keys-to-session buf '(27) #'ignore))
-   (lambda (screen)
-     (message "QR コードの表示を待ちましたが出ませんでした")
-     (zellij-send-dashboard--show-qr session (or screen ""))
-     (zellij-send-keys-to-session buf '(27) #'ignore))))
-
-(defconst zellij-send-dashboard--rc-menu-items
-  '("Disconnect this session" "Show QR code" "Hide QR code" "Continue")
-  "Remote Control メニューの項目ラベル。
-項目の説明文は折り返して複数行になるため、**行数ではなく項目数**で
-カーソル移動量を数える必要がある（行数で数えると Show QR code を
-通り越して Disconnect this session を選んでしまう）。")
-
-(defun zellij-send-dashboard--qr-menu-visible-p (screen)
-  "SCREEN に Remote Control のメニューが出ていれば non-nil。"
-  (string-match-p "Show QR code\\|Hide QR code" screen))
-
-(defun zellij-send-dashboard--rc-menu-items (screen)
-  "SCREEN のメニュー項目を (ラベル . 選択中か) のリストで順に返す。"
-  (delq nil
-        (mapcar
-         (lambda (line)
-           (let ((label (seq-find (lambda (it) (string-match-p (regexp-quote it) line))
-                                  zellij-send-dashboard--rc-menu-items)))
-             (when label
-               (cons label (string-match-p "^[[:space:]]*❯" line)))))
-         (split-string screen "\n"))))
-
-(defun zellij-send-dashboard--rc-selected-p (screen label)
-  "SCREEN のメニューで LABEL が選択中なら non-nil。"
-  (let ((item (assoc label (zellij-send-dashboard--rc-menu-items screen))))
-    (and item (cdr item))))
-
-(defun zellij-send-dashboard--qr-step-menu (buf session)
-  "Remote Control のメニューが出るまで待ち、「Show QR code」を選ぶ。"
-  (zellij-send-dashboard--wait-for-screen
-   buf session #'zellij-send-dashboard--qr-menu-visible-p
-   (zellij-send-dashboard--deadline)
-   (lambda (screen)
-     (let* ((items (zellij-send-dashboard--rc-menu-items screen))
-            (labels (mapcar #'car items))
-            (qr-idx (seq-position labels "Show QR code"))
-            (cur-idx (seq-position items nil (lambda (it _) (cdr it)))))
-       (cond
-        ;; 「Hide QR code」＝すでに QR が出ている。そのまま取り込む
-        ((null qr-idx) (zellij-send-dashboard--qr-step-capture buf session))
-        ((null cur-idx)
-         (message "メニューの選択位置が読めませんでした。ペインを直接確認してください")
-         ;; メニューは出ているので閉じておく。留まると以後の送信が壊れる
-         (zellij-send-keys-to-session buf '(27) #'ignore)
-         (zellij-send-dashboard--show-qr session screen))
-        ((= cur-idx qr-idx) (zellij-send-dashboard--qr-confirm-and-enter buf session))
-        (t
-         (let* ((delta (- cur-idx qr-idx))
-                ;; ↑ = ESC [ A、↓ = ESC [ B
-                (key (if (> delta 0) '(27 91 65) '(27 91 66)))
-                (keys (apply #'append (make-list (abs delta) key))))
-           (zellij-send-keys-to-session
-            buf keys
-            (lambda (_)
-              (zellij-send-dashboard--qr-confirm-and-enter buf session))))))))
-   (lambda (screen)
-     (message "Remote Control の画面が出ませんでした（%.0f 秒待機）。ペインを直接確認してください"
-              zellij-send-dashboard-remote-control-timeout)
-     (when screen
-       (zellij-send-dashboard--show-qr session screen)))))
-
-(defun zellij-send-dashboard--qr-confirm-and-enter (buf session)
-  "「Show QR code」が選択されていることを確認してから Enter を送る。
-確認せずに Enter を送ると、ずれていた場合に
-「Disconnect this session」を実行してしまうため。"
-  (zellij-send-dashboard--wait-for-screen
-   buf session
-   (lambda (screen)
-     (zellij-send-dashboard--rc-selected-p screen "Show QR code"))
-   (+ (float-time) 6.0)
-   (lambda (_screen)
-     (zellij-send-keys-to-session
-      buf '(13)
-      (lambda (_) (zellij-send-dashboard--qr-step-capture buf session))))
-   (lambda (_screen)
-     (message "「Show QR code」を選択できませんでした。何も実行せず中止します")
-     (zellij-send-keys-to-session buf '(27) #'ignore))))
-
-(defun zellij-send-dashboard-remote-control ()
-  "カーソル行のセッションを Remote Control に接続し、QR コードを表示する。
-セッションが claude.ai / Claude モバイルアプリから操作できるようになる。
-対象ペインに `/remote-control' を打ち込むため、**Claude Code の**
-待機中のセッションのみ許可する（作業中に割り込まないため）。"
-  (interactive)
-  (let* ((buf (zellij-send-dashboard--buffer-at-point))
-         (session (zellij-send-session-name buf))
-         (status (plist-get (gethash session zellij-send-dashboard--state)
-                            :status)))
-    ;; `/remote-control' も、その後のメニュー解析（`❯' 行）も Claude Code の
-    ;; 機能。他の CLI に打ち込むと本文として解釈される（astra の指摘）
-    (unless (zellij-send-session-claude-p buf)
-      (user-error "Remote Control は Claude Code 専用です（[%s] は %s）"
-                  session
-                  (or (plist-get (zellij-send-session-state buf) :agent)
-                      "コマンド不明")))
-    (unless (eq status 'idle)
-      (user-error "[%s] は待機中ではありません。作業が終わってから実行してください"
-                  session))
-    ;; ローカルのセッションを claude.ai 側に露出させる操作なので必ず確認する
-    (unless (yes-or-no-p
-             (format "[%s] を Remote Control に接続しますか?（claude.ai / モバイルアプリから操作できるようになります） "
-                     session))
-      (user-error "キャンセルしました"))
-    (message "[%s] を Remote Control に接続中..." session)
-    (zellij-send-to-session
-     buf "/remote-control"
-     (lambda (ok)
-       (when ok
-         (zellij-send-dashboard--qr-step-menu buf session))))))
-
 (defun zellij-send-dashboard-open-log (&optional previous)
   "カーソル行のセッションの出力ログを開く。
 PREVIOUS（`\\[universal-argument]'）付きなら退避した以前のログを開く。"
@@ -1035,7 +744,6 @@ PREVIOUS（`\\[universal-argument]'）付きなら退避した以前のログを
     ("1/2/3" zellij-send-dashboard-select-1         "選択肢の番号を送る")
     ("i"   zellij-send-dashboard-interrupt          "処理を中断する（Esc を送る）")
     ("c"   zellij-send-dashboard-compact            "/compact を送る")
-    ("r"   zellij-send-dashboard-remote-control     "Remote Control に接続して QR を表示")
     ("一覧")
     ("g"   zellij-send-dashboard-refresh            "手動で更新する（revert-buffer）")
     ("G"   zellij-send-dashboard-connect-all        "未接続のセッションに接続し、消えた行を消す")
@@ -1058,7 +766,6 @@ COMMAND はキーマップとの食い違いを検査するために持つ
     (define-key map (kbd "i")   #'zellij-send-dashboard-interrupt)
     (define-key map (kbd "c")   #'zellij-send-dashboard-compact)
     (define-key map (kbd "Q")   #'zellij-send-dashboard-kill-session)
-    (define-key map (kbd "r")   #'zellij-send-dashboard-remote-control)
     (define-key map (kbd "1")   #'zellij-send-dashboard-select-1)
     (define-key map (kbd "2")   #'zellij-send-dashboard-select-2)
     (define-key map (kbd "3")   #'zellij-send-dashboard-select-3)

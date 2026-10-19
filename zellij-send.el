@@ -73,7 +73,8 @@
 
 起動コマンドに `--remote-control SESSION' を足すので、claude.ai や
 Claude モバイルアプリのセッション一覧に zellij のセッション名（`myproj00'）で
-出てくる。画面を読まないので、ダッシュボードの `r'（QR の取り込み）より壊れにくい。
+出てくる。画面を読まないので壊れにくい。起動済みのセッションを後から繋ぐには、
+`/remote-control' を送ってメニューをキー透過モードで操作する。
 
 効くのは `[New]' と `zellij-send-add-agent' で**これから作る**セッションだけ。
 claude 以外のコマンドには付けない。"
@@ -4737,13 +4738,6 @@ Stop フックが来ないため）。"
           :changed-at zellij-send--last-change-time
           :editing (buffer-modified-p)
           :cleared zellij-send--user-cleared)))
-
-(defun zellij-send-session-claude-p (buf)
-  "黒板 BUF のペインで Claude Code が動いていると**確定している**なら non-nil。
-Claude Code 専用の、ペインに打ち込む機能はこれで守る
-（`zellij-send--claude-confirmed-p'）。"
-  (with-current-buffer buf
-    (zellij-send--claude-confirmed-p)))
 
 (defun zellij-send-to-session (buf text &optional callback)
   "黒板 BUF のペインに TEXT を送り、Enter を押す（`zellij-send--send'）。

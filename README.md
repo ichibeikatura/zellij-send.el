@@ -181,7 +181,7 @@ Each session can run a different command. Completion offers `zellij-send-command
 | Replay the conversation (`a`), output log (`l`) | yes | — | — | — |
 | Slash-command completion (`/`) | yes | — | — | — |
 | Answering AskUserQuestion (`u` / automatic) | yes | — | — | — |
-| Remote Control QR, usage bars | yes | — | — | — |
+| Usage bars | yes | — | — | — |
 
 The bottom four rows read the shape of Claude Code's screen or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens there — it does not interpret the screen, so it works with any TUI.
 
@@ -267,7 +267,6 @@ While on, the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary charact
 | `l`     | Open that session's log                    |
 | `i`     | Interrupt what the session is doing (Esc)  |
 | `c`     | Send `/compact`                            |
-| `r`     | Connect to Remote Control and show its QR  |
 | `Q`     | End the session (same as `C-c C-a q`)      |
 | `g`     | Refresh now (`revert-buffer`)              |
 | `G`     | Connect to any zellij session not yet listed |
@@ -279,17 +278,12 @@ A session counts as **working** when a spinner line is present **or** the screen
 
 `Q` asks for confirmation, sends `/exit`, waits for the agent to exit and deletes the zellij session; it force-deletes if the agent has not exited within `zellij-send-quit-timeout` seconds (default 10).
 
-### Remote Control QR (`r`)
+### Remote Control
 
-Connects the session under the cursor to [Remote Control](https://claude.ai/code) and shows the QR code Claude Code draws, as an image in `*zellij-qr-SESSION*`; the session URL is copied to the kill ring. It exposes a local session to claude.ai, so it always asks first, and it only works on an **idle** session.
+The dashboard does not connect sessions to [Remote Control](https://claude.ai/code). There are two ways:
 
-**If you always want phone access, set `zellij-send-remote-control` to `t` instead.** New Claude Code sessions then start as `claude --remote-control SESSION` and show up in claude.ai and the mobile app under their zellij name without scanning anything.
-
-| Option | Meaning |
-|---|---|
-| `zellij-send-dashboard-remote-control-timeout` | How long to wait for the screens (default 40s) |
-| `zellij-send-dashboard-remote-control-poll` | Polling interval while waiting (default 1.5s) |
-| `zellij-send-dashboard-qr-module-size` | Pixels per QR module (default 4) |
+- **From the start (recommended):** set `zellij-send-remote-control` to `t`. New Claude Code sessions then start as `claude --remote-control SESSION` and show up in claude.ai and the mobile app under their zellij name without scanning anything.
+- **For a session that is already running:** send `/remote-control` with `C-c C-s`, then work through Claude Code's menu (including its QR code) in key passthrough mode (`C-c C-t`).
 
 ### Display options
 
