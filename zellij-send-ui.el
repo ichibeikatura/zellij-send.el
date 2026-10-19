@@ -655,6 +655,10 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
              (progn
                (when (buffer-live-p main-buf)
                  (kill-buffer main-buf))
+               ;; 強制削除の経路（`--force-delete-session'）と同じく、ここでも
+               ;; 履歴を捨てる。2026-10-20 まで抜けていて、同じ名前で作り直すと
+               ;; 前の履歴を引き継いだ
+               (zellij-send-forget-session session)
                (message "セッション [%s] は終了しました" session))
            (message "セッション [%s] を終了中..." session)
            (run-at-time zellij-send-quit-poll-interval nil
@@ -1146,6 +1150,245 @@ Stop フックが来ないため）。"
   "zellij のセッション一覧を非同期で取って CALLBACK に渡す。
 渡すのは (:ok SESSIONS) か (:failed REASON)（REASON はユーザーに見せる文）。
 詳細は `zellij-send--list-sessions-async'。")
+
+;; 黒板の用意と、zellij のセッション一覧との突き合わせ（セッションの監視）。
+;; 2026-10-20 までダッシュボードが持っていたので、ダッシュボードを開かないと
+;; 死んだセッションの黒板が残り、送信履歴も捨てられなかった（同じ名前で
+;; 作り直すと前の履歴を引き継いだ）。黒板を作るには `zellij-send-mode' が、
+;; 片付けるには `zellij-send-forget-session' が要るので、どちらも持つこの層に
+;; 置く（core からは上の層を呼べない）。
+
+(defun zellij-send--buffer-name (session)
+  "SESSION に対応するバッファ名を返す。"
+  (format "*ai-%s*" session))
+
+(defvar-local zellij-send--created-at nil
+  "この黒板を作った時刻（`float-time'）。
+作ったばかりの黒板を、まだ `list-sessions' に出ていないという理由で
+片付けないために使う（`zellij-send--prune-grace'）。")
+
+(defun zellij-send--get-or-create-buffer (session &optional no-subscribe)
+  "SESSION 用バッファを返す。なければ作成して zellij-send-mode を有効化。
+
+subscribe を張り直すのは既存のバッファだけ。新しいバッファは呼び出し側
+（`zellij-send-attach-session-async' / `zellij-send--spawn-session'）が
+pane-id とコマンドを決めてから張る。ここでも張ると、ペイン検出が
+2 本並んで走るうえ、新規作成ではセッションができる前に検出しに行く。
+NO-SUBSCRIBE が non-nil なら既存のバッファでも張らない（自分で検出して
+張る `zellij-send-attach-session-async' 用。`--connect-existing-session'
+はバッファを作ってから attach を呼ぶので、そこでは既存扱いになる）。"
+  (let* ((name (zellij-send--buffer-name session))
+         (buf (get-buffer-create name)))
+    (with-current-buffer buf
+      (if (eq major-mode 'zellij-send-mode)
+          ;; pane-id が未確定でも呼んでよい（ensure が特定してから張る）
+          (unless no-subscribe
+            (zellij-send--subscribe-ensure))
+        ;; 定義は markdown-mode の有無で分けた `if' の中にあるので、
+        ;; バイトコンパイラには見えない（自分への `declare-function' は置かない）
+        (with-no-warnings
+          (zellij-send-mode))
+        (setq zellij-send--session session
+              zellij-send--created-at (float-time))))
+    buf))
+
+(defun zellij-send-attach-session-async (session &optional callback)
+  "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
+cwd は `dump-layout' から、pane-id と動いているコマンドは
+`list-panes --all' を 1 回叩いて取得する（`zellij-send--detect-pane-async'）。
+pane-id が取れれば attach クライアント無しでも送信できる。
+用意できたら CALLBACK にバッファを渡す。"
+  (let ((buf (zellij-send--get-or-create-buffer session t)))
+    (zellij-send--session-cwd-async
+     session
+     (lambda (cwd)
+       (when (and cwd (buffer-live-p buf) (file-directory-p cwd))
+         (with-current-buffer buf
+           (setq-local default-directory (file-name-as-directory cwd))))
+       (zellij-send--detect-pane-async
+        session
+        (lambda (pane-id command)
+          ;; コマンドを pane-id と同時に入れてから subscribe を張る。
+          ;; subscribe の開始がスラッシュコマンドの先読みを呼ぶので、
+          ;; `zellij-send--command' が空のままだと claude 以外のペインにも
+          ;; `/' を打ってしまう
+          (when (and pane-id (buffer-live-p buf))
+            (with-current-buffer buf
+              (setq-local zellij-send--pane-id pane-id)
+              ;; **nil でも代入する**。`when command' にすると、検出に
+              ;; 失敗したときに前のペインのコマンドが残り、別の CLI を
+              ;; claude だと思い込む（astra のレビューで指摘）
+              (setq-local zellij-send--command command)
+              (zellij-send--subscribe-ensure)))
+          ;; やり直しても取れなかった。黙っていると黒板が空のまま残るだけで
+          ;; 理由が分からない（ダッシュボードの自動接続で踏んだ）
+          (unless pane-id
+            (message "[%s] のペインを特定できませんでした。黒板を閉じて（C-x k）ダッシュボードの G か M-x zellij-send で繋ぎ直してください"
+                     session))
+          (when callback (funcall callback buf))))))))
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-auto-connect
+  'zellij-send-auto-connect "0.1.0")
+
+(defcustom zellij-send-auto-connect t
+  "non-nil なら `zellij-send-scan-interval' ごとに、まだ黒板の無い zellij
+セッションへ自動接続する（`zellij-send-start-session-watch'）。
+`zellij list-sessions' の各セッションについて cwd と pane-id を取得し
+（`zellij-send-attach-session-async'）、黒板バッファを用意する。
+ユーザーには何も尋ねない。nil ならダッシュボードの G を押したときだけ接続する。
+消えたセッションの黒板の片付け（`zellij-send-prune-gone'）は nil でも続ける。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-scan-interval
+  'zellij-send-scan-interval "0.1.0")
+
+(defcustom zellij-send-scan-interval 15.0
+  "zellij のセッション一覧を見に行く間隔（秒）。0 で自動検出なし（G で手動）。
+Emacs 起動後にターミナル側で立てたセッションを取り込み、
+zellij 側で終了したセッションの黒板を片付けるために使う
+（`zellij-send-start-session-watch'）。ダッシュボードの再描画とは別のタイマーで、
+`zellij list-sessions' を定期的に実行するのはこれだけ。"
+  :type 'number
+  :group 'zellij-send)
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-prune-gone
+  'zellij-send-prune-gone "0.1.0")
+
+(defcustom zellij-send-prune-gone t
+  "non-nil なら zellij から消えたセッションの黒板バッファを kill し、送信履歴を捨てる。
+編集中（`buffer-modified-p' が non-nil）のバッファは入力を失わないよう残す。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(defvar zellij-send-sessions-changed-hook nil
+  "セッションの突き合わせで黒板が増えた・消えたときに走るフック（引数なし）。
+接続は 1 つ用意できるたびに走る。ダッシュボードが一覧の再描画を足す
+（本体はダッシュボードを知らない。依存は dashboard → 本体の一方向）。")
+
+(defvar zellij-send--session-watch-timer nil
+  "セッションの監視（`zellij-send-sync-sessions' を繰り返す）タイマー。")
+
+(defvar zellij-send--session-watch-owners nil
+  "黒板が 1 つも無くても監視を続けさせるバッファのリスト。
+監視は黒板がすべて消えたら止まるが、ダッシュボードは黒板が 0 個でも
+ターミナルで立てたセッションを取り込みたいので、自分をここに登録する。
+死んだバッファは監視のたびに除く。")
+
+(defvar zellij-send--scanning nil
+  "検出を始めた時刻（`float-time'）。検出中でなければ nil。
+応答が遅いときに `zellij' を多重起動しないための番兵。コールバックが返らない
+まま残っても自動検出が黙って止まらないよう、`zellij-send--scan-stale'
+秒を過ぎたものは無視する（2026-10-19 までは t のまま残りえた）。")
+
+(defconst zellij-send--scan-stale 30.0
+  "`zellij-send--scanning' を無効とみなすまでの秒数。
+`zellij-send-list-sessions' は 5 秒でタイムアウトするので、普通はそれより前に返る。")
+
+(defconst zellij-send--prune-grace 30.0
+  "作ってからこの秒数のうちは、`list-sessions' に無くても黒板を片付けない。
+新規作成（`zellij-send--spawn-session'）は黒板を先に作り、セッションは
+`attach --create-background' が返ってからできる。その間に始まった検出の
+一覧には新しいセッションが載っていないので、片付けると作ったばかりの黒板を
+消してしまう。監視をダッシュボードの外でも動かすようにした（2026-10-20）ので、
+踏む機会が増えた。")
+
+(defun zellij-send--connected-sessions ()
+  "すでに黒板バッファを持っているセッション名のリストを返す。"
+  (mapcar #'zellij-send-session-name (zellij-send-sessions)))
+
+(defun zellij-send--prune-gone (sessions)
+  "SESSIONS に無いセッションの黒板バッファを kill し、消した数を返す。
+編集中のバッファは入力を失わないよう残す。作ったばかりの黒板
+（`zellij-send--prune-grace'）も残す。"
+  (let ((killed 0)
+        (now (float-time)))
+    (dolist (buf (zellij-send-sessions))
+      (let ((session (zellij-send-session-name buf))
+            (created (buffer-local-value 'zellij-send--created-at buf)))
+        (unless (or (member session sessions)
+                    (and created (< (- now created) zellij-send--prune-grace)))
+          (if (buffer-modified-p buf)
+              (message "セッション %s は終了していますが、編集中なのでバッファを残します"
+                       session)
+            (kill-buffer buf)
+            ;; 同じ名前で作り直したセッションに前の送信履歴を引き継がない
+            (zellij-send-forget-session session)
+            (setq killed (1+ killed))))))
+    killed))
+
+(defun zellij-send-sync-sessions (&optional manual)
+  "zellij のセッション一覧と黒板を 1 回突き合わせる。
+消えたセッションの黒板は kill し（`zellij-send-prune-gone'）、未接続の
+セッションには接続する。接続するのは `zellij-send-auto-connect' が
+non-nil か、MANUAL（ユーザーが明示的に頼んだ）が non-nil のとき。
+MANUAL なら結果を message する。黒板が増えた・消えたら
+`zellij-send-sessions-changed-hook' を走らせる。"
+  (unless (and zellij-send--scanning
+               (< (- (float-time) zellij-send--scanning)
+                  zellij-send--scan-stale))
+    (let ((started (float-time)))
+      (setq zellij-send--scanning started)
+      (zellij-send-list-sessions
+       (lambda (result)
+         ;; 自分が立てた印だけを下ろす（期限切れの後に始まった検出の印を消さない）
+         (when (eql zellij-send--scanning started)
+           (setq zellij-send--scanning nil))
+         (if (not (eq (car result) :ok))
+             ;; タイムアウト・失敗は一覧が空とみなさない（生きている黒板を消さない）
+             (when manual
+               (message "%s" (cadr result)))
+           (let* ((sessions (cadr result))
+                  (new (and (or manual zellij-send-auto-connect)
+                            (seq-difference
+                             sessions (zellij-send--connected-sessions))))
+                  (killed (if zellij-send-prune-gone
+                              (zellij-send--prune-gone sessions)
+                            0)))
+             (when new
+               (message "セッションに接続中: %s" (string-join new ", "))
+               (dolist (session new)
+                 (zellij-send-attach-session-async
+                  session
+                  (lambda (_buf)
+                    ;; 接続のたびに一覧へ反映する
+                    (run-hooks 'zellij-send-sessions-changed-hook)))))
+             (when (> killed 0)
+               (run-hooks 'zellij-send-sessions-changed-hook))
+             (when (and manual (null new) (= killed 0))
+               (message "新しいセッションはありません")))))))))
+
+(defun zellij-send--session-watch-tick ()
+  "監視タイマーのコールバック。黒板も登録したバッファも無くなっていたら止める。"
+  (setq zellij-send--session-watch-owners
+        (seq-filter #'buffer-live-p zellij-send--session-watch-owners))
+  (if (and (null zellij-send--session-watch-owners)
+           (null (zellij-send-sessions)))
+      (zellij-send-stop-session-watch)
+    (with-demoted-errors "zellij-send: %S"
+      (zellij-send-sync-sessions))))
+
+(defun zellij-send-start-session-watch (&optional owner)
+  "`zellij-send-scan-interval' ごとにセッションを突き合わせる監視を始める。
+既に動いていれば何もしない（OWNER の登録だけする）。監視は黒板が
+すべて消えたら止まる。OWNER（バッファ）を渡すと、それが生きている間は
+黒板が 0 個でも止まらない（ダッシュボード用）。
+`zellij-send' とダッシュボードを開いたときに呼ぶ。"
+  (when (and (bufferp owner)
+             (not (memq owner zellij-send--session-watch-owners)))
+    (push owner zellij-send--session-watch-owners))
+  (when (and (> zellij-send-scan-interval 0)
+             (null zellij-send--session-watch-timer))
+    (setq zellij-send--session-watch-timer
+          (run-at-time zellij-send-scan-interval zellij-send-scan-interval
+                       #'zellij-send--session-watch-tick))))
+
+(defun zellij-send-stop-session-watch ()
+  "セッションの監視を止める。"
+  (when zellij-send--session-watch-timer
+    (cancel-timer zellij-send--session-watch-timer)
+    (setq zellij-send--session-watch-timer nil))
+  (setq zellij-send--session-watch-owners nil))
 
 (provide 'zellij-send-ui)
 

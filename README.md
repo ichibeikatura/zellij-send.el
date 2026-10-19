@@ -292,7 +292,7 @@ While on, the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary charact
 | `G`     | Connect to any zellij session not yet listed |
 | `?`     | Show the key list                          |
 
-Opening the dashboard connects, without asking, to every running zellij session that has no buffer yet (`zellij-send-dashboard-auto-connect`). It rescans every `zellij-send-dashboard-scan-interval` seconds (default 15), picking up sessions started from a terminal and removing the blackboards of sessions that ended (buffers you are editing are kept).
+Opening the dashboard connects, without asking, to every running zellij session that has no buffer yet (`zellij-send-auto-connect`). Every `zellij-send-scan-interval` seconds (default 15) zellij-send rescans, picking up sessions started from a terminal and removing the blackboards (and send history) of sessions that ended (buffers you are editing are kept; `zellij-send-prune-gone`). The rescan runs whenever you have a blackboard open, whether or not the dashboard is open, and stops once no blackboard is left. The old `zellij-send-dashboard-*` names of these three options still work.
 
 A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-active-window` seconds (default 6); with the [state hook](#3-state-hook-optional-makes-the-dashboards-state-reliable) installed, what Claude Code reports takes precedence. When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
 
@@ -314,8 +314,8 @@ The dashboard does not connect sessions to [Remote Control](https://claude.ai/co
 | `zellij-send-dashboard-max-height`      | Height cap in lines (default 16)                            |
 | `zellij-send-dashboard-tail-width`      | Width of the 状況 column (default 40)                       |
 | `zellij-send-dashboard-refresh-interval`| Redraw interval in seconds (default 3)                      |
-| `zellij-send-dashboard-scan-interval`   | Seconds between session scans (default 15; 0 disables)      |
-| `zellij-send-dashboard-prune-gone`      | Drop rows for sessions that ended (default `t`)             |
+| `zellij-send-scan-interval`             | Seconds between session scans (default 15; 0 disables)      |
+| `zellij-send-prune-gone`                | Drop blackboards of sessions that ended (default `t`)       |
 
 `zellij-send.el` (and the `zellij-send-*.el` files it loads) does not depend on the dashboard.
 

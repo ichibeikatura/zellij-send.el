@@ -293,7 +293,7 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 | `G`         | 未接続の zellij セッションに接続   |
 | `?`         | キー一覧を表示                     |
 
-ダッシュボードを開くと、まだバッファの無い起動中の zellij セッションに何も尋ねずに接続します（`zellij-send-dashboard-auto-connect`）。以後も `zellij-send-dashboard-scan-interval` 秒ごと（既定 15 秒）にセッション一覧を見て、ターミナルで立ち上げたセッションを取り込み、終了したセッションの黒板を消します（編集中の黒板は残します）。
+ダッシュボードを開くと、まだバッファの無い起動中の zellij セッションに何も尋ねずに接続します（`zellij-send-auto-connect`）。以後も `zellij-send-scan-interval` 秒ごと（既定 15 秒）にセッション一覧を見て、ターミナルで立ち上げたセッションを取り込み、終了したセッションの黒板と送信履歴を消します（編集中の黒板は残します。`zellij-send-prune-gone`）。この見回りはダッシュボードを開いていなくても黒板がある間は続き、黒板がすべて消えたら止まります。3 つの変数は旧名の `zellij-send-dashboard-…` でも効きます。
 
 「作業中」は、スピナー行がある**か**、画面が `zellij-send-active-window` 秒以内（既定 6 秒）に変化した場合です。[状態フック](#3-状態フック任意ダッシュボードの判定を確かにする)を入れていれば、Claude Code が知らせる状態を優先します。終わると「完了」になり、そのバッファを表示すると解除されます。状態の判定で zellij を追加で呼ぶことはありません。
 
@@ -315,8 +315,8 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 | `zellij-send-dashboard-max-height`      | 高さの上限行数（既定 16）                             |
 | `zellij-send-dashboard-tail-width`      | 「状況」列の幅（既定 40）                             |
 | `zellij-send-dashboard-refresh-interval`| 再描画間隔・秒（既定 3）                              |
-| `zellij-send-dashboard-scan-interval`   | セッション検出の間隔・秒（既定 15。0 で自動検出なし） |
-| `zellij-send-dashboard-prune-gone`      | 消えたセッションの行を消す（既定 `t`）                |
+| `zellij-send-scan-interval`             | セッション検出の間隔・秒（既定 15。0 で自動検出なし） |
+| `zellij-send-prune-gone`                | 消えたセッションの黒板を消す（既定 `t`）              |
 
 `zellij-send.el` 本体（とそれが読み込む `zellij-send-*.el`）はダッシュボードに依存しません。
 

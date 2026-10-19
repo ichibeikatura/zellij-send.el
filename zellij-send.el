@@ -24,70 +24,6 @@
 
 (require 'zellij-send-ui)
 
-;;; バッファ管理
-
-(defun zellij-send--buffer-name (session)
-  "SESSION に対応するバッファ名を返す。"
-  (format "*ai-%s*" session))
-
-(defun zellij-send--get-or-create-buffer (session &optional no-subscribe)
-  "SESSION 用バッファを返す。なければ作成して zellij-send-mode を有効化。
-
-subscribe を張り直すのは既存のバッファだけ。新しいバッファは呼び出し側
-（`zellij-send-attach-session-async' / `zellij-send--spawn-session'）が
-pane-id とコマンドを決めてから張る。ここでも張ると、ペイン検出が
-2 本並んで走るうえ、新規作成ではセッションができる前に検出しに行く。
-NO-SUBSCRIBE が non-nil なら既存のバッファでも張らない（自分で検出して
-張る `zellij-send-attach-session-async' 用。`--connect-existing-session'
-はバッファを作ってから attach を呼ぶので、そこでは既存扱いになる）。"
-  (let* ((name (zellij-send--buffer-name session))
-         (buf (get-buffer-create name)))
-    (with-current-buffer buf
-      (if (eq major-mode 'zellij-send-mode)
-          ;; pane-id が未確定でも呼んでよい（ensure が特定してから張る）
-          (unless no-subscribe
-            (zellij-send--subscribe-ensure))
-        (zellij-send-mode)
-        (setq zellij-send--session session)))
-    buf))
-
-;;; セッション情報の取得（cwd・pane-id）
-
-(defun zellij-send-attach-session-async (session &optional callback)
-  "既存の SESSION 用バッファを、ユーザーに何も聞かずに用意する。
-cwd は `dump-layout' から、pane-id と動いているコマンドは
-`list-panes --all' を 1 回叩いて取得する（`zellij-send--detect-pane-async'）。
-pane-id が取れれば attach クライアント無しでも送信できる。
-用意できたら CALLBACK にバッファを渡す。"
-  (let ((buf (zellij-send--get-or-create-buffer session t)))
-    (zellij-send--session-cwd-async
-     session
-     (lambda (cwd)
-       (when (and cwd (buffer-live-p buf) (file-directory-p cwd))
-         (with-current-buffer buf
-           (setq-local default-directory (file-name-as-directory cwd))))
-       (zellij-send--detect-pane-async
-        session
-        (lambda (pane-id command)
-          ;; コマンドを pane-id と同時に入れてから subscribe を張る。
-          ;; subscribe の開始がスラッシュコマンドの先読みを呼ぶので、
-          ;; `zellij-send--command' が空のままだと claude 以外のペインにも
-          ;; `/' を打ってしまう
-          (when (and pane-id (buffer-live-p buf))
-            (with-current-buffer buf
-              (setq-local zellij-send--pane-id pane-id)
-              ;; **nil でも代入する**。`when command' にすると、検出に
-              ;; 失敗したときに前のペインのコマンドが残り、別の CLI を
-              ;; claude だと思い込む（astra のレビューで指摘）
-              (setq-local zellij-send--command command)
-              (zellij-send--subscribe-ensure)))
-          ;; やり直しても取れなかった。黙っていると黒板が空のまま残るだけで
-          ;; 理由が分からない（ダッシュボードの自動接続で踏んだ）
-          (unless pane-id
-            (message "[%s] のペインを特定できませんでした。黒板を閉じて（C-x k）ダッシュボードの G か M-x zellij-send で繋ぎ直してください"
-                     session))
-          (when callback (funcall callback buf))))))))
-
 ;;; エントリポイント
 
 (defun zellij-send--prompt-session-dir ()
@@ -260,6 +196,9 @@ cwd と pane-id は zellij から取得するので、ディレクトリは尋�
 (defun zellij-send ()
   "zellij セッションを選択して入力バッファを開く。"
   (interactive)
+  ;; 消えたセッションの黒板を片付ける監視は、ダッシュボードを開かなくても
+  ;; 動かす（`zellij-send-start-session-watch'）。黒板がすべて消えたら止まる
+  (zellij-send-start-session-watch)
   (message "セッション一覧を取得中...")
   (zellij-send--list-sessions-async
    (lambda (result)

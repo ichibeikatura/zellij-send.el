@@ -12,8 +12,10 @@
 ;; 作業中・選択待ち・待機の判定は本体が行う（`zellij-send-session-state'）。
 ;; ここで決めるのは「完了」（見ていない間に作業が終わった）だけで、これは
 ;; ウィンドウの可視性で決まる表示側の概念なので、このファイルが持つ。
-;; 状態の算出では zellij を呼ばない。呼ぶのは 15 秒ごとのセッション検出
-;; （`zellij-send-dashboard-scan-interval'）だけ。
+;; このファイルは zellij を呼ばない。セッションの検出（未接続のセッションへの
+;; 接続・消えたセッションの黒板の片付け）は本体の監視
+;; （`zellij-send-start-session-watch'）が行い、黒板が増減したら
+;; `zellij-send-sessions-changed-hook' で知らせてくる。
 ;;
 ;;   M-x zellij-send-dashboard
 ;;
@@ -94,30 +96,6 @@ codex も同じ文言を出すのでそのまま効く（実測: `• Working (2
   :type '(repeat regexp)
   :group 'zellij-send-dashboard)
 
-(defcustom zellij-send-dashboard-auto-connect t
-  "non-nil なら起動時と `zellij-send-dashboard-scan-interval' ごとに、
-まだバッファの無い zellij セッションへ自動接続する。
-`zellij list-sessions' の各セッションについて cwd と pane-id を取得し
-（`zellij-send-attach-session-async'）、黒板バッファを用意する。
-ユーザーには何も尋ねない。nil なら G を押したときだけ接続する。"
-  :type 'boolean
-  :group 'zellij-send-dashboard)
-
-(defcustom zellij-send-dashboard-scan-interval 15.0
-  "zellij のセッション一覧を見に行く間隔（秒）。0 で自動検出なし（G で手動）。
-Emacs 起動後にターミナル側で立てたセッションを取り込み、
-zellij 側で終了したセッションの行を消すために使う。
-再描画（`zellij-send-dashboard-refresh-interval'）とは別のタイマーで、
-こちらだけが `zellij list-sessions' を実行する。"
-  :type 'number
-  :group 'zellij-send-dashboard)
-
-(defcustom zellij-send-dashboard-prune-gone t
-  "non-nil なら zellij から消えたセッションの黒板バッファを kill する。
-編集中（`buffer-modified-p' が non-nil）のバッファは入力を失わないよう残す。"
-  :type 'boolean
-  :group 'zellij-send-dashboard)
-
 (defcustom zellij-send-dashboard-show-usage t
   "non-nil ならダッシュボードに Claude の使用状況（/usage 相当）を表示する。
 **Claude Code 専用の情報**なので、見出しにも「Claude」と明記する
@@ -194,19 +172,6 @@ nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。
 
 (defvar zellij-send-dashboard--timer nil
   "再描画タイマー。")
-
-(defvar zellij-send-dashboard--scan-timer nil
-  "セッション一覧の検出タイマー。")
-
-(defvar zellij-send-dashboard--scanning nil
-  "検出を始めた時刻（`float-time'）。検出中でなければ nil。
-応答が遅いときに `zellij' を多重起動しないための番兵。コールバックが返らない
-まま残っても自動検出が黙って止まらないよう、`zellij-send-dashboard--scan-stale'
-秒を過ぎたものは無視する（2026-10-19 までは t のまま残りえた）。")
-
-(defconst zellij-send-dashboard--scan-stale 30.0
-  "`zellij-send-dashboard--scanning' を無効とみなすまでの秒数。
-`zellij-send-list-sessions' は 5 秒でタイムアウトするので、普通はそれより前に返る。")
 
 (defvar zellij-send-dashboard--state (make-hash-table :test #'equal)
   "セッション名 -> plist (:tick :changed-at :status :status-at :done)。
@@ -737,34 +702,6 @@ PREVIOUS（`\\[universal-argument]'）付きなら退避した以前のログを
     (cancel-timer zellij-send-dashboard--timer)
     (setq zellij-send-dashboard--timer nil)))
 
-(defun zellij-send-dashboard--scan-tick ()
-  "検出タイマーコールバック。zellij のセッション一覧と突き合わせる。"
-  (let ((buf (get-buffer zellij-send-dashboard-buffer-name)))
-    (if (not (buffer-live-p buf))
-        (zellij-send-dashboard--stop-scan-timer)
-      (with-demoted-errors "zellij-send-dashboard: %S"
-        (zellij-send-dashboard--sync-sessions)))))
-
-(defun zellij-send-dashboard--start-scan-timer ()
-  "検出タイマーを開始する。"
-  (when (and (> zellij-send-dashboard-scan-interval 0)
-             (null zellij-send-dashboard--scan-timer))
-    (setq zellij-send-dashboard--scan-timer
-          (run-at-time zellij-send-dashboard-scan-interval
-                       zellij-send-dashboard-scan-interval
-                       #'zellij-send-dashboard--scan-tick))))
-
-(defun zellij-send-dashboard--stop-scan-timer ()
-  "検出タイマーを止める。"
-  (when zellij-send-dashboard--scan-timer
-    (cancel-timer zellij-send-dashboard--scan-timer)
-    (setq zellij-send-dashboard--scan-timer nil)))
-
-(defun zellij-send-dashboard--stop-timers ()
-  "タイマーをすべて止める（ダッシュボードを閉じたとき）。"
-  (zellij-send-dashboard--stop-timer)
-  (zellij-send-dashboard--stop-scan-timer))
-
 
 ;;; メジャーモード
 
@@ -850,84 +787,35 @@ COMMAND はキーマップとの食い違いを検査するために持つ
   ;; 使用状況の再取得を含む自前の refresh に差し替える。
   (setq-local revert-buffer-function
               (lambda (&rest _) (zellij-send-dashboard-refresh)))
-  (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timers nil t))
-
-(defun zellij-send-dashboard--connected-sessions ()
-  "すでに黒板バッファを持っているセッション名のリストを返す。"
-  (mapcar #'zellij-send-session-name (zellij-send-sessions)))
+  ;; セッションの監視は止めない。黒板が残っている間は本体が続け、
+  ;; すべて消えたら本体が止める（`zellij-send-start-session-watch'）
+  (add-hook 'kill-buffer-hook #'zellij-send-dashboard--stop-timer nil t))
 
 (defun zellij-send-dashboard--redisplay ()
-  "ダッシュボードが生きていれば再描画する。"
+  "ダッシュボードが生きていれば再描画する。
+本体の監視が黒板を増やした・消したときに呼ばれる
+（`zellij-send-sessions-changed-hook'）。"
   (let ((db (get-buffer zellij-send-dashboard-buffer-name)))
     (when (buffer-live-p db)
       (with-current-buffer db
         (zellij-send-dashboard-refresh)))))
 
-(defun zellij-send-dashboard--prune-gone (sessions)
-  "SESSIONS に無いセッションの黒板バッファを kill し、消した数を返す。
-編集中のバッファは入力を失わないよう残す。"
-  (let ((killed 0))
-    (dolist (buf (zellij-send-sessions))
-      (let ((session (zellij-send-session-name buf)))
-        (unless (member session sessions)
-          (if (buffer-modified-p buf)
-              (message "セッション %s は終了していますが、編集中なのでバッファを残します"
-                       session)
-            (kill-buffer buf)
-            ;; 同じ名前で作り直したセッションに前の送信履歴を引き継がない
-            (zellij-send-forget-session session)
-            (setq killed (1+ killed))))))
-    killed))
-
-(defun zellij-send-dashboard--sync-sessions (&optional verbose)
-  "zellij のセッション一覧と一覧表を突き合わせる。
-未接続のセッションには接続し、消えたセッションのバッファは kill する
-\(`zellij-send-dashboard-prune-gone')。VERBOSE が non-nil なら結果を message する。"
-  (unless (and zellij-send-dashboard--scanning
-               (< (- (float-time) zellij-send-dashboard--scanning)
-                  zellij-send-dashboard--scan-stale))
-    (let ((started (float-time)))
-      (setq zellij-send-dashboard--scanning started)
-      (zellij-send-list-sessions
-       (lambda (result)
-         ;; 自分が立てた印だけを下ろす（期限切れの後に始まった検出の印を消さない）
-         (when (eql zellij-send-dashboard--scanning started)
-           (setq zellij-send-dashboard--scanning nil))
-         (if (not (eq (car result) :ok))
-             ;; タイムアウト・失敗は一覧が空とみなさない（生きている行を消さない）
-             (when verbose
-               (message "%s" (cadr result)))
-           (let* ((sessions (cadr result))
-                  (new (seq-difference
-                        sessions (zellij-send-dashboard--connected-sessions)))
-                  (killed (if zellij-send-dashboard-prune-gone
-                              (zellij-send-dashboard--prune-gone sessions)
-                            0)))
-             (when new
-               (message "セッションに接続中: %s" (string-join new ", "))
-               (dolist (session new)
-                 (zellij-send-attach-session-async
-                  session
-                  (lambda (_buf)
-                    ;; 接続のたびに一覧へ反映する
-                    (zellij-send-dashboard--redisplay)))))
-             (when (> killed 0)
-               (zellij-send-dashboard--redisplay))
-             (when (and verbose (null new) (= killed 0))
-               (message "新しいセッションはありません")))))))))
+(add-hook 'zellij-send-sessions-changed-hook #'zellij-send-dashboard--redisplay)
 
 (defun zellij-send-dashboard-connect-all ()
   "起動中の zellij セッションのうち、未接続のものに接続する。
 zellij から消えたセッションのバッファは kill する。
-cwd と pane-id は zellij から取得するのでユーザーには何も尋ねない。"
+cwd と pane-id は zellij から取得するのでユーザーには何も尋ねない。
+`zellij-send-auto-connect' が nil でも接続する（`zellij-send-sync-sessions'）。"
   (interactive)
-  (zellij-send-dashboard--sync-sessions t))
+  (zellij-send-sync-sessions t))
 
 ;;;###autoload
 (defun zellij-send-dashboard ()
   "zellij-send セッションのダッシュボードを開く。
-`zellij-send-dashboard-auto-connect' が non-nil なら、起動中の zellij
-セッションのうちまだバッファの無いものに自動接続する。"
+`zellij-send-auto-connect' が non-nil なら、起動中の zellij
+セッションのうちまだバッファの無いものに自動接続する。
+開いている間は、黒板が 0 個でも本体のセッションの監視を止めない。"
   (interactive)
   (let ((buf (get-buffer-create zellij-send-dashboard-buffer-name)))
     (with-current-buffer buf
@@ -939,9 +827,9 @@ cwd と pane-id は zellij から取得するのでユーザーには何も尋�
     (with-current-buffer buf
       (zellij-send-dashboard--fit-window))
     (zellij-send-dashboard--start-timer)
-    (when zellij-send-dashboard-auto-connect
-      (zellij-send-dashboard--start-scan-timer)
-      (zellij-send-dashboard--sync-sessions))))
+    (zellij-send-start-session-watch buf)
+    ;; 監視の初回を待たずに、開いた時点で 1 回突き合わせる
+    (zellij-send-sync-sessions)))
 
 (provide 'zellij-send-dashboard)
 

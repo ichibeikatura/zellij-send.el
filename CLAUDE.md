@@ -131,8 +131,9 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
   自動で選ばない（同じディレクトリに複数エージェントがいるため）。ユーザーの選択が優先
 - **作業中・選択待ち・待機は本体が導く**（`zellij-send-session-state`）。ダッシュボードが
   決めるのは表示側の概念の「完了」だけ。選択待ちの判定は `--screen-prompt-p` の 1 本
-- **ダッシュボードは状態判定で zellij を呼ばない。** 呼ぶのは 15 秒ごとのセッション検出だけ。
-  実測仕様は `.claude/skills/zellij-send-dashboard/SKILL.md`
+- **ダッシュボードは zellij を呼ばない。** セッションの検出（自動接続・消えた黒板の片付けと
+  履歴の破棄）は本体の監視（`zellij-send-start-session-watch`）が行い、ダッシュボードを
+  開かなくても動く。実測仕様は `.claude/skills/zellij-send-dashboard/SKILL.md`
 - **モードライン通知は持たない**（再描画のたびに全バッファを走査するため 2026-07 に撤去）
 
 ## 実測の置き場所（再調査しないこと）
