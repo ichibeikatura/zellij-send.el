@@ -139,26 +139,22 @@ dump-screen の生の出力を、本体が受信後に通す処理にかける�
 ;;; 3. スラッシュコマンドの補完メニュー
 
 ;; v2.1.303 は選択中の項目の行頭に `❯' を描く（`  ❯ /ndl  …'）。
-;; `zellij-send--slash-entry-regexp' はこの行に当たらず、そこで読むのをやめる。
-;; TODO(要・修正): 直したら `:expected-result :failed' を外す。
+;; 2026-10-19 にこの 4 本で見つけ、`zellij-send--slash-entry-regexp' を直した。
 
 (ert-deftest zellij-send-parse-test-slash-menu-wrapped ()
   "説明が折り返しても、続き行を拾わずに件数が合う。"
-  :expected-result :failed
   (should (equal (mapcar #'car (zellij-send--slash-menu-entries
                                 (zellij-send-parse-test--screen "slash-menu-wrapped")))
                  '("/doctor" "/skill-doctor"))))
 
 (ert-deftest zellij-send-parse-test-slash-menu-top ()
   "先頭（選択中の項目が一番上）。"
-  :expected-result :failed
   (should (equal (mapcar #'car (zellij-send--slash-menu-entries
                                 (zellij-send-parse-test--screen "slash-menu-top")))
                  '("/ndl" "/kdp-figure"))))
 
 (ert-deftest zellij-send-parse-test-slash-menu-middle ()
   "中間（選択中の項目が真ん中）。"
-  :expected-result :failed
   (should (equal (mapcar #'car (zellij-send--slash-menu-entries
                                 (zellij-send-parse-test--screen "slash-menu-middle")))
                  '("/install-github-app" "/install-slack-app" "/keybindings"
@@ -166,7 +162,6 @@ dump-screen の生の出力を、本体が受信後に通す処理にかける�
 
 (ert-deftest zellij-send-parse-test-slash-menu-tail ()
   "末尾（選択中の項目が一番下。入力枠のすぐ上）。"
-  :expected-result :failed
   (should (equal (mapcar #'car (zellij-send--slash-menu-entries
                                 (zellij-send-parse-test--screen "slash-menu-tail")))
                  '("/update-config" "/verify" "/workflow-authoring"))))
