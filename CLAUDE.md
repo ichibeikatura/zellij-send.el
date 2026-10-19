@@ -45,7 +45,12 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 - **zellij 呼び出しに同期呼び出し（`call-process` など）を入れない。** 全部 `make-process` +
   sentinel。引数は文字列のリストで渡し、シェル文字列を組まない。ユーザーテキストの前に `--`
 - **sentinel / プロセスフィルタの中でミニバッファを開かない。** `run-at-time 0` で抜けてから聞く
-  （その中では quit が抑止され C-g が効かない）
+  （その中では quit が抑止され C-g が効かない）。操作（op）の途中なら `--op-later` で抜ける
+- **ペインの入力欄に打ちながら進む非同期の操作は `zellij-send-op` を通す。** 始めるのは
+  `--op-begin`（黒板ごとに 1 つだけ・排他）、待つのは `--op-later`（素の `run-at-time` は
+  `zellij-send-abort` で止められない）、入出力は `--op-dump` / `--op-keys` / `--op-write-chars`
+  （止めた後に遅れて返った処理がキーを送らない）。結果は `(:ok V)` / `(:failed R)` /
+  `(:aborted R)` で返し、型で成否を見分けない
 - **ペインに打ち込む機能は `zellij-send--assert-capability`（確定が要る）で守る。** 推測の
   `zellij-send--capable-p`（不明なら既定コマンドで代用する）は読むだけの機能にしか使わない
 - **CLI ごとの知識は `zellij-send-agents` の 1 か所だけに置く。** 名前の文字列

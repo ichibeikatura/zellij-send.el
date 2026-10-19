@@ -199,7 +199,14 @@ nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。
   "セッション一覧の検出タイマー。")
 
 (defvar zellij-send-dashboard--scanning nil
-  "検出中なら non-nil。応答が遅いときに `zellij' を多重起動しないための番兵。")
+  "検出を始めた時刻（`float-time'）。検出中でなければ nil。
+応答が遅いときに `zellij' を多重起動しないための番兵。コールバックが返らない
+まま残っても自動検出が黙って止まらないよう、`zellij-send-dashboard--scan-stale'
+秒を過ぎたものは無視する（2026-10-19 までは t のまま残りえた）。")
+
+(defconst zellij-send-dashboard--scan-stale 30.0
+  "`zellij-send-dashboard--scanning' を無効とみなすまでの秒数。
+`zellij-send-list-sessions' は 5 秒でタイムアウトするので、普通はそれより前に返る。")
 
 (defvar zellij-send-dashboard--state (make-hash-table :test #'equal)
   "セッション名 -> plist (:tick :changed-at :status :status-at :done)。
@@ -871,32 +878,38 @@ COMMAND はキーマップとの食い違いを検査するために持つ
   "zellij のセッション一覧と一覧表を突き合わせる。
 未接続のセッションには接続し、消えたセッションのバッファは kill する
 \(`zellij-send-dashboard-prune-gone')。VERBOSE が non-nil なら結果を message する。"
-  (unless zellij-send-dashboard--scanning
-    (setq zellij-send-dashboard--scanning t)
-    (zellij-send-list-sessions
-     (lambda (sessions)
-       (setq zellij-send-dashboard--scanning nil)
-       (if (not (listp sessions))
-           ;; タイムアウト・失敗は一覧が空とみなさない（生きている行を消さない）
-           (when verbose
-             (message "%s" (zellij-send-list-sessions-failure sessions)))
-         (let ((new (seq-difference
-                     sessions (zellij-send-dashboard--connected-sessions)))
-               (killed (if zellij-send-dashboard-prune-gone
-                           (zellij-send-dashboard--prune-gone sessions)
-                         0)))
-           (when new
-             (message "セッションに接続中: %s" (string-join new ", "))
-             (dolist (session new)
-               (zellij-send-attach-session-async
-                session
-                (lambda (_buf)
-                  ;; 接続のたびに一覧へ反映する
-                  (zellij-send-dashboard--redisplay)))))
-           (when (> killed 0)
-             (zellij-send-dashboard--redisplay))
-           (when (and verbose (null new) (= killed 0))
-             (message "新しいセッションはありません"))))))))
+  (unless (and zellij-send-dashboard--scanning
+               (< (- (float-time) zellij-send-dashboard--scanning)
+                  zellij-send-dashboard--scan-stale))
+    (let ((started (float-time)))
+      (setq zellij-send-dashboard--scanning started)
+      (zellij-send-list-sessions
+       (lambda (result)
+         ;; 自分が立てた印だけを下ろす（期限切れの後に始まった検出の印を消さない）
+         (when (eql zellij-send-dashboard--scanning started)
+           (setq zellij-send-dashboard--scanning nil))
+         (if (not (eq (car result) :ok))
+             ;; タイムアウト・失敗は一覧が空とみなさない（生きている行を消さない）
+             (when verbose
+               (message "%s" (cadr result)))
+           (let* ((sessions (cadr result))
+                  (new (seq-difference
+                        sessions (zellij-send-dashboard--connected-sessions)))
+                  (killed (if zellij-send-dashboard-prune-gone
+                              (zellij-send-dashboard--prune-gone sessions)
+                            0)))
+             (when new
+               (message "セッションに接続中: %s" (string-join new ", "))
+               (dolist (session new)
+                 (zellij-send-attach-session-async
+                  session
+                  (lambda (_buf)
+                    ;; 接続のたびに一覧へ反映する
+                    (zellij-send-dashboard--redisplay)))))
+             (when (> killed 0)
+               (zellij-send-dashboard--redisplay))
+             (when (and verbose (null new) (= killed 0))
+               (message "新しいセッションはありません")))))))))
 
 (defun zellij-send-dashboard-connect-all ()
   "起動中の zellij セッションのうち、未接続のものに接続する。

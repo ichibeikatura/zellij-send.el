@@ -573,16 +573,18 @@ zellij の出力は 1 行 1 セッションで
                 (split-string raw "\n" t))))
 
 (defun zellij-send--list-sessions-async (callback)
-  "list-sessions を非同期で実行し CALLBACK を呼ぶ。
-成功時: (callback sessions) — sessions は文字列リスト（空もあり）。
-タイムアウト時（5秒）: (callback :timeout)。
-失敗時: (callback :error)。
+  "list-sessions を非同期で実行し、結果を CALLBACK に渡す。結果は次のどちらか:
+
+  (:ok SESSIONS)    SESSIONS はセッション名のリスト（0 件なら nil）
+  (:failed REASON)  タイムアウト（5 秒）か異常終了。REASON はユーザーに見せる文
 
 セッションが 0 件のときも zellij は exit 1 を返す（stderr に
 \"No active zellij sessions found.\"）。これだけは 0 件として扱い、
 それ以外の異常終了は 0 件と区別する。呼び出し側はセッションの無い
 バッファを kill するので、失敗を 0 件と読むと生きている黒板が消える。
-呼び出し側は `listp' で成否を見ること。
+成否は結果の先頭（`:ok' か `:failed'）で見ること。2026-10-19 までは
+成功をリスト、失敗を `:timeout' / `:error' で返していて、呼び出し側が
+`listp' で見分けていた（nil も `listp' を満たすので取り違えやすかった）。
 
 stderr は別バッファに分けず stdout と同じバッファで受ける。分けると
 stderr 側のパイプが読み終わる前に sentinel が走ることがあり、
@@ -605,13 +607,13 @@ stderr 側のパイプが読み終わる前に sentinel が走ることがあり
                (setq done t)
                (when timer (cancel-timer timer))
                (let* ((raw (with-current-buffer out-buf (buffer-string)))
-                      (sessions
+                      (result
                        (if (or (zerop (process-exit-status p))
                                (string-match-p "No active zellij sessions" raw))
-                           (zellij-send--parse-sessions raw)
-                         :error)))
+                           (list :ok (zellij-send--parse-sessions raw))
+                         (list :failed "zellij のセッション一覧を取得できませんでした。zellij が正常に動作しているか確認してください。"))))
                  (ignore-errors (kill-buffer out-buf))
-                 (funcall callback sessions))))))
+                 (funcall callback result))))))
     (setq timer
           (run-with-timer 5.0 nil
                           (lambda ()
@@ -619,13 +621,8 @@ stderr 側のパイプが読み終わる前に sentinel が走ることがあり
                               (setq done t)
                               (ignore-errors (delete-process proc))
                               (ignore-errors (kill-buffer out-buf))
-                              (funcall callback :timeout)))))))
-
-(defun zellij-send--list-sessions-failure (result)
-  "`zellij-send--list-sessions-async' の失敗 RESULT を説明する文を返す。"
-  (if (eq result :timeout)
-      "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。"
-    "zellij のセッション一覧を取得できませんでした。zellij が正常に動作しているか確認してください。"))
+                              (funcall callback
+                                       (list :failed "zellij の応答がタイムアウトしました（5秒）。zellij が正常に動作しているか確認してください。"))))))))
 
 ;;; バッファ管理
 
@@ -2259,6 +2256,170 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
                        (lambda (ok)
                          (when ok (message "%s への記録を依頼しました" target))))))
 
+;;; ペインへの操作（排他・中止）
+
+;; スラッシュコマンド一覧の取得・引数の確認・AskUserQuestion への回答は、
+;; どれもペインの入力欄にキーを打ちながら画面を読み、タイマーで次の段へ進む。
+;; その 1 回分を `zellij-send-op' にまとめ、黒板ごとに 1 つだけ持つ（`zellij-send--op'）。
+;;
+;; - 排他: 別の操作が走っている間は始めない。同じ入力欄を取り合うため
+;; - 中止: タイマーは必ず op に記録する（`zellij-send--op-later'）。
+;;   `zellij-send--op-abort' がそれを止め、打ちかけた入力欄を片付ける
+;; - 遅れて返る処理: ペインへの入出力は op が生きているときだけ行い、返って
+;;   きた時点でも生きているときだけ続きを呼ぶ（`zellij-send--op-dump' など）。
+;;   止めた後に、走っていた `dump-screen' のコールバックがキーを送らないため
+;;
+;; 2026-10-19 までは操作ごとの変数 6 つ（`--slash-collecting' `--slash-prefetching'
+;; `--askq-answering' `--askq-signature' `--askq-repeat' `--askq-rounds'）に
+;; 分かれていて互いを見ず、`run-at-time' の鎖も追えなかったので、C-g で
+;; 止まるのは入口のミニバッファだけだった。
+
+(cl-defstruct (zellij-send-op (:constructor zellij-send--op-make)
+                              (:copier nil))
+  "黒板のペインに対して非同期に進む 1 つの操作。"
+  kind          ; `slash-collect' / `slash-arg' / `askq'
+  buffer        ; 黒板バッファ
+  started-at    ; 始めた時刻
+  deadline      ; これを過ぎたら無効とみなす
+  timer         ; いま待っている `run-at-time' のタイマー
+  silent        ; 進捗を知らせない（先読み）
+  state)        ; 操作ごとの plist
+
+(defvar-local zellij-send--op nil
+  "この黒板のペインで走っている操作（`zellij-send-op'）。無ければ nil。")
+
+(defconst zellij-send--op-lifetimes
+  '((slash-collect . 120) (slash-arg . 120) (askq . 3600))
+  "操作の種類 → 始めてから無効とみなすまでの秒数。
+コールバックが返らないまま残っても、永久に塞がないための歯止め。
+一覧の取得は普通 8 秒前後、`zellij-send-slash-max-rounds' を使い切っても
+1 分程度。回答はミニバッファで考える時間を含むので長く取る。")
+
+(defconst zellij-send--op-busy-messages
+  '((slash-collect . "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ")
+    (slash-arg     . "スラッシュコマンドの引数を確認中です。数秒後にもう一度どうぞ")
+    (askq          . "回答の途中です"))
+  "別の操作が走っているときに断る文面。走っている方の種類で選ぶ。")
+
+(defun zellij-send--op-current (&optional buf)
+  "BUF（既定はカレント）で走っている操作を返す。無いか期限切れなら nil。"
+  (let ((op (buffer-local-value 'zellij-send--op (or buf (current-buffer)))))
+    (and op (< (float-time) (zellij-send-op-deadline op)) op)))
+
+(defun zellij-send--op-live-p (op)
+  "OP がまだ自分の黒板の操作として生きていれば non-nil。"
+  (let ((buf (and op (zellij-send-op-buffer op))))
+    (and buf (buffer-live-p buf) (eq (zellij-send--op-current buf) op))))
+
+(defun zellij-send--op-begin (buf kind &rest props)
+  "BUF で KIND の操作を始めて返す。別の操作が走っていれば nil。
+PROPS には `:silent'（進捗を知らせない）と `:state'（操作ごとの plist）を書ける。"
+  (unless (zellij-send--op-current buf)
+    (with-current-buffer buf
+      (let ((now (float-time)))
+        (setq zellij-send--op
+              (zellij-send--op-make
+               :kind kind :buffer buf :started-at now
+               :deadline (+ now (alist-get kind zellij-send--op-lifetimes 120))
+               :silent (plist-get props :silent)
+               :state (plist-get props :state)))))))
+
+(defun zellij-send--op-busy-message (&optional buf)
+  "BUF で走っている操作があれば、それを理由に断る文面を返す。無ければ nil。"
+  (let ((op (zellij-send--op-current buf)))
+    (and op (alist-get (zellij-send-op-kind op) zellij-send--op-busy-messages))))
+
+(defun zellij-send--op-assert-free ()
+  "カレントの黒板で別の操作が走っていれば `user-error'。"
+  (let ((msg (zellij-send--op-busy-message)))
+    (when msg (user-error "%s" msg))))
+
+(defun zellij-send--op-get (op key)
+  "OP の状態 plist から KEY の値を返す。"
+  (plist-get (zellij-send-op-state op) key))
+
+(defun zellij-send--op-put (op key value)
+  "OP の状態 plist の KEY を VALUE にする。"
+  (setf (zellij-send-op-state op) (plist-put (zellij-send-op-state op) key value)))
+
+(defun zellij-send--op-end (op)
+  "OP を終える。OP がもう黒板の操作でなければ、黒板の側には触らない。
+（期限切れの後に別の操作が始まっていたら、その印を消さない。）"
+  (when op
+    (let ((timer (zellij-send-op-timer op))
+          (buf (zellij-send-op-buffer op)))
+      (when (timerp timer) (cancel-timer timer))
+      (setf (zellij-send-op-timer op) nil)
+      (when (and (buffer-live-p buf)
+                 (eq (buffer-local-value 'zellij-send--op buf) op))
+        (with-current-buffer buf
+          (setq zellij-send--op nil))))))
+
+(defun zellij-send--op-abort (buf &optional reason)
+  "BUF で走っている操作を止める。止めたものがあれば non-nil。
+待っているタイマーを止め、入力欄に打ちかけていれば Ctrl+U で片付ける。
+走っている `dump-screen' などのコールバックは、返ってきても続きを呼ばない
+（`zellij-send--op-live-p'）。REASON があれば知らせる。"
+  (let ((op (and (buffer-live-p buf) (buffer-local-value 'zellij-send--op buf))))
+    (when op
+      (zellij-send--op-end op)
+      ;; 打っていないのに Ctrl+U を送ると、ターミナル側の書きかけを消す
+      (when (zellij-send--op-get op :typed)
+        (with-current-buffer buf
+          (zellij-send--send-keys zellij-send--session '(21) #'ignore)))
+      (when reason (message "%s" reason))
+      t)))
+
+(defun zellij-send--op-later (op delay fn &rest args)
+  "DELAY 秒後に FN を ARGS で呼ぶ。そのとき OP が生きていなければ呼ばない。
+**ペインに打ち込む操作の `run-at-time' はすべてここを通す**——タイマーが
+OP に記録されていなければ `zellij-send--op-abort' で止められない。
+FN は OP の黒板をカレントにして呼ぶ。"
+  (when (zellij-send--op-live-p op)
+    (setf (zellij-send-op-timer op)
+          (run-at-time delay nil
+                       (lambda ()
+                         (setf (zellij-send-op-timer op) nil)
+                         (when (zellij-send--op-live-p op)
+                           (with-current-buffer (zellij-send-op-buffer op)
+                             (apply fn args))))))))
+
+(defun zellij-send--op-callback (op fn)
+  "FN を包んで返す。呼ばれた時点で OP が生きていなければ何もしない。
+FN は OP の黒板をカレントにして呼ぶ。"
+  (lambda (&rest args)
+    (when (zellij-send--op-live-p op)
+      (with-current-buffer (zellij-send-op-buffer op)
+        (apply fn args)))))
+
+(defun zellij-send--op-dump (op callback)
+  "OP の黒板のペインの画面を取り、CALLBACK に渡す（失敗なら nil）。
+OP が生きていなければ取らず、取り終えた時点で死んでいれば呼ばない。"
+  (when (zellij-send--op-live-p op)
+    (with-current-buffer (zellij-send-op-buffer op)
+      (zellij-send--dump-screen-async
+       zellij-send--session (zellij-send--op-callback op callback)))))
+
+(defun zellij-send--op-keys (op bytes callback)
+  "OP の黒板のペインに BYTES を送り、CALLBACK に終了コードを渡す。
+OP が生きていなければ送らない。"
+  (when (zellij-send--op-live-p op)
+    (with-current-buffer (zellij-send-op-buffer op)
+      (zellij-send--send-keys zellij-send--session bytes
+                              (zellij-send--op-callback op callback)))))
+
+(defun zellij-send--op-write-chars (op text callback)
+  "OP の黒板のペインの入力欄に TEXT を打ち、CALLBACK に成功 t / 失敗 nil を渡す。
+打てたら OP に印（`:typed'）を付ける。止めたときに入力欄を片付けるため。"
+  (when (zellij-send--op-live-p op)
+    (with-current-buffer (zellij-send-op-buffer op)
+      (zellij-send--slash-write-chars
+       zellij-send--session text
+       (zellij-send--op-callback
+        op (lambda (ok)
+             (when ok (zellij-send--op-put op :typed t))
+             (funcall callback ok)))))))
+
 ;;; スラッシュコマンド（Claude Code の /コマンド全部）
 
 ;; 2026-07-29 に Claude Code v2.1.220 + zellij 0.44.3（320 桁の背景セッション）で
@@ -2374,25 +2535,6 @@ ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
 プロジェクトのコマンドとスキルなので、同じディレクトリのセッションなら
 同じ結果になる。2 つ目以降のセッションは取得ゼロで開ける。
 ディスク（`zellij-send-slash-cache-directory'）から読んだものもここに入る。")
-
-(defvar-local zellij-send--slash-prefetching nil
-  "先読みの取得中なら non-nil。多重起動を防ぎ、進捗メッセージを黙らせる。")
-
-(defvar-local zellij-send--slash-collecting nil
-  "一覧を集め始めた時刻（`float-time'）。集めていなければ nil。
-手動の取得と先読みが同じペインに同時に打ち込まないための印。
-コールバックが返らないまま残っても永久に塞がないよう、
-`zellij-send--slash-collect-stale' 秒を過ぎたものは無視する。")
-
-(defconst zellij-send--slash-collect-stale 120
-  "`zellij-send--slash-collecting' を無効とみなすまでの秒数。
-取得は普通 8 秒前後、`zellij-send-slash-max-rounds' を使い切っても 1 分程度。")
-
-(defun zellij-send--slash-collecting-p ()
-  "カレントバッファで一覧を集めている最中なら non-nil。"
-  (and zellij-send--slash-collecting
-       (< (- (float-time) zellij-send--slash-collecting)
-          zellij-send--slash-collect-stale)))
 
 (defun zellij-send--slash-cache-key ()
   "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
@@ -2544,9 +2686,10 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
              zellij-send--slash-arg-cache-table)
     (dolist (k keys) (remhash k zellij-send--slash-arg-cache-table))))
 
-(defun zellij-send--slash-msg (format-string &rest args)
-  "先読み中でなければ `message' する。先読みは黙って走らせる。"
-  (unless zellij-send--slash-prefetching
+(defun zellij-send--slash-msg (op format-string &rest args)
+  "OP が先読み（`zellij-send-op-silent'）でなければ `message' する。
+先読みは黙って走らせる。"
+  (unless (and op (zellij-send-op-silent op))
     (apply #'message format-string args)))
 
 (defconst zellij-send--slash-input-regexp "\\`❯[[:space:]]?\\(.*\\)\\'"
@@ -2734,31 +2877,28 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
            (list "--" text))
    (lambda (exit) (funcall callback (zerop exit)))))
 
-(defun zellij-send--slash-clear-input (buf callback)
-  "BUF のペインの入力欄を Ctrl+U で空に戻してから CALLBACK を呼ぶ。"
-  (if (not (buffer-live-p buf))
-      (funcall callback nil)
-    (with-current-buffer buf
-      (zellij-send--send-keys zellij-send--session '(21)
-                              (lambda (exit) (funcall callback (zerop exit)))))))
+(defun zellij-send--slash-clear-input (op callback)
+  "OP のペインの入力欄を Ctrl+U で空に戻してから CALLBACK を呼ぶ。
+打ちかけの印（`:typed'）も下ろす。OP が生きていなければ何もしない。"
+  (zellij-send--op-keys op '(21)
+                        (lambda (exit)
+                          (zellij-send--op-put op :typed nil)
+                          (funcall callback (zerop exit)))))
 
-(defun zellij-send--slash-wait (buf pred callback &optional tries)
-  "BUF のペインの画面が PRED を満たすまで待ち、その画面を CALLBACK に渡す。
+(defun zellij-send--slash-wait (op pred callback &optional tries)
+  "OP のペインの画面が PRED を満たすまで待ち、その画面を CALLBACK に渡す。
 待てなかったら nil を渡す。画面は毎回 `dump-screen' で取る——黒板バッファは
 ユーザーが編集中だと更新が止まる（`buffer-modified-p'）ので当てにできない。"
   (let ((tries (or tries 0)))
-    (if (not (buffer-live-p buf))
-        (funcall callback nil)
-      (with-current-buffer buf
-        (zellij-send--dump-screen-async
-         zellij-send--session
-         (lambda (screen)
-           (cond
-            ((and screen (funcall pred screen)) (funcall callback screen))
-            ((>= tries 12) (funcall callback nil))
-            (t (run-at-time zellij-send-slash-settle-delay nil
-                            #'zellij-send--slash-wait
-                            buf pred callback (1+ tries))))))))))
+    (zellij-send--op-dump
+     op
+     (lambda (screen)
+       (cond
+        ((and screen (funcall pred screen)) (funcall callback screen))
+        ((>= tries 12) (funcall callback nil))
+        (t (zellij-send--op-later op zellij-send-slash-settle-delay
+                                  #'zellij-send--slash-wait
+                                  op pred callback (1+ tries))))))))
 
 ;;;; メニューの取得（↓ で送りながら読む）
 
@@ -2790,56 +2930,57 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
         :sort nil
         :label "引数の候補"))
 
-(defun zellij-send--slash-collect (buf callback)
+(defun zellij-send--slash-collect (buf callback &optional silent)
   "BUF のセッションのスラッシュコマンド一覧を集めて CALLBACK に渡す。
-CALLBACK は 2 引数 (ENTRIES TRUNCATED) で呼ばれる。失敗したら ENTRIES は nil。
+CALLBACK に渡す結果は次のどれか:
+
+  (:ok (:entries ENTRIES :truncated TRUNCATED))  ENTRIES は空のこともある
+  (:failed REASON)    入力欄が空でない・打てなかった
+  (:aborted REASON)   ペインを操作された・別の操作が走っていた
+
 TRUNCATED が non-nil の一覧は回数を使い切って打ち切ったもので、
 キャッシュしてはいけない（以後ずっと欠けたまま出る）。
+SILENT が non-nil なら進捗を知らせない（先読み）。
 
-集めている間は `zellij-send--slash-collecting' を立てる。
-呼び出し側は `zellij-send--slash-collecting-p' で多重起動を避けること。"
-  (let* ((started (float-time))
-         (callback
-          (lambda (entries &optional truncated)
-            (when (buffer-live-p buf)
-              (with-current-buffer buf
-                ;; 自分が立てた印だけを下ろす。期限切れの後に別の取得が
-                ;; 始まっていたら、その印を消さない
-                (when (eql zellij-send--slash-collecting started)
-                  (setq zellij-send--slash-collecting nil))))
-            (funcall callback entries truncated))))
-    (with-current-buffer buf
-      (setq zellij-send--slash-collecting started))
-    (zellij-send--slash-collect-1 buf callback)))
+集めている間は BUF の操作（`zellij-send-op'）として排他を取る。
+`zellij-send-abort' で止めたときは CALLBACK を呼ばない。"
+  (let ((op (zellij-send--op-begin buf 'slash-collect :silent silent)))
+    (if (null op)
+        (funcall callback (list :aborted (zellij-send--op-busy-message buf)))
+      (zellij-send--slash-collect-1
+       op (lambda (result)
+            (zellij-send--op-end op)
+            (funcall callback result))))))
 
-(defun zellij-send--slash-collect-1 (buf callback)
-  "`zellij-send--slash-collect' の本体。"
+(defun zellij-send--slash-collect-1 (op done)
+  "`zellij-send--slash-collect' の本体。結果を DONE に渡す。"
   (zellij-send--slash-wait
-   buf #'zellij-send--slash-idle-p
+   op #'zellij-send--slash-idle-p
    (lambda (screen)
      (if (null screen)
          (progn (zellij-send--slash-msg
-                 "ペインの入力欄が空ではありません。先にペインを片付けてください")
-                (funcall callback nil))
+                 op "ペインの入力欄が空ではありません。先にペインを片付けてください")
+                (funcall done (list :failed "ペインの入力欄が空ではありません")))
        (let ((spec (zellij-send--slash-command-spec))
-             (done (lambda (result)
-                     (funcall callback (plist-get result :entries)
-                              (plist-get result :truncated)))))
-         (with-current-buffer buf
-           (zellij-send--slash-write-chars
-            zellij-send--session (plist-get spec :input)
-            (lambda (ok)
-              (if (not ok)
-                  (funcall callback nil)
-                (zellij-send--slash-wait
-                 buf (plist-get spec :parse)
-                 (lambda (menu)
-                   (if (null menu)
-                       (zellij-send--slash-gather-finish buf spec nil nil done)
-                     (zellij-send--slash-scroll
-                      buf spec nil 0 0 nil nil done)))))))))))))
+             (finish (lambda (result)
+                       (funcall done
+                                (if result
+                                    (list :ok result)
+                                  (list :aborted "ペインが操作されたので取得を中止しました"))))))
+         (zellij-send--op-write-chars
+          op (plist-get spec :input)
+          (lambda (ok)
+            (if (not ok)
+                (funcall done (list :failed "入力欄に打てませんでした"))
+              (zellij-send--slash-wait
+               op (plist-get spec :parse)
+               (lambda (menu)
+                 (if (null menu)
+                     (zellij-send--slash-gather-finish op spec nil nil finish)
+                   (zellij-send--slash-scroll
+                    op spec nil 0 0 nil nil finish))))))))))))
 
-(defun zellij-send--slash-scroll (buf spec found rounds dry pinned last callback)
+(defun zellij-send--slash-scroll (op spec found rounds dry pinned last callback)
   "SPEC のメニューを ↓ で送りながら集め、集め終わったら CALLBACK に渡す。
 FOUND は見つかった順の alist、ROUNDS は送った回数、DRY は画面が
 進まなかった連続回数、PINNED はカーソルが最下段に着いているか、
@@ -2857,61 +2998,59 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
 取りこぼす**（実測で末尾の `/verify' が落ちた）。その分は
 `zellij-send--slash-tail' が ↑ の折り返しで拾う。"
   (cond
-   ((not (buffer-live-p buf))
-    (zellij-send--slash-gather-finish buf spec found nil callback))
    ;; 回数を使い切った。集めた分は「一部」として返す（キャッシュには入れない）
    ((> rounds (plist-get spec :max-rounds))
-    (zellij-send--slash-gather-finish buf spec found t callback))
+    (zellij-send--slash-gather-finish op spec found t callback))
    (t
-    (with-current-buffer buf
-      (zellij-send--dump-screen-async
-       zellij-send--session
-       (lambda (screen)
-         (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
-                (names (mapcar #'car entries))
-                (new (seq-remove (lambda (e) (assoc (car e) found)) entries))
-                (found (append found new))
-                (stalled (equal names last))
-                ;; 新顔が出ない＝一周した。画面が動かない＝描画待ちかキーが
-                ;; 効いていない。どちらも「これ以上は取れない」側に数える
-                (dry (if (or stalled (null new)) (1+ dry) 0))
-                (visible (length entries)))
-           (cond
-            ;; 入力欄が変わった＝ユーザーがターミナル側で打ち始めた。
-            ;; ここで Ctrl+U を送ると相手の入力を消すので、片付けずに手を引く
-            ((and screen (not (equal (zellij-send--slash-input-text screen)
-                                     (plist-get spec :expect))))
-             (zellij-send--slash-msg "ペインが操作されたので取得を中止しました")
-             ;; 中途半端な一覧を覚えさせない。失敗として返す
-             (funcall callback nil))
-            ;; メニューが消えた（＝読み違えた）か、3 回続けて進まない
-            ((or (null entries) (>= dry 3))
-             (zellij-send--slash-tail buf spec found names callback))
-            (stalled
-             ;; 描画待ち。送らずにもう一度読む
-             (run-at-time zellij-send-slash-settle-delay nil
-                          #'zellij-send--slash-scroll
-                          buf spec found (1+ rounds) dry pinned names callback))
-            (t
-             (when (zerop (mod rounds 8))
-               (zellij-send--slash-msg "%sを取得中… %d 件"
-                                       (plist-get spec :label) (length found)))
-             (zellij-send--send-keys
-              zellij-send--session
-              ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
-              ;; 「見えている件数 - 1」。後者なら 1 件重なりを残して窓が進む
-              (apply #'append
-                     (make-list (max 1 (if pinned (1- visible) visible))
-                                '(27 91 66)))
-              (lambda (exit)
-                (if (not (zerop exit))
-                    (zellij-send--slash-tail buf spec found names callback)
-                  (run-at-time zellij-send-slash-settle-delay nil
-                               #'zellij-send--slash-scroll
-                               buf spec found (1+ rounds) dry t names
-                               callback)))))))))))))
+    (zellij-send--op-dump
+     op
+     (lambda (screen)
+       (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
+              (names (mapcar #'car entries))
+              (new (seq-remove (lambda (e) (assoc (car e) found)) entries))
+              (found (append found new))
+              (stalled (equal names last))
+              ;; 新顔が出ない＝一周した。画面が動かない＝描画待ちかキーが
+              ;; 効いていない。どちらも「これ以上は取れない」側に数える
+              (dry (if (or stalled (null new)) (1+ dry) 0))
+              (visible (length entries)))
+         (cond
+          ;; 入力欄が変わった＝ユーザーがターミナル側で打ち始めた。
+          ;; ここで Ctrl+U を送ると相手の入力を消すので、片付けずに手を引く
+          ((and screen (not (equal (zellij-send--slash-input-text screen)
+                                   (plist-get spec :expect))))
+           (zellij-send--slash-msg op "ペインが操作されたので取得を中止しました")
+           ;; 中途半端な一覧を覚えさせない。失敗として返す
+           (funcall callback nil))
+          ;; メニューが消えた（＝読み違えた）か、3 回続けて進まない
+          ((or (null entries) (>= dry 3))
+           (zellij-send--slash-tail op spec found names callback))
+          (stalled
+           ;; 描画待ち。送らずにもう一度読む
+           (zellij-send--op-later op zellij-send-slash-settle-delay
+                                  #'zellij-send--slash-scroll
+                                  op spec found (1+ rounds) dry pinned names
+                                  callback))
+          (t
+           (when (zerop (mod rounds 8))
+             (zellij-send--slash-msg op "%sを取得中… %d 件"
+                                     (plist-get spec :label) (length found)))
+           (zellij-send--op-keys
+            op
+            ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
+            ;; 「見えている件数 - 1」。後者なら 1 件重なりを残して窓が進む
+            (apply #'append
+                   (make-list (max 1 (if pinned (1- visible) visible))
+                              '(27 91 66)))
+            (lambda (exit)
+              (if (not (zerop exit))
+                  (zellij-send--slash-tail op spec found names callback)
+                (zellij-send--op-later op zellij-send-slash-settle-delay
+                                       #'zellij-send--slash-scroll
+                                       op spec found (1+ rounds) dry t names
+                                       callback))))))))))))
 
-(defun zellij-send--slash-tail (buf spec found last callback)
+(defun zellij-send--slash-tail (op spec found last callback)
   "一覧の末尾を拾ってから `zellij-send--slash-gather-finish' へ渡す。
 LAST は直前に見えていた値のリスト。
 
@@ -2920,51 +3059,47 @@ LAST は直前に見えていた値のリスト。
 ↓ で送る本編は折り返しをまたぐ回に窓が飛ぶため、末尾の数件がここでしか
 取れない。"
   (zellij-send--slash-clear-input
-   buf
+   op
    (lambda (_ok)
-     (if (not (buffer-live-p buf))
-         (zellij-send--slash-gather-finish buf spec found nil callback)
-       (with-current-buffer buf
-         (zellij-send--slash-write-chars
-          zellij-send--session (plist-get spec :input)
-          (lambda (ok)
-            (if (not ok)
-                (zellij-send--slash-gather-finish buf spec found nil callback)
-              (zellij-send--slash-wait
-               buf (plist-get spec :parse)
-               (lambda (screen)
-                 (zellij-send--slash-tail-up buf spec found last screen
-                                             callback)))))))))))
+     (zellij-send--op-write-chars
+      op (plist-get spec :input)
+      (lambda (ok)
+        (if (not ok)
+            (zellij-send--slash-gather-finish op spec found nil callback)
+          (zellij-send--slash-wait
+           op (plist-get spec :parse)
+           (lambda (screen)
+             (zellij-send--slash-tail-up op spec found last screen
+                                         callback)))))))))
 
-(defun zellij-send--slash-tail-up (buf spec found last screen callback)
+(defun zellij-send--slash-tail-up (op spec found last screen callback)
   "先頭に戻った SCREEN から ↑ を 1 回送り、折り返した末尾の画面を読む。"
-  (if (or (null screen) (not (buffer-live-p buf)))
-      (zellij-send--slash-gather-finish buf spec found nil callback)
+  (if (null screen)
+      (zellij-send--slash-gather-finish op spec found nil callback)
     (let ((top (mapcar #'car (funcall (plist-get spec :parse) screen))))
-      (with-current-buffer buf
-        (zellij-send--send-keys
-         zellij-send--session '(27 91 65)
-         (lambda (exit)
-           (if (not (zerop exit))
-               (zellij-send--slash-gather-finish buf spec found nil callback)
-             (zellij-send--slash-wait
-              buf
-              (lambda (s)
-                (let ((names (mapcar #'car (funcall (plist-get spec :parse) s))))
-                  ;; ↑ が効いた（＝画面が動いた）ことを確かめてから読む
-                  (and names (not (equal names top)) (not (equal names last)))))
-              (lambda (s)
-                (let* ((entries (and s (funcall (plist-get spec :parse) s)))
-                       (new (seq-remove (lambda (e) (assoc (car e) found)) entries)))
-                  (zellij-send--slash-gather-finish
-                   buf spec (append found new) nil callback)))))))))))
+      (zellij-send--op-keys
+       op '(27 91 65)
+       (lambda (exit)
+         (if (not (zerop exit))
+             (zellij-send--slash-gather-finish op spec found nil callback)
+           (zellij-send--slash-wait
+            op
+            (lambda (s)
+              (let ((names (mapcar #'car (funcall (plist-get spec :parse) s))))
+                ;; ↑ が効いた（＝画面が動いた）ことを確かめてから読む
+                (and names (not (equal names top)) (not (equal names last)))))
+            (lambda (s)
+              (let* ((entries (and s (funcall (plist-get spec :parse) s)))
+                     (new (seq-remove (lambda (e) (assoc (car e) found)) entries)))
+                (zellij-send--slash-gather-finish
+                 op spec (append found new) nil callback))))))))))
 
-(defun zellij-send--slash-gather-finish (buf spec found truncated callback)
+(defun zellij-send--slash-gather-finish (op spec found truncated callback)
   "入力欄を片付けてから、集めた FOUND を CALLBACK に渡す。
 CALLBACK に渡すのは plist (:entries ENTRIES :truncated TRUNCATED)。
 TRUNCATED が non-nil なら回数を使い切って打ち切った一覧。"
   (zellij-send--slash-clear-input
-   buf
+   op
    (lambda (_ok)
      (funcall callback
               (list :entries (if (plist-get spec :sort)
@@ -3011,58 +3146,65 @@ TRUNCATED が non-nil なら回数を使い切って打ち切った一覧。"
 
 (defun zellij-send--slash-probe-arg (buf name args open callback)
   "NAME の引数 ARGS の続きをペインに聞いて CALLBACK に渡す。
-CALLBACK に渡すのは plist:
+CALLBACK に渡す結果は次のどれか:
 
-  (:hint HINT)                      ゴーストの引数ヒント（引数が空のときだけ）
-  (:values ENTRIES :truncated BOOL) カーソルで選ぶ候補メニュー
-  (:abort t)                        ペインを操作されたなどで取得を中止した
-  nil                               これ以上の引数は無い
+  (:ok nil)                               これ以上の引数は無い
+  (:ok (:hint HINT))                      ゴーストの引数ヒント（引数が空のときだけ）
+  (:ok (:values ENTRIES :truncated BOOL)) カーソルで選ぶ候補メニュー
+  (:aborted REASON)                       ペインを操作されたなどで取得を中止した
 
-読み終えたら入力欄は空に戻す。"
+「中止」を「引数なし」（`:ok nil'）と取り違えると、引数を付けずにそのまま
+送ってしまう。2026-10-19 までは中止を `(:abort t)'、引数なしを nil で返していた。
+読み終えたら入力欄は空に戻す。聞いている間は BUF の操作として排他を取る。"
   (let ((cached (and (buffer-live-p buf)
                      (with-current-buffer buf
                        (zellij-send--slash-arg-cached name args open)))))
     (cond
-     ((not (buffer-live-p buf)) (funcall callback nil))
-     (cached (funcall callback (list :values cached)))
+     ((not (buffer-live-p buf))
+      (funcall callback (list :aborted "黒板がありません")))
+     (cached (funcall callback (list :ok (list :values cached))))
      (t
-      ;; 打つ前に入力欄が空であることを確かめる。ユーザーがターミナル側で
-      ;; 書きかけたテキストの後ろに打ち足すと、その入力を壊したうえに
-      ;; 画面も読み違える（実機で踏んだ）
-      (zellij-send--slash-wait
-       buf #'zellij-send--slash-idle-p
-       (lambda (idle)
-         (if (null idle)
-             (progn
-               (zellij-send--slash-msg
-                "ペインの入力欄が空ではありません。先にペインを片付けてください")
-               (funcall callback (list :abort t)))
-           (zellij-send--slash-probe-write buf name args open callback))))))))
+      (let ((op (zellij-send--op-begin buf 'slash-arg)))
+        (if (null op)
+            (funcall callback (list :aborted (zellij-send--op-busy-message buf)))
+          (let ((done (lambda (result)
+                        (zellij-send--op-end op)
+                        (funcall callback result))))
+            ;; 打つ前に入力欄が空であることを確かめる。ユーザーがターミナル側で
+            ;; 書きかけたテキストの後ろに打ち足すと、その入力を壊したうえに
+            ;; 画面も読み違える（実機で踏んだ）
+            (zellij-send--slash-wait
+             op #'zellij-send--slash-idle-p
+             (lambda (idle)
+               (if (null idle)
+                   (progn
+                     (zellij-send--slash-msg
+                      op "ペインの入力欄が空ではありません。先にペインを片付けてください")
+                     (funcall done (list :aborted "ペインの入力欄が空ではありません")))
+                 (zellij-send--slash-probe-write op name args open done)))))))))))
 
-(defun zellij-send--slash-probe-write (buf name args open callback)
+(defun zellij-send--slash-probe-write (op name args open callback)
   "NAME の引数 ARGS の続きを聞くための文字列を入力欄に打ち、画面を読む。"
   (let ((text (zellij-send--slash-probe-text name args open)))
-    (with-current-buffer buf
-      (zellij-send--slash-write-chars
-       zellij-send--session text
-       (lambda (ok)
-         (if (not ok)
-             ;; 打てなかったのは「引数なし」ではない。nil を返すと
-             ;; 引数を付けずにそのまま送ってしまう
-             (funcall callback (list :abort t))
-           ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
-           (run-at-time
-            zellij-send-slash-settle-delay nil
-            (lambda ()
-              (zellij-send--slash-wait
-               buf
-               (lambda (s) (let ((it (zellij-send--slash-input-text s)))
-                             (and it (string-prefix-p name it))))
-               (lambda (screen)
-                 (zellij-send--slash-probe-read
-                  buf name args open screen callback)))))))))))
+    (zellij-send--op-write-chars
+     op text
+     (lambda (ok)
+       (if (not ok)
+           ;; 打てなかったのは「引数なし」ではない
+           (funcall callback (list :aborted "入力欄に打てませんでした"))
+         ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
+         (zellij-send--op-later
+          op zellij-send-slash-settle-delay
+          (lambda ()
+            (zellij-send--slash-wait
+             op
+             (lambda (s) (let ((it (zellij-send--slash-input-text s)))
+                           (and it (string-prefix-p name it))))
+             (lambda (screen)
+               (zellij-send--slash-probe-read
+                op name args open screen callback))))))))))
 
-(defun zellij-send--slash-probe-read (buf name args open screen callback)
+(defun zellij-send--slash-probe-read (op name args open screen callback)
   "SCREEN からヒントか候補メニューを読み、CALLBACK に渡す。
 メニューが出ていたら ↓ を送りながら全件集める。"
   (let* ((empty (string-empty-p (string-trim (or args ""))))
@@ -3073,25 +3215,25 @@ CALLBACK に渡すのは plist:
      ;; 「引数なし」とは読まずに中止する
      ((null screen)
       (zellij-send--slash-clear-input
-       buf (lambda (_ok) (funcall callback (list :abort t)))))
+       op (lambda (_ok) (funcall callback (list :aborted "入力欄が読めませんでした")))))
      (hint (zellij-send--slash-clear-input
-            buf (lambda (_ok) (funcall callback (list :hint hint)))))
+            op (lambda (_ok) (funcall callback (list :ok (list :hint hint))))))
      (entries
       (zellij-send--slash-scroll
-       buf (zellij-send--slash-arg-spec
-            (zellij-send--slash-probe-text name args open))
+       op (zellij-send--slash-arg-spec
+           (zellij-send--slash-probe-text name args open))
        nil 0 0 nil nil
        (lambda (result)
          (if (null result)
-             (funcall callback (list :abort t))
+             (funcall callback (list :aborted "ペインが操作されたので取得を中止しました"))
            (let ((values (plist-get result :entries))
                  (truncated (plist-get result :truncated)))
-             (when (and values (not truncated) (buffer-live-p buf))
-               (with-current-buffer buf
-                 (zellij-send--slash-arg-cache-put name args open values)))
-             (funcall callback (list :values values :truncated truncated)))))))
+             (when (and values (not truncated))
+               (zellij-send--slash-arg-cache-put name args open values))
+             (funcall callback (list :ok (list :values values
+                                               :truncated truncated))))))))
      (t (zellij-send--slash-clear-input
-         buf (lambda (_ok) (funcall callback nil)))))))
+         op (lambda (_ok) (funcall callback (list :ok nil))))))))
 
 ;;;; 入口
 
@@ -3166,38 +3308,43 @@ ARGS はここまでに決まった引数文字列、OPEN は末尾のトーク�
 DEPTH は何段目か。候補は入れ子になる（`/plugin' → `enable' → プラグイン名）
 ので、1 つ選ぶたびに次の段を聞き直す。
 
+INFO は `zellij-send--slash-probe-arg' の結果。
+
 タイマーから呼ばれるので、BUF をカレントにしてから尋ねる（`<path>' の
 補完が BUF の `default-directory' から始まるように）。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (cond
-       ((plist-get info :abort)
-        (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
-       ((plist-get info :hint)
-        (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
-          (zellij-send--slash-submit
-           buf name (string-trim (concat args " " (or arg ""))))))
-       ((plist-get info :values)
-        (let ((choice (zellij-send--slash-read-value name info)))
-          (if (null choice)
-              (zellij-send--slash-submit buf name args)
-            (let* ((value (car choice))
-                   (listed (cdr choice))
-                   ;; 一覧から選んだ値は、それ自体が書きかけ（`autoScroll=' の
-                   ;; ような）でなければ 1 トークンぶんの確定。一覧に無い値は
-                   ;; 絞り込みの打ちかけとみなして、次はそれを打った状態で聞く
-                   (next-open (if listed (zellij-send--slash-arg-open-p value) t))
-                   (next (zellij-send--slash-arg-append args value open)))
-              (if (>= depth zellij-send--slash-arg-max-depth)
-                  (zellij-send--slash-submit buf name next)
-                (message "%s %s の続きを確認中…" name next)
-                (zellij-send--slash-probe-arg
-                 buf name next next-open
-                 (lambda (result)
-                   ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）
-                   (run-at-time 0 nil #'zellij-send--slash-run
-                                buf name next next-open (1+ depth) result))))))))
-       (t (zellij-send--slash-submit buf name args))))))
+      (let ((ok (eq (car info) :ok))
+            (info (cadr info)))
+        (cond
+         ((not ok)
+          (message "引数の候補を取得できませんでした。ペインの状態を確認してください"))
+         ((plist-get info :hint)
+          (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
+            (zellij-send--slash-submit
+             buf name (string-trim (concat args " " (or arg ""))))))
+         ((plist-get info :values)
+          (let ((choice (zellij-send--slash-read-value name info)))
+            (if (null choice)
+                (zellij-send--slash-submit buf name args)
+              (let* ((value (car choice))
+                     (listed (cdr choice))
+                     ;; 一覧から選んだ値は、それ自体が書きかけ（`autoScroll=' の
+                     ;; ような）でなければ 1 トークンぶんの確定。一覧に無い値は
+                     ;; 絞り込みの打ちかけとみなして、次はそれを打った状態で聞く
+                     (next-open (if listed (zellij-send--slash-arg-open-p value) t))
+                     (next (zellij-send--slash-arg-append args value open)))
+                (if (>= depth zellij-send--slash-arg-max-depth)
+                    (zellij-send--slash-submit buf name next)
+                  (message "%s %s の続きを確認中…" name next)
+                  (zellij-send--slash-probe-arg
+                   buf name next next-open
+                   (lambda (result)
+                     ;; sentinel の中でミニバッファを開かない（C-g が効かなくなる）。
+                     ;; 操作はもう終わっている（ここから先はミニバッファで聞くだけ）
+                     (run-at-time 0 nil #'zellij-send--slash-run
+                                  buf name next next-open (1+ depth) result))))))))
+         (t (zellij-send--slash-submit buf name args)))))))
 
 (defun zellij-send--slash-choose (buf &optional alist)
   "BUF のキャッシュ（ALIST があればそれ）から選ばせ、引数を尋ねてから送る。"
@@ -3241,8 +3388,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
   (interactive "P")
   (zellij-send--assert-session)
   (zellij-send--assert-capability 'slash-completion)
-  (when (zellij-send--slash-collecting-p)
-    (user-error "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
+  (zellij-send--op-assert-free)
   (when refresh
     ;; ディスクに保存した一覧も捨てる。取り直しに失敗しても古い一覧が
     ;; 次回の起動で復活しないように
@@ -3254,17 +3400,20 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
       (message "スラッシュコマンド一覧を取得中…（初回のみ数秒かかります）")
       (zellij-send--slash-collect
        buf
-       (lambda (alist truncated)
+       (lambda (result)
          (when (buffer-live-p buf)
            (with-current-buffer buf
-             (if (null alist)
-                 (message "コマンド一覧を取得できませんでした。ペインの状態を確認してください")
-               ;; 打ち切った一覧は今回だけ使い、キャッシュせず次回は取り直す
-               (unless truncated
-                 (zellij-send--slash-cache-put alist))
-               (message "スラッシュコマンド %d 件%s" (length alist)
-                        (if truncated "（一部）" ""))
-               (run-at-time 0 nil #'zellij-send--slash-choose buf alist)))))))))
+             (let* ((value (and (eq (car result) :ok) (cadr result)))
+                    (alist (plist-get value :entries))
+                    (truncated (plist-get value :truncated)))
+               (if (null alist)
+                   (message "コマンド一覧を取得できませんでした。ペインの状態を確認してください")
+                 ;; 打ち切った一覧は今回だけ使い、キャッシュせず次回は取り直す
+                 (unless truncated
+                   (zellij-send--slash-cache-put alist))
+                 (message "スラッシュコマンド %d 件%s" (length alist)
+                          (if truncated "（一部）" ""))
+                 (run-at-time 0 nil #'zellij-send--slash-choose buf alist))))))))))
 
 ;;;; 先読み
 
@@ -3276,8 +3425,8 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
              zellij-send--session
              (zellij-send--confirmed-capable-p 'slash-completion)
              (null (zellij-send--slash-cached))
-             (not zellij-send--slash-prefetching)
-             (not (zellij-send--slash-collecting-p)))
+             (not (zellij-send--op-current)))
+    ;; ここはまだ何も打たない（始める前に条件を確かめ直す）ので op の外でよい
     (run-at-time zellij-send-slash-prefetch-delay nil
                  #'zellij-send--slash-prefetch-run (current-buffer) 1)))
 
@@ -3292,26 +3441,39 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
                  zellij-send--pane-id
                  (zellij-send--confirmed-capable-p 'slash-completion)
                  (null (zellij-send--slash-cached))
-                 (not zellij-send--slash-prefetching)
-                 (not (zellij-send--slash-collecting-p))
+                 (not (zellij-send--op-current))
                  (<= try zellij-send-slash-prefetch-retries))
-        (setq zellij-send--slash-prefetching t)
         (zellij-send--slash-collect
          buf
-         (lambda (alist truncated)
+         (lambda (result)
            (when (buffer-live-p buf)
              (with-current-buffer buf
-               (setq zellij-send--slash-prefetching nil)
-               ;; 打ち切った一覧は覚えない。取り直しても同じなので再試行もしない
-               (cond
-                (truncated nil)
-                (alist (zellij-send--slash-cache-put alist))
-                (t
-                 (run-at-time zellij-send-slash-prefetch-delay nil
-                              #'zellij-send--slash-prefetch-run
-                              buf (1+ try))))))))))))
+               (let* ((value (and (eq (car result) :ok) (cadr result)))
+                      (alist (plist-get value :entries)))
+                 ;; 打ち切った一覧は覚えない。取り直しても同じなので再試行もしない
+                 (cond
+                  ((plist-get value :truncated) nil)
+                  (alist (zellij-send--slash-cache-put alist))
+                  (t
+                   ;; 再試行までの間は何も打たないので op の外で待つ。
+                   ;; `zellij-send-abort' で止めた取得はここに来ない（再試行しない）
+                   (run-at-time zellij-send-slash-prefetch-delay nil
+                                #'zellij-send--slash-prefetch-run
+                                buf (1+ try))))))))
+         t)))))
 
 ;;; インタラクティブコマンド
+
+(defun zellij-send-abort ()
+  "この黒板のペインで走っている操作を止める。
+止められるのは、スラッシュコマンド一覧の取得（先読みを含む）・引数の確認・
+AskUserQuestion への回答。入力欄に打ちかけた文字は Ctrl+U で片付ける。
+ペインで動いているエージェント自体を止めるのは `zellij-send-interrupt'。
+既存のキーの割り当てを変えないため、キーには割り当てていない（コマンド名で呼ぶ）。"
+  (interactive)
+  (zellij-send--assert-session)
+  (unless (zellij-send--op-abort (current-buffer) "中止しました")
+    (message "止める操作はありません")))
 
 (defun zellij-send-send ()
   "バッファのテキストを zellij セッションに送信し、バッファをクリアする。"
@@ -3453,7 +3615,7 @@ PANE-ID が分かっていれば `list-panes --all' の EXITED 列で終了を�
 分かっていなければセッションの消滅を見る（ターミナル側で閉じられた場合に効く）。
 
 DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切り替える。
-`list-sessions' の `:timeout' を「セッション 0 件」と解釈しないこと。"
+`list-sessions' の失敗（`:failed'）を「セッション 0 件」と解釈しないこと。"
   (let ((timed-out (> (float-time) deadline)))
     (cond
      (timed-out
@@ -3474,8 +3636,8 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
                           session pane-id main-buf deadline))))))
      (t
       (zellij-send--list-sessions-async
-       (lambda (sessions)
-         (if (and (listp sessions) (not (member session sessions)))
+       (lambda (result)
+         (if (and (eq (car result) :ok) (not (member session (cadr result))))
              (progn
                (when (buffer-live-p main-buf)
                  (kill-buffer main-buf))
@@ -3763,18 +3925,6 @@ nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。
 (defvar-local zellij-send--askq-active nil
   "直前の画面更新で質問が出ていたか。自動起動の立ち上がり検出に使う。")
 
-(defvar-local zellij-send--askq-answering nil
-  "回答フローの実行中なら non-nil。多重起動と自動起動の割り込みを防ぐ。")
-
-(defvar-local zellij-send--askq-signature nil
-  "直前に回答した画面の署名。同じ画面を繰り返し処理していないかの検査用。")
-
-(defvar-local zellij-send--askq-repeat 0
-  "同じ署名の画面を続けて処理した回数。無限ループの歯止め。")
-
-(defvar-local zellij-send--askq-rounds 0
-  "1 回の回答フローで質問を処理した回数。")
-
 ;; キー透過モードは後ろのセクションで定義するので、ここでは前方宣言だけしておく
 (defvar zellij-send-keys-mode)
 ;; 状態フックが知らせた質問も後ろのセクションで定義する
@@ -3981,50 +4131,43 @@ MULTI が non-nil なら複数選べる。"
 
 ;;;; 送信の下請け
 
-(defun zellij-send--askq-send-keys (buf seq &optional callback)
-  "BUF のペインへ SEQ（バイト列のリスト）を順に送る。
-BUF を常にカレントにしてから送るので、pane-id を取り違えない。
-最後に CALLBACK へ成功 t / 失敗 nil を渡す。"
+(defun zellij-send--askq-send-keys (op seq &optional callback)
+  "OP のペインへ SEQ（バイト列のリスト）を順に送る。
+最後に CALLBACK へ成功 t / 失敗 nil を渡す。OP が死んだら途中でやめる。"
   (if (null seq)
       (when callback (funcall callback t))
-    (if (not (buffer-live-p buf))
-        (when callback (funcall callback nil))
-      (with-current-buffer buf
-        (zellij-send--send-keys
-         zellij-send--session (car seq)
-         (lambda (exit)
-           (if (zerop exit)
-               (zellij-send--askq-send-keys buf (cdr seq) callback)
-             (message "キー送信に失敗しました (exit: %d)" exit)
-             (when callback (funcall callback nil)))))))))
+    (zellij-send--op-keys
+     op (car seq)
+     (lambda (exit)
+       (if (zerop exit)
+           (zellij-send--askq-send-keys op (cdr seq) callback)
+         (message "キー送信に失敗しました (exit: %d)" exit)
+         (when callback (funcall callback nil)))))))
 
-(defun zellij-send--askq-screen (buf callback)
-  "BUF のペインの画面を `dump-screen' で取り、CALLBACK に渡す。
-取れなければ nil を渡す。CALLBACK は BUF をカレントにして呼ばれる。
+(defun zellij-send--askq-screen (op callback)
+  "OP のペインの画面を `dump-screen' で取り、CALLBACK に渡す。
+取れなければ nil を渡す。CALLBACK は OP の黒板をカレントにして呼ばれる。
 
 回答フローは黒板の中身（`buffer-string'）を読まない。黒板には下書き・
 transcript・クリア後の空が入っていることがあり、それを画面だと思って
 解析すると、質問を見失うか別の選択肢を押す。スラッシュコマンド
 （`zellij-send--slash-wait'）と同じく、毎回ペインから取り直す。
 CALLBACK は sentinel の中で走るので、ミニバッファを開くなら
-`run-at-time' で抜けてからにすること。"
-  (if (not (buffer-live-p buf))
-      (funcall callback nil)
-    (with-current-buffer buf
-      (zellij-send--dump-screen-async zellij-send--session callback))))
+`zellij-send--op-later' で抜けてからにすること。"
+  (zellij-send--op-dump op callback))
 
-(defun zellij-send--askq-focus (buf num callback &optional tries)
-  "BUF の画面でカーソル (❯) を選択肢 NUM に合わせてから CALLBACK を呼ぶ。
+(defun zellij-send--askq-focus (op num callback &optional tries)
+  "OP の画面でカーソル (❯) を選択肢 NUM に合わせてから CALLBACK を呼ぶ。
 移動量を一度に計算せず 1 つずつ動かして毎回確認する。説明文の折り返しで
 行数がずれても壊れないようにするため（QR メニューで踏んだ失敗と同じ轍）。
 画面は毎回ペインから取り直す（`zellij-send--askq-screen'）。
 CALLBACK には成功 t / 失敗 nil を渡す。"
   (let ((tries (or tries 0)))
-    (if (or (not (buffer-live-p buf)) (> tries 12))
+    (if (> tries 12)
         (progn (message "カーソルを選択肢 %d に合わせられませんでした" num)
                (funcall callback nil))
       (zellij-send--askq-screen
-       buf
+       op
        (lambda (screen)
          (let* ((q (zellij-send--askq-parse screen))
                 (opts (plist-get q :options))
@@ -4038,94 +4181,87 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
             ((= cur target) (funcall callback t))
             (t
              (zellij-send--askq-send-keys
-              buf (list (if (< cur target) '(27 91 66) '(27 91 65)))
+              op (list (if (< cur target) '(27 91 66) '(27 91 65)))
               (lambda (ok)
                 (if (not ok)
                     (funcall callback nil)
-                  (run-at-time zellij-send-askq-settle-delay nil
-                               #'zellij-send--askq-focus
-                               buf num callback (1+ tries)))))))))))))
+                  (zellij-send--op-later op zellij-send-askq-settle-delay
+                                         #'zellij-send--askq-focus
+                                         op num callback (1+ tries)))))))))))))
 
 ;;;; 回答フロー
 
-(defun zellij-send--askq-finish (buf)
-  "回答フローを終了して BUF のフラグを戻す。"
-  (when (buffer-live-p buf)
-    (with-current-buffer buf
-      (setq zellij-send--askq-answering nil))))
+(defun zellij-send--askq-finish (op)
+  "回答フロー OP を終える。"
+  (zellij-send--op-end op))
 
-(defun zellij-send--askq-after (buf ok)
+(defun zellij-send--askq-after (op ok)
   "キー送信の後始末。OK なら画面が落ち着いてから次の質問を探す。"
   (if (not ok)
-      (zellij-send--askq-finish buf)
-    (run-at-time zellij-send-askq-settle-delay nil
-                 #'zellij-send--askq-continue buf)))
+      (zellij-send--askq-finish op)
+    (zellij-send--op-later op zellij-send-askq-settle-delay
+                           #'zellij-send--askq-continue op)))
 
-(defun zellij-send--askq-continue (buf)
-  "BUF の画面をペインから取り直し、まだ質問があれば続けて答える。
+(defun zellij-send--askq-continue (op)
+  "OP の画面をペインから取り直し、まだ質問があれば続けて答える。
 取り直すのは、黒板に下書きがあると `buffer-string' が画面ではないため
 （`zellij-send--askq-screen'）。続きの判断はミニバッファを開きうるので、
-sentinel を `run-at-time' で抜けてから行う。"
+sentinel を `zellij-send--op-later' で抜けてから行う。"
   (zellij-send--askq-screen
-   buf
+   op
    (lambda (screen)
-     (run-at-time 0 nil #'zellij-send--askq-continue-1 buf screen))))
+     (zellij-send--op-later op 0 #'zellij-send--askq-continue-1 op screen))))
 
-(defun zellij-send--askq-continue-1 (buf screen)
-  "`zellij-send--askq-continue' の本体。SCREEN は取り直した画面（nil もある）。"
-  (when (buffer-live-p buf)
-    (with-current-buffer buf
-      (setq zellij-send--askq-answering nil)
-      (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
-                                         zellij-send--hook-questions)))
-        (cond
-         ((null screen)
-          (setq zellij-send--askq-signature nil
-                zellij-send--askq-repeat 0)
-          (message "画面を取得できませんでした。ペインを直接確認してください"))
-         ((null q)
-          (setq zellij-send--askq-signature nil
-                zellij-send--askq-repeat 0)
-          (message "回答しました → [%s]" zellij-send--session))
-         ;; 同じ画面が続くのは、キーが効いていないか読み違えている合図。
-         ;; 黙って聞き続けるとミニバッファが無限に開くので必ず打ち切る
-         ((and (equal zellij-send--askq-signature (zellij-send--askq-signature q))
-               (>= zellij-send--askq-repeat 2))
-          (setq zellij-send--askq-signature nil
-                zellij-send--askq-repeat 0)
-          (message "画面が変わりません。ペインを直接確認してください"))
-         (t
-          (if (equal zellij-send--askq-signature (zellij-send--askq-signature q))
-              (setq zellij-send--askq-repeat (1+ zellij-send--askq-repeat))
-            (setq zellij-send--askq-signature (zellij-send--askq-signature q)
-                  zellij-send--askq-repeat 0))
-          (zellij-send--askq-answer buf q)))))))
+(defun zellij-send--askq-continue-1 (op screen)
+  "`zellij-send--askq-continue' の本体。SCREEN は取り直した画面（nil もある）。
+同じ画面が続いた回数（`:repeat'）と直前の署名（`:signature'）は OP の状態に持つ。"
+  (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
+                                     zellij-send--hook-questions))
+        (signature (zellij-send--op-get op :signature)))
+    (cond
+     ((null screen)
+      (zellij-send--askq-finish op)
+      (message "画面を取得できませんでした。ペインを直接確認してください"))
+     ((null q)
+      (zellij-send--askq-finish op)
+      (message "回答しました → [%s]" zellij-send--session))
+     ;; 同じ画面が続くのは、キーが効いていないか読み違えている合図。
+     ;; 黙って聞き続けるとミニバッファが無限に開くので必ず打ち切る
+     ((and (equal signature (zellij-send--askq-signature q))
+           (>= (zellij-send--op-get op :repeat) 2))
+      (zellij-send--askq-finish op)
+      (message "画面が変わりません。ペインを直接確認してください"))
+     (t
+      (if (equal signature (zellij-send--askq-signature q))
+          (zellij-send--op-put op :repeat (1+ (zellij-send--op-get op :repeat)))
+        (zellij-send--op-put op :signature (zellij-send--askq-signature q))
+        (zellij-send--op-put op :repeat 0))
+      (zellij-send--askq-answer op q)))))
 
-(defun zellij-send--askq-answer (buf q)
-  "BUF の質問 Q に対する回答を尋ねてキーを送る。"
-  (with-current-buffer buf
-    (setq zellij-send--askq-answering t
-          zellij-send--askq-rounds (1+ zellij-send--askq-rounds)))
-  (if (> (buffer-local-value 'zellij-send--askq-rounds buf)
-         zellij-send-askq-max-rounds)
+(defun zellij-send--askq-answer (op q)
+  "OP の質問 Q に対する回答を尋ねてキーを送る。
+処理した質問の数（`:rounds'）は OP の状態に持つ。"
+  (zellij-send--op-put op :rounds (1+ (or (zellij-send--op-get op :rounds) 0)))
+  (if (> (zellij-send--op-get op :rounds) zellij-send-askq-max-rounds)
       (progn
-        (zellij-send--askq-finish buf)
+        (zellij-send--askq-finish op)
         (message "質問を %d 回処理しても終わらないので打ち切りました。ペインを直接確認してください"
                  zellij-send-askq-max-rounds))
-    (zellij-send--askq-dispatch buf q)))
+    (zellij-send--askq-dispatch op q)))
 
-(defun zellij-send--askq-dispatch (buf q)
-  "Q の種類に応じた回答フローを呼ぶ。C-g は途中で抜けても後始末する。"
+(defun zellij-send--askq-dispatch (op q)
+  "Q の種類に応じた回答フローを呼ぶ。C-g で抜けたら OP を止める。"
   (condition-case _err
       (pcase (plist-get q :kind)
-        ('review (zellij-send--askq-answer-review buf q))
+        ('review (zellij-send--askq-answer-review op q))
         (_ (if (plist-get q :multi)
-               (zellij-send--askq-answer-multi buf q)
-             (zellij-send--askq-answer-single buf q))))
-    (quit (zellij-send--askq-finish buf)
-          (message "回答を中止しました（ペインは質問のままです。Esc は C-c C-k）"))))
+               (zellij-send--askq-answer-multi op q)
+             (zellij-send--askq-answer-single op q))))
+    (quit (zellij-send--op-abort
+           (zellij-send-op-buffer op)
+           "回答を中止しました（ペインは質問のままです。Esc は C-c C-k）"))))
 
-(defun zellij-send--askq-answer-single (buf q)
+(defun zellij-send--askq-answer-single (op q)
   "単一選択の質問 Q に答える。数字キー 1 つで確定し、次の質問へ自動で進む。"
   (let* ((opts (plist-get q :options))
          (opt (car (zellij-send--askq-read
@@ -4134,19 +4270,19 @@ sentinel を `run-at-time' で抜けてから行う。"
         ;; 自由入力はカーソルを合わせると入力欄になる。paste して Enter で確定
         (let ((text (read-string "自由入力: ")))
           (zellij-send--askq-focus
-           buf (plist-get opt :num)
+           op (plist-get opt :num)
            (lambda (ok)
              (if (not ok)
-                 (zellij-send--askq-finish buf)
-               (with-current-buffer buf
-                 (zellij-send--send
-                  zellij-send--session text
-                  (lambda (ok2) (zellij-send--askq-after buf ok2))))))))
+                 (zellij-send--askq-finish op)
+               (zellij-send--send
+                zellij-send--session text
+                (zellij-send--op-callback
+                 op (lambda (ok2) (zellij-send--askq-after op ok2))))))))
       (zellij-send--askq-send-keys
-       buf (list (zellij-send--askq-digits opt))
-       (lambda (ok) (zellij-send--askq-after buf ok))))))
+       op (list (zellij-send--askq-digits opt))
+       (lambda (ok) (zellij-send--askq-after op ok))))))
 
-(defun zellij-send--askq-answer-multi (buf q)
+(defun zellij-send--askq-answer-multi (op q)
   "複数選択の質問 Q に答える。数字キーでトグルし、→ で確認画面へ進む。"
   (let* ((opts (plist-get q :options))
          (chosen (zellij-send--askq-read
@@ -4156,8 +4292,8 @@ sentinel を `run-at-time' で抜けてから行う。"
     (if plain
         ;; チェックボックスでない選択肢（Chat about this など）は単独で決定
         (zellij-send--askq-send-keys
-         buf (list (zellij-send--askq-digits plain))
-         (lambda (ok) (zellij-send--askq-after buf ok)))
+         op (list (zellij-send--askq-digits plain))
+         (lambda (ok) (zellij-send--askq-after op ok)))
       (let* ((other (seq-find #'zellij-send--askq-other-p chosen))
              (text (when other (read-string "自由入力: ")))
              (toggles (seq-filter
@@ -4168,36 +4304,36 @@ sentinel を `run-at-time' で抜けてから行う。"
                        opts))
              (keys (mapcar #'zellij-send--askq-digits toggles)))
         (zellij-send--askq-send-keys
-         buf keys
+         op keys
          (lambda (ok)
            (cond
-            ((not ok) (zellij-send--askq-finish buf))
+            ((not ok) (zellij-send--askq-finish op))
             (other
-             (run-at-time zellij-send-askq-settle-delay nil
-                          #'zellij-send--askq-fill-other buf other text))
-            (t (zellij-send--askq-submit-multi buf nil)))))))))
+             (zellij-send--op-later op zellij-send-askq-settle-delay
+                                    #'zellij-send--askq-fill-other op other text))
+            (t (zellij-send--askq-submit-multi op nil)))))))))
 
-(defun zellij-send--askq-fill-other (buf other text)
+(defun zellij-send--askq-fill-other (op other text)
   "複数選択の自由入力 OTHER に TEXT を書き込んでから確認画面へ進む。
 数字キーでトグルしただけではラベルは Type something のままなので、
 カーソルを合わせてから `paste' する（Enter は不要）。"
   (zellij-send--askq-focus
-   buf (plist-get other :num)
+   op (plist-get other :num)
    (lambda (ok)
      (if (not ok)
-         (zellij-send--askq-finish buf)
-       (with-current-buffer buf
-         (zellij-send--zellij-async
-          (append (list "--session" zellij-send--session "action" "paste")
-                  (zellij-send--pane-args)
-                  (list "--" text))
-          (lambda (exit)
-            (if (zerop exit)
-                (zellij-send--askq-submit-multi buf t)
-              (message "自由入力の送信に失敗しました (exit: %d)" exit)
-              (zellij-send--askq-finish buf)))))))))
+         (zellij-send--askq-finish op)
+       (zellij-send--zellij-async
+        (append (list "--session" zellij-send--session "action" "paste")
+                (zellij-send--pane-args)
+                (list "--" text))
+        (zellij-send--op-callback
+         op (lambda (exit)
+              (if (zerop exit)
+                  (zellij-send--askq-submit-multi op t)
+                (message "自由入力の送信に失敗しました (exit: %d)" exit)
+                (zellij-send--askq-finish op)))))))))
 
-(defun zellij-send--askq-submit-multi (buf from-text)
+(defun zellij-send--askq-submit-multi (op from-text)
   "複数選択の質問を確定して次のタブ（確認画面）へ進む。
 
 FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
@@ -4206,14 +4342,14 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
 入力欄に打ち込まれて `自由入力テスト4444…' になった）。
 入力欄の直下は必ず `Submit' 行なので、↓ と Enter で確定する。
 それ以外は → でタブを進める（どちらも実測で確認済み）。"
-  (run-at-time
-   zellij-send-askq-settle-delay nil
+  (zellij-send--op-later
+   op zellij-send-askq-settle-delay
    (lambda ()
      (zellij-send--askq-send-keys
-      buf (if from-text '((27 91 66) (13)) '((27 91 67)))
-      (lambda (ok) (zellij-send--askq-after buf ok))))))
+      op (if from-text '((27 91 66) (13)) '((27 91 67)))
+      (lambda (ok) (zellij-send--askq-after op ok))))))
 
-(defun zellij-send--askq-answer-review (buf q)
+(defun zellij-send--askq-answer-review (op q)
   "確認画面 Q で送信するかを尋ねる。"
   (let* ((opts (plist-get q :options))
          (submit (seq-find (lambda (o) (string-match-p "Submit" (plist-get o :label))) opts))
@@ -4221,10 +4357,10 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
          (opt (if (y-or-n-p "この内容で回答を送信しますか? ") submit cancel)))
     (if (null opt)
         (progn (message "確認画面の選択肢を読み取れませんでした")
-               (zellij-send--askq-finish buf))
+               (zellij-send--askq-finish op))
       (zellij-send--askq-send-keys
-       buf (list (zellij-send--askq-digits opt))
-       (lambda (ok) (zellij-send--askq-after buf ok))))))
+       op (list (zellij-send--askq-digits opt))
+       (lambda (ok) (zellij-send--askq-after op ok))))))
 
 ;;;; 入口と自動起動
 
@@ -4238,32 +4374,32 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
   (interactive)
   (zellij-send--assert-session)
   (zellij-send--assert-capability 'askq)
-  (when zellij-send--askq-answering
-    (user-error "回答の途中です"))
+  (zellij-send--op-assert-free)
   ;; 黒板ではなくペインの画面を読む。下書きを書いた黒板で C-c C-q を
   ;; 押しても、画面に出ている質問に答えられるように（`--askq-screen'）
-  (let ((buf (current-buffer)))
+  (let ((op (zellij-send--op-begin (current-buffer) 'askq)))
     (zellij-send--askq-screen
-     buf
+     op
      (lambda (screen)
-       (run-at-time 0 nil #'zellij-send--askq-start buf screen)))))
+       (zellij-send--op-later op 0 #'zellij-send--askq-start op screen)))))
 
-(defun zellij-send--askq-start (buf screen)
-  "取り直した SCREEN に質問があれば、BUF で回答フローを始める。
+(defun zellij-send--askq-start (op screen)
+  "取り直した SCREEN に質問があれば、OP の回答フローを始める。
 `zellij-send-answer-question' から sentinel を抜けた後に呼ばれる。"
-  (when (buffer-live-p buf)
-    (with-current-buffer buf
-      (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
-                                         zellij-send--hook-questions)))
-        (cond
-         ((null screen) (message "画面を取得できませんでした"))
-         ((null q) (message "画面に選択肢プロンプトが見つかりません"))
-         (zellij-send--askq-answering nil)
-         (t
-          (setq zellij-send--askq-signature (zellij-send--askq-signature q)
-                zellij-send--askq-repeat 0
-                zellij-send--askq-rounds 0)
-          (zellij-send--askq-answer buf q)))))))
+  (let ((q (zellij-send--askq-enrich (zellij-send--askq-parse screen)
+                                     zellij-send--hook-questions)))
+    (cond
+     ((null screen)
+      (zellij-send--askq-finish op)
+      (message "画面を取得できませんでした"))
+     ((null q)
+      (zellij-send--askq-finish op)
+      (message "画面に選択肢プロンプトが見つかりません"))
+     (t
+      (zellij-send--op-put op :signature (zellij-send--askq-signature q))
+      (zellij-send--op-put op :repeat 0)
+      (zellij-send--op-put op :rounds 0)
+      (zellij-send--askq-answer op q)))))
 
 (defun zellij-send--askq-auto-open (buf)
   "BUF に質問が出たので回答 UI を開く。
@@ -4274,7 +4410,7 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
              (not (minibufferp))
              (not (active-minibuffer-window)))
     (with-current-buffer buf
-      (unless zellij-send--askq-answering
+      (unless (zellij-send--op-current)
         ;; `--update-buffer' から 1 拍置いて来るので、その間に下書きが
         ;; 入っていることがある。バッファではなく受け取った画面で確かめる
         (when (zellij-send--askq-parse (zellij-send--last-screen))
@@ -4316,7 +4452,7 @@ SCREEN は書き込んだ画面の正規形（黒板の中身は表示形なの�
      ((and now
            (not zellij-send--askq-active)
            (zellij-send--askq-auto-method)
-           (not zellij-send--askq-answering))
+           (not (zellij-send--op-current)))
       (run-at-time 0 nil #'zellij-send--askq-auto-open (current-buffer)))
      ((and (not now) zellij-send--askq-keys-auto)
       (zellij-send--askq-keys-exit)))
@@ -4919,13 +5055,8 @@ Stop フックが来ないため）。"
 
 (defalias 'zellij-send-list-sessions #'zellij-send--list-sessions-async
   "zellij のセッション一覧を非同期で取って CALLBACK に渡す。
-成功ならセッション名のリスト（空もあり）、失敗ならキーワードを渡す。
-失敗の説明は `zellij-send-list-sessions-failure' で作る。
+渡すのは (:ok SESSIONS) か (:failed REASON)（REASON はユーザーに見せる文）。
 詳細は `zellij-send--list-sessions-async'。")
-
-(defalias 'zellij-send-list-sessions-failure
-  #'zellij-send--list-sessions-failure
-  "`zellij-send-list-sessions' の失敗を説明する文を返す。")
 
 ;;; エントリポイント
 
@@ -5176,13 +5307,14 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
          (command (if ask (zellij-send--prompt-command current) current)))
     (message "セッション一覧を取得中...")
     (zellij-send--list-sessions-async
-     (lambda (sessions)
-       (if (not (listp sessions))
-           (message "%s" (zellij-send--list-sessions-failure sessions))
-         (let ((session (zellij-send--numbered-session-name
-                         base (zellij-send--taken-session-names sessions))))
-           ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
-           (run-at-time 0 nil #'zellij-send--spawn-session session dir command)))))))
+     (lambda (result)
+       (pcase result
+         (`(:ok ,sessions)
+          (let ((session (zellij-send--numbered-session-name
+                          base (zellij-send--taken-session-names sessions))))
+            ;; sentinel の中でバッファを切り替えない（`zellij-send' と同じ約束）。
+            (run-at-time 0 nil #'zellij-send--spawn-session session dir command)))
+         (`(:failed ,reason) (message "%s" reason)))))))
 
 (defun zellij-send--connect-existing-session (session)
   "既存 SESSION 用の黒板バッファを開く。
@@ -5220,13 +5352,14 @@ cwd と pane-id は zellij から取得するので、ディレクトリは尋�
   (interactive)
   (message "セッション一覧を取得中...")
   (zellij-send--list-sessions-async
-   (lambda (sessions)
-     (if (not (listp sessions))
-         (message "%s" (zellij-send--list-sessions-failure sessions))
-       ;; コールバックはプロセス sentinel の中で走る。sentinel 内では
-       ;; quit が抑止されるため、そのままミニバッファ入力を行うと C-g が
-       ;; 効かない・入力が壊れる。タイマーで sentinel を抜けてから聞く。
-       (run-at-time 0 nil #'zellij-send--select-session sessions)))))
+   (lambda (result)
+     (pcase result
+       (`(:ok ,sessions)
+        ;; コールバックはプロセス sentinel の中で走る。sentinel 内では
+        ;; quit が抑止されるため、そのままミニバッファ入力を行うと C-g が
+        ;; 効かない・入力が壊れる。タイマーで sentinel を抜けてから聞く。
+        (run-at-time 0 nil #'zellij-send--select-session sessions))
+       (`(:failed ,reason) (message "%s" reason))))))
 
 (provide 'zellij-send)
 ;;; zellij-send.el ends here

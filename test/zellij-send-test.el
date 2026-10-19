@@ -1445,25 +1445,64 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
 
 ;;; 黒板・受信の不具合の回帰テスト
 
-(ert-deftest zellij-send-test-slash-collecting-token ()
-  "期限切れの古い取得が後から返っても、新しい取得の印を下ろさない。"
+(ert-deftest zellij-send-test-op-token ()
+  "期限切れの古い操作が後から終わっても、新しい操作の印を下ろさない。"
   (with-temp-buffer
-    (let ((buf (current-buffer)) callbacks)
-      (cl-letf (((symbol-function 'zellij-send--slash-collect-1)
-                 (lambda (_buf cb) (push cb callbacks))))
-        (zellij-send--slash-collect buf #'ignore)
-        (should (zellij-send--slash-collecting-p))
-        ;; 古い取得を期限切れにして、新しい取得を始める
-        (setq zellij-send--slash-collecting
-              (- (float-time) zellij-send--slash-collect-stale 1))
-        (should-not (zellij-send--slash-collecting-p))
-        (let ((old (car callbacks)))
-          (zellij-send--slash-collect buf #'ignore)
-          (funcall old nil nil))
-        (should (zellij-send--slash-collecting-p))
-        (funcall (car callbacks) nil nil)
-        (should-not (zellij-send--slash-collecting-p))))))
+    (let* ((buf (current-buffer))
+           (old (zellij-send--op-begin buf 'slash-collect)))
+      (should old)
+      ;; 走っている間は別の操作を始めない
+      (should-not (zellij-send--op-begin buf 'askq))
+      ;; 古い操作を期限切れにして、新しい操作を始める
+      (setf (zellij-send-op-deadline old) (- (float-time) 1))
+      (should-not (zellij-send--op-current))
+      (let ((new (zellij-send--op-begin buf 'slash-collect)))
+        (should new)
+        (zellij-send--op-end old)
+        (should (eq (zellij-send--op-current) new))
+        (zellij-send--op-end new)
+        (should-not (zellij-send--op-current))))))
 
+(ert-deftest zellij-send-test-op-busy-refuses ()
+  "先読みの取得中に C-c C-s を押すと、従来どおり「取得中です」と断る。"
+  (zellij-send-test--with-draft-board nil
+    (zellij-send--op-begin (current-buffer) 'slash-collect :silent t)
+    (should (equal (cadr (should-error (zellij-send-slash-command)
+                                       :type 'user-error))
+                   "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
+    ;; 取り合う相手が回答でも同じく断る（入力欄は 1 つ）
+    (should-error (zellij-send-answer-question) :type 'user-error)))
+
+(ert-deftest zellij-send-test-op-abort ()
+  "止めたら、待っていたタイマーも、遅れて返った画面の続きも動かない。
+入力欄は打ちかけのときだけ Ctrl+U で片付ける。"
+  (with-temp-buffer
+    (setq-local zellij-send--session "proj00")
+    (let ((buf (current-buffer)) keys fired dump-cb)
+      (cl-letf (((symbol-function 'zellij-send--send-keys)
+                 (lambda (_session bytes &optional _cb) (push bytes keys)))
+                ((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &optional _full) (setq dump-cb cb))))
+        ;; 打っていない操作を止めても Ctrl+U は送らない
+        (let ((op (zellij-send--op-begin buf 'slash-arg)))
+          (zellij-send--op-later op 60 (lambda () (setq fired t)))
+          (should (timerp (zellij-send-op-timer op)))
+          (should (zellij-send--op-abort buf))
+          (should-not (zellij-send-op-timer op))
+          (should-not keys)
+          (should-not (zellij-send--op-current)))
+        ;; 打ちかけなら片付ける。走っていた dump の続きは呼ばない
+        (let ((op (zellij-send--op-begin buf 'slash-collect)))
+          (zellij-send--op-put op :typed t)
+          (zellij-send--op-dump op (lambda (_screen) (setq fired t)))
+          (zellij-send--op-abort buf)
+          (should (equal keys '((21))))
+          (funcall dump-cb "遅れて返った画面")
+          ;; 止めた操作には、もう何も送らない
+          (zellij-send--op-keys op '(13) #'ignore)
+          (should (equal keys '((21)))))
+        (should-not fired)
+        (should-not (zellij-send--op-abort buf))))))
 
 (ert-deftest zellij-send-test-history-next-keeps-draft ()
   "履歴を辿っていないときの M-n は下書きを消さない。
@@ -1570,8 +1609,10 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args) (apply fn args)))
                 ((symbol-function 'zellij-send--askq-answer)
-                 (lambda (_buf q) (setq asked q))))
-        (zellij-send--askq-continue (current-buffer))
+                 (lambda (_op q) (setq asked q))))
+        (zellij-send--askq-continue
+         (zellij-send--op-begin (current-buffer) 'askq
+                                :state (list :repeat 0 :rounds 0)))
         (should (eq (plist-get asked :kind) 'review))))))
 
 (ert-deftest zellij-send-test-askq-focus-reads-pane ()
@@ -1589,14 +1630,49 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                                      zellij-send-test--askq-single))
                                  zellij-send-test--askq-single))))
                 ((symbol-function 'zellij-send--askq-send-keys)
-                 (lambda (_buf seq cb) (push seq keys) (funcall cb t)))
+                 (lambda (_op seq cb) (push seq keys) (funcall cb t)))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args) (apply fn args))))
-        (zellij-send--askq-focus (current-buffer) 4
+        (zellij-send--askq-focus (zellij-send--op-begin (current-buffer) 'askq) 4
                                  (lambda (ok) (setq result ok)))
         (should (eq result t))
         ;; 下へ 1 回送ってから、画面で 4 番に着いたことを確かめた
         (should (equal keys '(((27 91 66)))))))))
+
+(ert-deftest zellij-send-test-list-sessions-failed-is-not-empty ()
+  "セッション一覧の取得に失敗しても、0 件と読んで黒板を消さない。"
+  (let ((buf (generate-new-buffer " *zjs-quit*")) polled)
+    (unwind-protect
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest _) (setq polled t))))
+          (dolist (result '((:failed "タイムアウト") (:ok ("proj00"))))
+            (setq polled nil)
+            (cl-letf (((symbol-function 'zellij-send--list-sessions-async)
+                       (lambda (cb) (funcall cb result))))
+              (zellij-send--await-agent-exit "proj00" nil buf (+ (float-time) 60)))
+            (should (buffer-live-p buf))
+            (should polled))
+          ;; 一覧に無いと確かめられたときだけ消す
+          (cl-letf (((symbol-function 'zellij-send--list-sessions-async)
+                     (lambda (cb) (funcall cb '(:ok ("other00"))))))
+            (zellij-send--await-agent-exit "proj00" nil buf (+ (float-time) 60)))
+          (should-not (buffer-live-p buf)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest zellij-send-test-dashboard-scan-stale ()
+  "ダッシュボードの検出は、期限切れの印が残っていても止まらない。"
+  (let ((zellij-send-dashboard--scanning (- (float-time) 3600))
+        (zellij-send-dashboard-prune-gone nil)
+        called)
+    (cl-letf (((symbol-function 'zellij-send-list-sessions)
+               (lambda (cb) (setq called t) (funcall cb '(:ok nil)))))
+      (zellij-send-dashboard--sync-sessions)
+      (should called)
+      (should-not zellij-send-dashboard--scanning)
+      ;; 走っている間は多重に起動しない
+      (setq called nil zellij-send-dashboard--scanning (float-time))
+      (zellij-send-dashboard--sync-sessions)
+      (should-not called))))
 
 (ert-deftest zellij-send-test-dashboard-reads-last-screen ()
   "セッションの状態と状況列は、下書きではなく受け取った画面に追随する。"
