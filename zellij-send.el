@@ -4468,8 +4468,9 @@ zellij を呼ぶだけ無駄だった。取り直すのは subscribe が切れ�
 ;; - PostToolUse / PostToolUseFailure       → 作業中（選択が済んだ）
 ;; - Stop / StopFailure・Notification（idle_prompt）→ 待機
 ;; **Stop はユーザーが Esc で中断したときには来ない**（リファレンスに明記）。
-;; 作業中のまま残りうるので、使う側（ダッシュボード）は画面が止まって
-;; しばらく経ったら信用しない。こちらの `zellij-send-interrupt' は消す。
+;; 作業中のまま残りうるので、状態を導く `zellij-send--hook-status' は画面が
+;; 止まってしばらく経ったら信用しない。Emacs から中断したとき
+;; （`zellij-send-interrupt'）はそれを待たずにすぐ消す。
 
 (defvar-local zellij-send--hook-state nil
   "フックから受け取ったこのセッションの状態。nil なら受け取っていない。
@@ -4555,6 +4556,241 @@ _LATER は将来のスクリプトが足す引数の受け皿。フックのス�
             (when (and parsed (listp parsed))
               (setq zellij-send--hook-questions parsed))))))
     nil))
+
+;;; セッションの状態と操作（公開 API）
+
+;; 本体の外のコード（ダッシュボード）は、黒板のバッファローカル変数や内部関数を
+;; 直接読まずにここを通す。依存は dashboard → 本体の一方向のまま。
+;;
+;; 状態（`prompt'・`working'・`idle'）の導出もここに置く。かつてはダッシュボードが
+;; `zellij-send--hook-state' にスピナーの照合とフックの失効判定を被せて自前で
+;; 導いていた。どれも zellij を呼ばない——読むのは subscribe が記録した画面と
+;; 変化時刻、フックが知らせた状態だけ。
+;; 「完了」（見ていない間に作業が終わった）はウィンドウの可視性で決まる表示側の
+;; 概念なので、ここでは扱わない。
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-working-regexp
+  'zellij-send-working-regexp "0.1.0")
+
+(defcustom zellij-send-working-regexp "esc to \\(?:interrupt\\|cancel\\)"
+  "AI が処理中であることを示す、画面上のスピナー行の正規表現。
+
+CLI ごとの文言（すべて実測）:
+
+  claude  `✳ Frobnicating… (12s · esc to interrupt)'
+  codex   `• Working (2s • esc to interrupt)'
+  agy     `esc to cancel'（`⣾ Generating...' などのスピナーと同時に出る）
+
+**agy だけ cancel** なので両方を拾う。ただし**本文をそのまま流し込んで
+いる間はこの行が出ない**ため、これだけでは処理中を取りこぼす
+（`zellij-send-active-window' による画面変化の検出と併用する）。"
+  :type 'regexp
+  :group 'zellij-send)
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-active-window
+  'zellij-send-active-window "0.1.0")
+
+(defcustom zellij-send-active-window 6.0
+  "画面が変化してから何秒間を「処理中」とみなすか。
+Claude Code は本文を流している間スピナー行を出さないので、
+スピナーだけでは応答中を検出できない。画面が動いていること自体を
+処理中の証拠として使う。0 にするとスピナー行だけで判定する。
+
+変化時刻は `zellij-send--last-change-time'（subscribe が記録）を使う。
+**ユーザーが編集中でバッファ更新を抑止している間も記録される**ので、
+バッファ内容の変化だけを見ていた頃のような取りこぼしは起きない。"
+  :type 'number
+  :group 'zellij-send)
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-use-hooks
+  'zellij-send-use-hooks "0.1.0")
+
+(defcustom zellij-send-use-hooks t
+  "non-nil なら、Claude Code のフックが知らせた状態を画面解析より優先する。
+フック（README の state-zellij-send.sh）が未設定のセッションは状態を
+受け取らないので、これまでどおり画面だけで判定する（`zellij-send--hook-state'）。"
+  :type 'boolean
+  :group 'zellij-send)
+
+(define-obsolete-variable-alias 'zellij-send-dashboard-hook-stale
+  'zellij-send-hook-stale "0.1.0")
+
+(defcustom zellij-send-hook-stale 30.0
+  "フックの「作業中」を、画面が何秒動かなければ信用しなくなるか。
+ユーザーが Esc で中断したときは Stop フックが来ない（hooks リファレンスに明記）
+ので、作業中のまま残ることがある。作業中の Claude Code はスピナーの秒数を
+毎秒描き直すので、画面がこれだけ止まっていれば作業は終わっている。"
+  :type 'number
+  :group 'zellij-send)
+
+(defconst zellij-send--hook-settle 3.0
+  "フックの「選択待ち」の後、ダイアログを描き終えるまでに見込む秒数。")
+
+(defun zellij-send--spinner-p (screen)
+  "SCREEN にスピナー行（`zellij-send-working-regexp'）があれば non-nil。
+**大文字小文字を区別して照合する**。スピナーの文言は 3 つの CLI とも小文字
+（`esc to interrupt' / `esc to cancel'）だが、AskUserQuestion のヒント行は
+`… · Esc to cancel' と大文字で始まる。区別しないと、質問を待っている画面を
+「作業中」の証拠として拾っていた。"
+  ;; スピナーは画面下部にしか出ない。全体を毎回走査しないよう末尾に限定する。
+  (let ((start (max 0 (- (length screen) 4000)))
+        (case-fold-search nil))
+    (string-match-p zellij-send-working-regexp screen start)))
+
+(defun zellij-send--screen-prompt-p (screen)
+  "SCREEN に選択肢プロンプトがあれば non-nil。カレントの黒板で呼ぶ。
+
+選択待ちの判定はこの 1 本にまとめる。Claude Code の AskUserQuestion として
+読める画面（`zellij-send--askq-parse'）ではそれを正とし、読めない画面でだけ
+記号の正規表現（`zellij-send--detect-prompt'）に落ちる。2 つを別々の場所で
+使うと食い違いうる（構造の方は、ヒント行の無い最終確認画面も読める）。
+AskUserQuestion の形は Claude Code のものなので、Claude Code と推測できる
+黒板（`zellij-send--claude-p'）でだけ試す。SCREEN が nil なら nil。"
+  (and screen
+       (or (and (zellij-send--claude-p) (zellij-send--askq-parse screen) t)
+           (zellij-send--detect-prompt screen))))
+
+(defun zellij-send--hook-status (now changed-at)
+  "カレントの黒板のフックが知らせた状態を、状態のシンボルにして返す。
+`prompt'・`working'・`idle' のどれか。使えなければ nil（画面で判定する）。
+NOW は現在時刻、CHANGED-AT は画面が最後に変化した時刻（nil なら不明）。
+
+「作業中」は、受け取った時刻と画面の最終変化のどちらからも
+`zellij-send-hook-stale' 秒以上経っていたら捨てる（中断では
+Stop フックが来ないため）。"
+  (when zellij-send-use-hooks
+    (let ((time (or zellij-send--hook-state-time 0)))
+      (pcase zellij-send--hook-state
+        ;; 選択待ちは、知らせの後に画面が描き変わったら捨てる（Esc で閉じた
+        ;; ダイアログにも Stop は来ない）。質問や許可の画面が描かれる分だけ
+        ;; `zellij-send--hook-settle' 秒は待つ。選択肢が画面に
+        ;; 見えていれば、捨てても画面解析が選択待ちにする
+        ('waiting (and (<= (or changed-at 0)
+                           (+ time zellij-send--hook-settle))
+                       'prompt))
+        ('working (and (< (- now (max time (or changed-at 0)))
+                          zellij-send-hook-stale)
+                       'working))
+        ('idle 'idle)))))
+
+(defun zellij-send--session-status (now)
+  "カレントの黒板の状態を `prompt'・`working'・`idle' で返す。NOW は現在時刻。
+フックが状態を知らせていればそれを優先する（`zellij-send--hook-status'）。
+無ければ受け取った画面（`zellij-send--last-screen'）から毎回判定する:
+- 処理中: スピナー行がある、または画面が
+  `zellij-send-active-window' 秒以内に変化した
+- 選択待ち: 選択肢プロンプトがある（`zellij-send--screen-prompt-p'。
+  フックが選択待ちと知らせた場合も）。処理中より優先する"
+  (let* ((changed-at zellij-send--last-change-time)
+         (screen (or (zellij-send--last-screen) ""))
+         (hook (zellij-send--hook-status now changed-at))
+         (working (if hook
+                      ;; フックの知らせは画面より確か（本文を流している間も
+                      ;; ターンが終わるまで作業中のまま）
+                      (eq hook 'working)
+                    (or (zellij-send--spinner-p screen)
+                        ;; 変化時刻が無い（まだ 1 件も受けていない）なら
+                        ;; 「ずっと前から変化なし」とみなす
+                        (and changed-at
+                             (> zellij-send-active-window 0)
+                             (< (- now changed-at)
+                                zellij-send-active-window))))))
+    (cond ((or (eq hook 'prompt) (zellij-send--screen-prompt-p screen))
+           'prompt)
+          (working 'working)
+          (t 'idle))))
+
+(defun zellij-send-sessions ()
+  "生きている黒板バッファのリストを返す。"
+  (cl-remove-if-not
+   (lambda (buf)
+     (and (buffer-live-p buf)
+          (eq (buffer-local-value 'major-mode buf) 'zellij-send-mode)
+          (buffer-local-value 'zellij-send--session buf)))
+   (buffer-list)))
+
+(defun zellij-send-session-name (buf)
+  "黒板 BUF の zellij セッション名を返す。"
+  (buffer-local-value 'zellij-send--session buf))
+
+(defun zellij-send-session-screen (buf)
+  "黒板 BUF が最後に受け取ったペインの画面を返す。分からなければ nil。
+黒板の中身ではない（`zellij-send--last-screen'）。zellij は呼ばない。"
+  (with-current-buffer buf
+    (zellij-send--last-screen)))
+
+(defun zellij-send-session-state (buf)
+  "黒板 BUF の状態を plist で返す。zellij は呼ばない。
+
+  :session     セッション名
+  :agent       確定したエージェント名。判っていなければ nil
+               （`zellij-send-default-command' で代用しない）
+  :status      `prompt'（選択待ち）・`working'（作業中）・`idle'（待機）
+               （`zellij-send--session-status'）
+  :changed-at  画面が最後に変化した時刻（`float-time'）。まだ無ければ nil
+  :editing     未送信の下書きがある（黒板の自動更新は止まっている）
+  :cleared     ユーザーがクリアした（同上）"
+  (with-current-buffer buf
+    (list :session zellij-send--session
+          :agent (zellij-send--agent-name)
+          :status (zellij-send--session-status (float-time))
+          :changed-at zellij-send--last-change-time
+          :editing (buffer-modified-p)
+          :cleared zellij-send--user-cleared)))
+
+(defun zellij-send-session-claude-p (buf)
+  "黒板 BUF のペインで Claude Code が動いていると**確定している**なら non-nil。
+Claude Code 専用の、ペインに打ち込む機能はこれで守る
+（`zellij-send--claude-confirmed-p'）。"
+  (with-current-buffer buf
+    (zellij-send--claude-confirmed-p)))
+
+(defun zellij-send-to-session (buf text &optional callback)
+  "黒板 BUF のペインに TEXT を送り、Enter を押す（`zellij-send--send'）。
+完了したら CALLBACK に成功なら t、失敗なら nil を渡して呼ぶ（省略可）。"
+  (with-current-buffer buf
+    (zellij-send--send zellij-send--session text callback)))
+
+(defun zellij-send-keys-to-session (buf bytes &optional callback)
+  "黒板 BUF のペインに BYTES（数値のリスト）をキー入力として送る。
+完了したら CALLBACK に終了コードを渡して呼ぶ（`zellij-send--send-keys'）。"
+  (with-current-buffer buf
+    (zellij-send--send-keys zellij-send--session bytes callback)))
+
+(defun zellij-send-dump-screen (buf callback)
+  "黒板 BUF のペインの画面を取り直して CALLBACK に渡す。
+失敗したら nil を渡す。CALLBACK は BUF をカレントにして呼ばれる
+（`zellij-send--dump-screen-async'）。"
+  (with-current-buffer buf
+    (zellij-send--dump-screen-async zellij-send--session callback)))
+
+(defun zellij-send-choice-to-session (buf n)
+  "黒板 BUF のペインが選択肢待ちなら、選択肢の番号 N を送る。
+数字が選択として効くと確かめたエージェントだけ
+（`zellij-send-number-reply-commands'。codex には効かない）。
+選択待ちかは黒板の中身ではなく受け取った画面で確かめる
+（`zellij-send--screen-prompt-p'）。フックの知らせだけでは送らない——
+ダイアログが描かれる前に数字を送ると、ただの入力として届く。"
+  (with-current-buffer buf
+    (zellij-send--assert-number-reply)
+    (unless (zellij-send--screen-prompt-p (zellij-send--last-screen))
+      (user-error "[%s] は選択肢待ちではありません" zellij-send--session))
+    (let ((session zellij-send--session))
+      (zellij-send--send session (number-to-string n)
+                         (lambda (ok)
+                           (when ok
+                             (message "選択 %d を送信 → [%s]" n session))))
+      (zellij-send--clear-prompt-highlight))))
+
+(defalias 'zellij-send-list-sessions #'zellij-send--list-sessions-async
+  "zellij のセッション一覧を非同期で取って CALLBACK に渡す。
+成功ならセッション名のリスト（空もあり）、失敗ならキーワードを渡す。
+失敗の説明は `zellij-send-list-sessions-failure' で作る。
+詳細は `zellij-send--list-sessions-async'。")
+
+(defalias 'zellij-send-list-sessions-failure
+  #'zellij-send--list-sessions-failure
+  "`zellij-send-list-sessions' の失敗を説明する文を返す。")
 
 ;;; エントリポイント
 

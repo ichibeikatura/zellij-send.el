@@ -1544,18 +1544,51 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
         (should (equal keys '(((27 91 66)))))))))
 
 (ert-deftest zellij-send-test-dashboard-reads-last-screen ()
-  "ダッシュボードの状態と状況列は、下書きではなく受け取った画面に追随する。"
+  "セッションの状態と状況列は、下書きではなく受け取った画面に追随する。"
   (let ((screen "⏺ 作業しています\n✳ Frobnicating… (12s · esc to interrupt)\n❯ "))
     (zellij-send-test--with-draft-board screen
       (let ((buf (current-buffer)))
-        (should (zellij-send-dashboard--spinner-p buf))
-        ;; 下書きの `> 1.' は選択肢に見えるが、画面には選択肢が無い
-        (should-not (zellij-send-dashboard--prompt-p buf))
+        ;; 下書きの `> 1.' は選択肢に見えるが、画面には選択肢が無い。
+        ;; 画面のスピナーで作業中
+        (should (eq (plist-get (zellij-send-session-state buf) :status)
+                    'working))
+        (should (plist-get (zellij-send-session-state buf) :editing))
         (should (string-prefix-p "✳ Frobnicating"
                                  (zellij-send-dashboard--tail-line buf)))
         ;; 画面が選択肢待ちに変われば、下書きがあってもそれに追随する
         (setq-local zellij-send--last-content zellij-send-test--askq-single)
-        (should (zellij-send-dashboard--prompt-p buf))))))
+        (should (eq (plist-get (zellij-send-session-state buf) :status)
+                    'prompt))))))
+
+(ert-deftest zellij-send-test-screen-prompt-p ()
+  "選択待ちは AskUserQuestion として読める画面ならそれを正とし、
+読めなければ記号の正規表現に落ちる。AskUserQuestion は Claude Code でだけ試す。"
+  ;; カーソル記号を外した質問の画面。記号の正規表現では拾えない
+  (let ((no-cursor (replace-regexp-in-string
+                    "^❯ 1\\." "  1." zellij-send-test--askq-single)))
+    (with-temp-buffer
+      (setq-local zellij-send--command "claude")
+      (should-not (zellij-send--detect-prompt no-cursor))
+      (should (zellij-send--screen-prompt-p no-cursor))
+      (should (zellij-send--screen-prompt-p zellij-send-test--askq-review))
+      (should-not (zellij-send--screen-prompt-p nil))
+      (should-not (zellij-send--screen-prompt-p "⏺ 本文だけ")))
+    (with-temp-buffer
+      (setq-local zellij-send--command "codex")
+      (should-not (zellij-send--screen-prompt-p no-cursor))
+      (should (zellij-send--screen-prompt-p "› 1. gpt-6-astra (current)")))))
+
+(ert-deftest zellij-send-test-obsolete-dashboard-variables ()
+  "ダッシュボードにあった旧名の変数は、本体の新しい名前の別名として効く。"
+  (dolist (pair '((zellij-send-dashboard-working-regexp . zellij-send-working-regexp)
+                  (zellij-send-dashboard-active-window . zellij-send-active-window)
+                  (zellij-send-dashboard-use-hooks . zellij-send-use-hooks)
+                  (zellij-send-dashboard-hook-stale . zellij-send-hook-stale)))
+    (should (eq (indirect-variable (car pair)) (cdr pair))))
+  (let ((zellij-send-hook-stale 30.0))
+    (with-suppressed-warnings ((obsolete zellij-send-dashboard-hook-stale))
+      (setq zellij-send-dashboard-hook-stale 60.0))
+    (should (= zellij-send-hook-stale 60.0))))
 
 ;;; スラッシュコマンド一覧の永続化
 
@@ -1790,11 +1823,10 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (kill-buffer a)
       (kill-buffer b))))
 
-(ert-deftest zellij-send-test-dashboard-hook-status ()
+(ert-deftest zellij-send-test-session-hook-status ()
   "フックがあれば本文を流している間も作業中。無ければ従来どおり画面で判定する。"
-  (let ((zellij-send-dashboard--state (make-hash-table :test #'equal))
-        (zellij-send-dashboard-active-window 6.0)
-        (zellij-send-dashboard-hook-stale 30.0)
+  (let ((zellij-send-active-window 6.0)
+        (zellij-send-hook-stale 30.0)
         (now (float-time)))
     (with-temp-buffer
       (setq-local zellij-send--session "proj00")
@@ -1803,29 +1835,29 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (setq-local zellij-send--last-change-time (- now 10))
       (let ((buf (current-buffer)))
         ;; フック未設定: 従来どおり待機
-        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+        (should (eq (plist-get (zellij-send-session-state buf)
                                :status)
                     'idle))
         ;; フックが作業中と言っている: 作業中
         (setq-local zellij-send--hook-state 'working)
         (setq-local zellij-send--hook-state-time (- now 12))
-        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+        (should (eq (plist-get (zellij-send-session-state buf)
                                :status)
                     'working))
         ;; 使わない設定なら画面だけ
-        (let ((zellij-send-dashboard-use-hooks nil))
-          (should-not (zellij-send-dashboard--hook-status buf now (- now 10))))
+        (let ((zellij-send-use-hooks nil))
+          (should-not (zellij-send--hook-status now (- now 10))))
         ;; 中断で Stop が来ず、画面も 40 秒止まっている: 信用しない
         (setq-local zellij-send--hook-state-time (- now 40))
-        (should-not (zellij-send-dashboard--hook-status buf now (- now 40)))
+        (should-not (zellij-send--hook-status now (- now 40)))
         ;; 選択待ちは、描き終えた後に画面が変わったら捨てる
         (setq-local zellij-send--hook-state 'waiting)
         (setq-local zellij-send--hook-state-time (- now 20))
-        (should (eq (zellij-send-dashboard--hook-status buf now (- now 19)) 'prompt))
-        (should-not (zellij-send-dashboard--hook-status buf now (- now 5)))
+        (should (eq (zellij-send--hook-status now (- now 19)) 'prompt))
+        (should-not (zellij-send--hook-status now (- now 5)))
         ;; 画面の最終変化（10 秒前）がダイアログを描いた分なら選択待ち
         (setq-local zellij-send--hook-state-time (- now 11))
-        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+        (should (eq (plist-get (zellij-send-session-state buf)
                                :status)
                     'prompt))))))
 
@@ -1858,6 +1890,37 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (kill-buffer buf)
       (delete-directory dir t))))
 
+;;; ダッシュボードの「完了」
+
+(ert-deftest zellij-send-test-dashboard-done ()
+  "見ていない間に作業中から待機に変わったら完了。本体の状態に完了は無い。"
+  (let ((zellij-send-dashboard--state (make-hash-table :test #'equal))
+        (zellij-send-active-window 6.0)
+        (now (float-time)))
+    (with-temp-buffer
+      (setq-local zellij-send--session "proj00")
+      (setq-local zellij-send--command "claude")
+      (setq-local zellij-send--last-content
+                  "✳ Frobnicating… (12s · esc to interrupt)")
+      (setq-local zellij-send--last-change-time (- now 60))
+      (let ((buf (current-buffer)))
+        (should (eq (plist-get (zellij-send-dashboard--update-state
+                                buf (zellij-send-session-state buf))
+                               :status)
+                    'working))
+        (setq-local zellij-send--last-content "⏺ 終わりました")
+        (should (eq (plist-get (zellij-send-session-state buf) :status) 'idle))
+        (should (eq (plist-get (zellij-send-dashboard--update-state
+                                buf (zellij-send-session-state buf))
+                               :status)
+                    'done))
+        ;; 選択待ちは完了より優先する
+        (setq-local zellij-send--last-content zellij-send-test--askq-single)
+        (should (eq (plist-get (zellij-send-dashboard--update-state
+                                buf (zellij-send-session-state buf))
+                               :status)
+                    'prompt))))))
+
 ;;; スピナーの照合
 
 (ert-deftest zellij-send-test-dashboard-spinner-case ()
@@ -1870,7 +1933,9 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
     (with-temp-buffer
       (setq-local zellij-send--last-content (car case))
       (let ((case-fold-search t))     ; 利用者の既定（t）に左右されないこと
-        (should (eq (and (zellij-send-dashboard--spinner-p (current-buffer)) t)
+        (should (eq (and (zellij-send--spinner-p
+                          (zellij-send-session-screen (current-buffer)))
+                         t)
                     (cdr case)))))))
 
 ;;; Stop フックでの取り直し

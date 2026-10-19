@@ -275,7 +275,7 @@ While on, the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary charact
 
 Opening the dashboard connects, without asking, to every running zellij session that has no buffer yet (`zellij-send-dashboard-auto-connect`). It rescans every `zellij-send-dashboard-scan-interval` seconds (default 15), picking up sessions started from a terminal and removing the blackboards of sessions that ended (buffers you are editing are kept).
 
-A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6); with the [state hook](#3-state-hook-optional-makes-the-dashboards-state-reliable) installed, what Claude Code reports takes precedence. When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
+A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-active-window` seconds (default 6); with the [state hook](#3-state-hook-optional-makes-the-dashboards-state-reliable) installed, what Claude Code reports takes precedence. When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
 
 `Q` asks for confirmation, sends `/exit`, waits for the agent to exit and deletes the zellij session; it force-deletes if the agent has not exited within `zellij-send-quit-timeout` seconds (default 10).
 
@@ -593,7 +593,7 @@ exit 0
 }
 ```
 
-An interrupt with Esc fires no Stop hook, so once the screen has been still for `zellij-send-dashboard-hook-stale` seconds (default 30) the dashboard goes back to reading the screen. Set `zellij-send-dashboard-use-hooks` to `nil` to ignore the hook.
+An interrupt with Esc fires no Stop hook, so once the screen has been still for `zellij-send-hook-stale` seconds (default 30) the dashboard goes back to reading the screen. Set `zellij-send-use-hooks` to `nil` to ignore the hook.
 
 ## Troubleshooting
 

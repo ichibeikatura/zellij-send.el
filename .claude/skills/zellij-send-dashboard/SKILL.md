@@ -21,26 +21,33 @@ description: >-
 - **依存は一方向**: dashboard → 本体。本体は `zellij-send-dashboard` を require せず、
   メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
   遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
-- **状態は本体に持たせない**: 各セッションが最後に受け取った画面
-  （`zellij-send--last-screen`）から毎回算出する。黒板の中身（`buffer-string`）は
-  下書き・クリア・transcript 表示で画面と食い違うので読まない
-  （本体の状態フラグはモードライン撤去時に削除済み）
-  - 作業中: スピナー行（`zellij-send-dashboard-working-regexp`、既定
+- **本体の内部には触らない**: ダッシュボードが使うのは本体の公開 API
+  （`zellij-send-sessions` / `zellij-send-session-state` / `zellij-send-session-screen` /
+  `zellij-send-choice-to-session` など。本体の「セッションの状態と操作（公開 API）」節）
+  だけ。2 ハイフンの名前を参照しない
+- **作業中・選択待ち・待機は本体が導く**（`zellij-send-session-state` の `:status`）。
+  各セッションが最後に受け取った画面（`zellij-send-session-screen`）から毎回算出する。
+  黒板の中身（`buffer-string`）は下書き・クリア・transcript 表示で画面と食い違うので読まない
+  - 作業中: スピナー行（`zellij-send-working-regexp`、既定
     `esc to interrupt`）がある **か**、画面が
-    `zellij-send-dashboard-active-window` 秒以内に変化した。
+    `zellij-send-active-window` 秒以内に変化した。
     **Claude Code は本文を流している間スピナー行を出さない**（実機で確認）ため、
     スピナーだけで判定すると回答中を「待機」と誤表示する。画面が動いていること
     自体を処理中の証拠として使う
-  - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
-    ウィンドウに表示された時点で解除
-  - 選択待ち: `zellij-send--detect-prompt`
+  - 選択待ち: `zellij-send--screen-prompt-p`（AskUserQuestion として読める画面なら
+    それを正とし、読めなければ記号の正規表現に落ちる）
   - **フック（README の state-zellij-send.sh）が知らせた状態があれば画面より優先**
-    （`zellij-send--hook-state` → `zellij-send-dashboard--hook-status`）。
+    （`zellij-send--hook-status`）。
     Esc の中断では Stop フックが来ないので、作業中は画面が
-    `zellij-send-dashboard-hook-stale` 秒止まったら、選択待ちはダイアログを描いた後に
+    `zellij-send-hook-stale` 秒止まったら、選択待ちはダイアログを描いた後に
     画面が変わったら捨てて画面解析に戻す。フック未設定なら画面解析だけ
+  - 旧名の `zellij-send-dashboard-working-regexp` / `-active-window` / `-use-hooks` /
+    `-hook-stale` は本体の新しい名前への obsolete alias
+- **完了だけはダッシュボードが決める**: 作業中だったセッションが作業中でなくなった瞬間に
+  立て、そのバッファがウィンドウに表示された時点で解除（`zellij-send-dashboard--update-state`）。
+  ウィンドウの可視性で決まる表示側の概念なので、本体の状態には入れない
 - **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（受け取った画面と
-  `zellij-send--last-change-time`）を読むだけ
+  最終変化時刻。`zellij-send-session-state` の `:changed-at`）を読むだけ
   （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）
 
 ### キーと更新（Emacs の作法）
