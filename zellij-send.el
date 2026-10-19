@@ -3578,6 +3578,13 @@ Claude Code の選択肢プロンプト用（`zellij-send--assert-number-reply' 
 ;;   **この画面にはヒント行が出ない**ので、ヒント行だけを検出条件にすると
 ;;   確認画面で止まってしまう（実機の通し確認で踏んだ）
 ;; - 質問が 1 つだけの単一選択にはタブ行も Review も無く、選んだ時点で確定する
+;;
+;; **質問を transcript から読むことはできない**（2026-10-19 実測、
+;; Claude Code 2.1.303 / zellij 0.45.1）。ペインに質問が出たのは呼び出しから
+;; 5.2 秒後だったが、AskUserQuestion の tool_use の行が transcript に書かれたのは
+;; 回答した後（212 秒後）で、tool_result の行と同時だった。回答待ちの間は
+;; transcript に質問が無いので、ラベルと説明は画面から読むしかない。
+;; 構造で取るなら PreToolUse フック（tool_input に questions が入る）が候補。
 
 (defcustom zellij-send-askq-hint-regexp "^Enter to select · .*Esc to cancel"
   "AskUserQuestion の画面を見分けるための正規表現。
