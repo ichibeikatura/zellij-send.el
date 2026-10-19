@@ -1744,22 +1744,28 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
            ,@body)
        (delete-directory root t))))
 
+(defun zellij-send-test--write (file text)
+  "FILE に TEXT を書く（ディレクトリも作る）。"
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file (insert text)))
+
 (ert-deftest zellij-send-test-slash-cache-survives-restart ()
   "保存した一覧は、メモリを捨てた後（＝再起動後）もディスクから読める。"
   (zellij-send-test--with-slash-cache
     (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/ndl" . "国会図書館")))
     (should (file-exists-p (zellij-send--slash-cache-file
-                            (zellij-send--slash-cache-key))))
+                            zellij-send--slash-global-key)))
     ;; 再起動に相当: メモリの表を空にする
     (clrhash zellij-send--slash-cache-table)
     (should (equal (zellij-send--slash-cached)
                    '(("/clear" . "Clear") ("/ndl" . "国会図書館"))))))
 
 (ert-deftest zellij-send-test-slash-cache-invalidation ()
-  "古くなった一覧・材料が変わった一覧は使わない。C-u で捨てたものは戻らない。"
+  "古くなった一覧・材料が変わった一覧・形式の版が古い一覧は使わない。
+C-u で捨てたものは戻らない。"
   (zellij-send-test--with-slash-cache
     (zellij-send--slash-cache-put '(("/clear" . "Clear")))
-    (let* ((key (zellij-send--slash-cache-key))
+    (let* ((key zellij-send--slash-global-key)
            (entry (gethash key zellij-send--slash-cache-table))
            (fp (plist-get entry :fingerprint))
            (time (plist-get entry :time)))
@@ -1768,16 +1774,75 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (should-not (zellij-send--slash-cache-valid-p entry fp (+ time 3601)))
       (let ((zellij-send-slash-cache-max-age nil))
         (should (zellij-send--slash-cache-valid-p entry fp (+ time 1e9))))
-      ;; プロジェクトにスキルが足された
-      (make-directory (expand-file-name ".claude/skills/new-skill" default-directory) t)
-      (should-not (equal (zellij-send--slash-cache-fingerprint) fp))
-      (should-not (zellij-send--slash-cached))
+      ;; 形式の版が古い（`❯' を読めなかった頃の 1 件の一覧など）
+      (should-not (zellij-send--slash-cache-valid-p
+                   entry (plist-put (copy-sequence fp) :version 1) time))
       ;; 取り直したものは使える。C-u で捨てるとディスクからも消える
-      (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/new-skill" . "")))
       (should (zellij-send--slash-cached))
       (zellij-send--slash-cache-drop)
       (should-not (file-exists-p (zellij-send--slash-cache-file key)))
       (should-not (zellij-send--slash-cached)))))
+
+(ert-deftest zellij-send-test-slash-cache-shared ()
+  "一度取った一覧を、別のプロジェクトでも打ち込まずに使う。
+プロジェクト自身のコマンドとスキルは、取ったプロジェクトの分を引き、
+使うプロジェクトの分をファイルから足す。"
+  (zellij-send-test--with-slash-cache
+    (let ((a default-directory)
+          (b (file-name-as-directory (expand-file-name "../other" default-directory))))
+      ;; A にはスキル、B にはコマンドがある
+      (zellij-send-test--write (expand-file-name ".claude/skills/a-skill/SKILL.md" a)
+                               "---\nname: a-skill\ndescription: >-\n  A の\n  スキル\n---\n本文\n")
+      (zellij-send-test--write (expand-file-name ".claude/commands/b-cmd.md" b)
+                               "---\ndescription: \"B のコマンド\"\n---\n本文\n")
+      (should (equal (zellij-send--slash-project-entries a) '(("/a-skill" . "A の スキル"))))
+      ;; A で取った一覧（A のスキルを含む）
+      (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/a-skill" . "A の…")
+                                      ("/ndl" . "国会図書館")))
+      (should (equal (zellij-send--slash-cached)
+                     '(("/a-skill" . "A の スキル") ("/clear" . "Clear")
+                       ("/ndl" . "国会図書館"))))
+      ;; B では A のスキルが消え、B のコマンドが足される
+      (let ((default-directory b))
+        (should (equal (zellij-send--slash-cached)
+                       '(("/b-cmd" . "B のコマンド") ("/clear" . "Clear")
+                         ("/ndl" . "国会図書館")))))
+      ;; ファイルから決めきれないプロジェクトでは全体用を使わない
+      (let ((default-directory b))
+        (zellij-send-test--write (expand-file-name ".mcp.json" b) "{}")
+        (should-not (zellij-send--slash-simple-project-p b))
+        (should-not (zellij-send--slash-cached))
+        ;; そこで取った一覧はそのディレクトリだけのもの
+        (zellij-send--slash-cache-put '(("/clear" . "Clear") ("/mcp__x__y" . "")))
+        (should (equal (zellij-send--slash-cached)
+                       '(("/clear" . "Clear") ("/mcp__x__y" . "")))))
+      ;; 全体用は B の分に汚されていない
+      (should (equal (mapcar #'car (zellij-send--slash-cached))
+                     '("/a-skill" "/clear" "/ndl"))))))
+
+(ert-deftest zellij-send-test-slash-simple-project ()
+  "ファイルから決めきれないものがあるプロジェクトは、ディレクトリごとに取る。"
+  (zellij-send-test--with-slash-cache
+    (let ((d default-directory))
+      (should (zellij-send--slash-simple-project-p d))
+      ;; コマンドのサブディレクトリ（名前の付き方を確かめていない）
+      (make-directory (expand-file-name ".claude/commands/sub" d) t)
+      (should-not (zellij-send--slash-simple-project-p d))
+      (delete-directory (expand-file-name ".claude/commands/sub" d))
+      (should (zellij-send--slash-simple-project-p d))
+      ;; 空の commands は自分自身なら問題ないが、子から見ると「親にもある」になる
+      (delete-directory (expand-file-name ".claude/commands" d))
+      ;; プロジェクトの設定でプラグインを有効にしている
+      (zellij-send-test--write (expand-file-name ".claude/settings.json" d)
+                               "{\"enabledPlugins\": {\"x@y\": true}}")
+      (should-not (zellij-send--slash-simple-project-p d))
+      (delete-file (expand-file-name ".claude/settings.json" d))
+      ;; 親ディレクトリにもスキルがある
+      (let ((child (file-name-as-directory (expand-file-name "child" d))))
+        (make-directory child t)
+        (should (zellij-send--slash-simple-project-p child))
+        (make-directory (expand-file-name ".claude/skills/p" d) t)
+        (should-not (zellij-send--slash-simple-project-p child))))))
 
 (ert-deftest zellij-send-test-slash-cache-other-dir ()
   "別のディレクトリの保存ファイルを読まない。保存しない設定ならファイルを作らない。"

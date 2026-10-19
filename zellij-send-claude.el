@@ -589,7 +589,8 @@ nil にする。"
 (defcustom zellij-send-slash-cache-directory
   (locate-user-emacs-file "zellij-send/slash-commands/")
   "スラッシュコマンド一覧をディスクに保存するディレクトリ。nil なら保存しない。
-作業ディレクトリごとに 1 ファイル置き、Emacs を再起動した後もそれを読む。
+全体用の一覧を 1 ファイル（と、全体用で済まないディレクトリの分を 1 ファイルずつ）
+置き、Emacs を再起動した後もそれを読む（`zellij-send--slash-cached'）。
 
 一覧の取得はペインの入力欄を実際に打つうえ 8〜10 秒かかる（実測 102 件）。
 メモリにだけ持つと、Emacs を起動するたびに全セッションで打ち込みが走る。
@@ -607,14 +608,42 @@ claude 本体の更新やスキルの追加は `zellij-send--slash-cache-fingerp
   :group 'zellij-send)
 
 (defvar zellij-send--slash-cache-table (make-hash-table :test 'equal)
-  "作業ディレクトリごとのスラッシュコマンド一覧。
-キーは絶対パス、値は plist (:entries ENTRIES :time 取得時刻 :fingerprint FP)。
-ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
-`zellij-send--slash-cache-fingerprint' の値。
-**セッションではなくディレクトリで持つ**——一覧の中身を決めるのは
-プロジェクトのコマンドとスキルなので、同じディレクトリのセッションなら
-同じ結果になる。2 つ目以降のセッションは取得ゼロで開ける。
+  "スラッシュコマンド一覧の控え。
+キーは作業ディレクトリの絶対パスか `zellij-send--slash-global-key'、値は plist
+(:entries ENTRIES :time 取得時刻 :fingerprint FP)。ENTRIES は
+((\"/name\" . \"説明\") ...)、FP は `zellij-send--slash-cache-fingerprint'
+（全体用は `zellij-send--slash-global-fingerprint'）の値。
 ディスク（`zellij-send-slash-cache-directory'）から読んだものもここに入る。")
+
+;; 一覧を全体で共有する（2026-10-19）。
+;;
+;; 一覧の取得はペインの入力欄を実際に打つうえ 8〜10 秒かかる。かつては作業
+;; ディレクトリごとに取っていたので、10 プロジェクトで同じ 100 件余りを 10 回
+;; 打ち込んでいた。ところが中身のうちディレクトリで変わるのは、そのプロジェクト
+;; 自身の `.claude/commands' と `.claude/skills' だけで、組み込み・`~/.claude' の
+;; コマンドとスキル・プラグイン・claude.ai から同期したスキルはどこでも同じ。
+;; そこで:
+;;
+;; - 取った一覧から、そのプロジェクトのコマンドとスキル（ファイルから列挙）を
+;;   引いたものを全体用として 1 つだけ持つ（`zellij-send--slash-global-key'）
+;; - 別のディレクトリでは、全体用にそのプロジェクトの分をファイルから足して
+;;   作る。ペインには打たない（`zellij-send--slash-project-entries'）
+;; - ファイルから決めきれないプロジェクト（`zellij-send--slash-simple-project-p'
+;;   が nil）は、推測せず従来どおりディレクトリごとにペインから取る
+;;
+;; 出どころ（組み込み・ユーザー・プラグイン）はメニューの説明からは見分けられない
+;; （説明はペイン幅で切れ、印が付くのは一部だけ）ので、引き算で全体用を作る。
+;; 未確認の前提: 組み込みのコマンドはディレクトリで変わらない。違っても補完は
+;; 一覧に無い名前も打てるので、候補が 1 つ多い・少ない程度で済む。
+
+(defconst zellij-send--slash-cache-version 2
+  "保存する一覧の形式の版。指紋に入れるので、上げると保存済みの一覧はすべて取り直しになる。
+2（2026-10-19）: 全体用の一覧を足した。あわせて、補完メニューの選択中の行の
+`❯' を読めなかった頃（v2.1.303 の画面に対応する前）に 1 件しか読めないまま
+保存された一覧を捨てる（実際に 2 つのディレクトリで 1 件の一覧が残っていた）。")
+
+(defconst zellij-send--slash-global-key "*global*"
+  "全体用の一覧のキー（`zellij-send--slash-cache-table' とディスクのファイル）。")
 
 (defun zellij-send--slash-cache-key ()
   "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
@@ -634,12 +663,14 @@ ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
                            (mapcar #'zellij-send--slash-mtime
                                    (directory-files dir t "\\`[^.]")))))))
 
-(defun zellij-send--slash-cache-fingerprint ()
-  "カレントバッファの一覧が変わったかを見分けるための値を返す。
-一覧を決める材料をファイルの時刻で表す（zellij も claude も呼ばない）:
+(defun zellij-send--slash-global-fingerprint ()
+  "全体用の一覧が変わったかを見分けるための値を返す。
+一覧を決める材料のうち、ディレクトリによらないものをファイルの時刻で表す
+（zellij も claude も呼ばない）:
 
+- 保存の形式の版（`zellij-send--slash-cache-version'）
 - claude の実行ファイル（実体のパスと更新時刻。版が上がると変わる）
-- プロジェクトと `~/.claude' の `commands' / `skills'
+- `~/.claude' の `commands' / `skills'
 - `~/.claude/plugins/installed_plugins.json'（プラグインの増減）
 
 値は `equal' で比べるので、数値と文字列だけで作る。"
@@ -650,14 +681,115 @@ ENTRIES は ((\"/name\" . \"説明\") ...)、FP は
                    zellij-send-default-command)))
          (true (and exe (file-truename exe)))
          (home (expand-file-name "~/.claude/")))
-    (list :claude (and true (list true (zellij-send--slash-mtime true)))
+    (list :version zellij-send--slash-cache-version
+          :claude (and true (list true (zellij-send--slash-mtime true)))
           :dirs (mapcar (lambda (dir) (cons dir (zellij-send--slash-dir-stamp dir)))
-                        (list (expand-file-name ".claude/commands" default-directory)
-                              (expand-file-name ".claude/skills" default-directory)
-                              (expand-file-name "commands" home)
+                        (list (expand-file-name "commands" home)
                               (expand-file-name "skills" home)))
           :plugins (zellij-send--slash-mtime
                     (expand-file-name "plugins/installed_plugins.json" home)))))
+
+(defun zellij-send--slash-cache-fingerprint ()
+  "カレントバッファのディレクトリの一覧が変わったかを見分けるための値を返す。
+全体用の材料（`zellij-send--slash-global-fingerprint'）に、プロジェクトの
+`.claude/commands' / `.claude/skills' の時刻を足したもの。"
+  (append (zellij-send--slash-global-fingerprint)
+          (list :project
+                (mapcar (lambda (dir) (cons dir (zellij-send--slash-dir-stamp dir)))
+                        (list (expand-file-name ".claude/commands" default-directory)
+                              (expand-file-name ".claude/skills" default-directory))))))
+
+(defun zellij-send--slash-frontmatter (file)
+  "FILE の先頭の YAML frontmatter から (NAME . DESCRIPTION) を返す。
+無いものは nil。読むのは `name:' と `description:' だけで、`>-' / `|' の
+複数行は空白でつないで 1 行にする（補完の注釈に出すだけなので厳密でなくてよい）。"
+  (with-temp-buffer
+    (ignore-errors (insert-file-contents file nil 0 16384))
+    (goto-char (point-min))
+    (when (looking-at "---[ \t]*$")
+      (forward-line 1)
+      (let (name desc)
+        (while (and (not (eobp)) (not (looking-at "---[ \t]*$")))
+          (if (looking-at "\\(name\\|description\\):[ \t]*\\(.*\\)$")
+              (let ((key (match-string 1))
+                    (val (string-trim (match-string 2))))
+                (forward-line 1)
+                (when (member val '(">" ">-" ">+" "|" "|-" "|+"))
+                  (let (parts)
+                    (while (and (not (eobp)) (looking-at "[ \t]+\\(.*\\)$"))
+                      (push (string-trim (match-string 1)) parts)
+                      (forward-line 1))
+                    (setq val (string-join (nreverse parts) " "))))
+                (when (string-match "\\`\\([\"']\\)\\(.*\\)\\1\\'" val)
+                  (setq val (match-string 2 val)))
+                (if (equal key "name") (setq name val) (setq desc val)))
+            (forward-line 1)))
+        (cons (and name (not (string-empty-p name)) name)
+              (and desc (not (string-empty-p desc)) desc))))))
+
+(defun zellij-send--slash-project-entries (dir)
+  "DIR のプロジェクト自身のコマンドとスキルを ((\"/name\" . 説明) ...) で返す。
+ファイルから列挙する（ペインには打たない）。`.claude/commands/NAME.md' が
+`/NAME'、`.claude/skills/DIR/SKILL.md' が `/名前'（frontmatter の `name'、
+無ければディレクトリ名）。説明は frontmatter の `description'、無ければ nil。"
+  (let ((cmds (expand-file-name ".claude/commands" dir))
+        (skills (expand-file-name ".claude/skills" dir))
+        entries)
+    (when (file-directory-p cmds)
+      (dolist (f (directory-files cmds t "\\`[^.].*\\.md\\'"))
+        (when (file-regular-p f)
+          (push (cons (concat "/" (file-name-base f))
+                      (cdr (zellij-send--slash-frontmatter f)))
+                entries))))
+    (when (file-directory-p skills)
+      (dolist (d (directory-files skills t "\\`[^.]"))
+        (let ((md (expand-file-name "SKILL.md" d)))
+          (when (file-readable-p md)
+            (let ((fm (zellij-send--slash-frontmatter md)))
+              (push (cons (concat "/" (or (car fm) (file-name-nondirectory d)))
+                          (cdr fm))
+                    entries))))))
+    (nreverse entries)))
+
+(defun zellij-send--slash-simple-project-p (dir)
+  "DIR の一覧を、全体用の一覧と DIR 自身のコマンド・スキルから作ってよければ non-nil。
+ファイルから決めきれないものがあれば nil（従来どおりペインから取る）:
+
+- `.mcp.json' がある（プロジェクトの MCP サーバのプロンプトもコマンドになる）
+- `.claude/settings*.json' でプラグインを有効にしている（`enabledPlugins'）
+- `.claude/commands' にサブディレクトリがある（名前の付き方を確かめていない）
+- DIR より上（ホームを除く）にも `.claude/commands' か `.claude/skills' がある"
+  (let* ((d (file-name-as-directory (file-truename dir)))
+         (home (file-name-as-directory (file-truename "~")))
+         (cmds (expand-file-name ".claude/commands" d)))
+    (and (not (file-exists-p (expand-file-name ".mcp.json" d)))
+         (not (seq-some
+               (lambda (name)
+                 (let ((f (expand-file-name name d)))
+                   (and (file-readable-p f)
+                        (with-temp-buffer
+                          (insert-file-contents f)
+                          (search-forward "enabledPlugins" nil t)))))
+               '(".claude/settings.json" ".claude/settings.local.json")))
+         (not (and (file-directory-p cmds)
+                   (seq-some #'file-directory-p
+                             (directory-files cmds t "\\`[^.]"))))
+         (let ((p (file-name-directory (directory-file-name d)))
+               (found nil))
+           (while (and p (not found))
+             (unless (equal p home)
+               (setq found (or (file-directory-p (expand-file-name ".claude/commands" p))
+                               (file-directory-p (expand-file-name ".claude/skills" p)))))
+             (let ((up (file-name-directory (directory-file-name p))))
+               (setq p (and up (not (equal up p)) up))))
+           (not found)))))
+
+(defun zellij-send--slash-merge (global project)
+  "全体用の一覧 GLOBAL にプロジェクトの分 PROJECT を足して、名前順にして返す。
+同じ名前はプロジェクトの方を使う。"
+  (sort (append project
+                (seq-remove (lambda (e) (assoc (car e) project)) global))
+        (lambda (a b) (string< (car a) (car b)))))
 
 (defun zellij-send--slash-cache-valid-p (entry fingerprint &optional now)
   "保存した ENTRY（`zellij-send--slash-cache-table' の値）がまだ使えれば non-nil。
@@ -702,39 +834,63 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
           (with-temp-file file
             (prin1 (plist-put (copy-sequence entry) :dir key) (current-buffer))))))))
 
-(defun zellij-send--slash-cached ()
-  "カレントバッファのディレクトリの一覧を返す。無いか古ければ nil。
+(defun zellij-send--slash-cache-lookup (key fingerprint)
+  "KEY の一覧を、FINGERPRINT で確かめてから返す。無いか古ければ nil。
 メモリに無ければディスクから読む（Emacs を再起動した直後でも打ち込まずに
-済むように）。古くなっていたら捨てる——呼び出し側は nil を見て取り直す。"
-  (let* ((key (zellij-send--slash-cache-key))
-         (entry (or (gethash key zellij-send--slash-cache-table)
-                    (zellij-send--slash-cache-read key))))
+済むように）。古くなっていたら捨てる。"
+  (let ((entry (or (gethash key zellij-send--slash-cache-table)
+                   (zellij-send--slash-cache-read key))))
     (when entry
-      (if (zellij-send--slash-cache-valid-p
-           entry (zellij-send--slash-cache-fingerprint))
+      (if (zellij-send--slash-cache-valid-p entry fingerprint)
           (progn (puthash key entry zellij-send--slash-cache-table)
                  (plist-get entry :entries))
         (remhash key zellij-send--slash-cache-table)
         nil))))
 
-(defun zellij-send--slash-cache-put (alist)
-  "ALIST をカレントバッファのディレクトリの一覧として覚え、ディスクにも書く。
-打ち切った一覧（truncated）をここに渡さないこと。"
-  (let ((key (zellij-send--slash-cache-key))
-        (entry (list :entries alist
-                     :time (float-time)
-                     :fingerprint (zellij-send--slash-cache-fingerprint))))
+(defun zellij-send--slash-cached ()
+  "カレントバッファのディレクトリの一覧を返す。無いか古ければ nil。
+ディレクトリごとの一覧があればそれを、無ければ全体用の一覧にプロジェクトの
+コマンドとスキルを足して作る（`zellij-send--slash-simple-project-p' のときだけ）。
+呼び出し側は nil を見て取り直す。"
+  (or (zellij-send--slash-cache-lookup (zellij-send--slash-cache-key)
+                                       (zellij-send--slash-cache-fingerprint))
+      (and (zellij-send--slash-simple-project-p default-directory)
+           (let ((global (zellij-send--slash-cache-lookup
+                          zellij-send--slash-global-key
+                          (zellij-send--slash-global-fingerprint))))
+             (and global
+                  (zellij-send--slash-merge
+                   global (zellij-send--slash-project-entries default-directory)))))))
+
+(defun zellij-send--slash-cache-store (key alist fingerprint)
+  "ALIST を KEY の一覧として FINGERPRINT と一緒に覚え、ディスクにも書く。"
+  (let ((entry (list :entries alist :time (float-time) :fingerprint fingerprint)))
     (puthash key entry zellij-send--slash-cache-table)
     (zellij-send--slash-cache-write key entry)))
 
+(defun zellij-send--slash-cache-put (alist)
+  "カレントバッファのディレクトリで取った ALIST を覚え、ディスクにも書く。
+`zellij-send--slash-simple-project-p' なら、プロジェクトのコマンドとスキルを
+引いて全体用の一覧として持つ（ほかのディレクトリでも使う）。そうでなければ
+ディレクトリごとに持つ。打ち切った一覧（truncated）をここに渡さないこと。"
+  (if (zellij-send--slash-simple-project-p default-directory)
+      (let ((project (zellij-send--slash-project-entries default-directory)))
+        (zellij-send--slash-cache-store
+         zellij-send--slash-global-key
+         (seq-remove (lambda (e) (assoc (car e) project)) alist)
+         (zellij-send--slash-global-fingerprint)))
+    (zellij-send--slash-cache-store (zellij-send--slash-cache-key) alist
+                                    (zellij-send--slash-cache-fingerprint))))
+
 (defun zellij-send--slash-cache-drop ()
-  "カレントバッファのディレクトリの一覧を、メモリからもディスクからも捨てる。"
-  (let* ((key (zellij-send--slash-cache-key))
-         (file (zellij-send--slash-cache-file key)))
-    (remhash key zellij-send--slash-cache-table)
-    (when (and file (file-exists-p file))
-      (with-demoted-errors "zellij-send: %S"
-        (delete-file file)))))
+  "カレントバッファのディレクトリの一覧と全体用の一覧を、メモリからもディスクからも捨てる。
+`C-u' で取り直すときに呼ぶ。全体用も捨てないと、取り直さずに全体用から作ってしまう。"
+  (dolist (key (list (zellij-send--slash-cache-key) zellij-send--slash-global-key))
+    (let ((file (zellij-send--slash-cache-file key)))
+      (remhash key zellij-send--slash-cache-table)
+      (when (and file (file-exists-p file))
+        (with-demoted-errors "zellij-send: %S"
+          (delete-file file))))))
 
 (defvar zellij-send--slash-arg-cache-table (make-hash-table :test 'equal)
   "引数の候補メニューのキャッシュ。
