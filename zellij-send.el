@@ -4425,14 +4425,19 @@ DETAIL は PreToolUse などでは tool_name、Notification では notification_
         zellij-send--hook-state-time nil))
 
 ;;;###autoload
-(defun zellij-send--on-claude-hook (session pane event &optional detail transcript)
+(defun zellij-send--on-claude-hook (session pane event &optional detail transcript
+                                            &rest _later)
   "Claude Code のフックから状態を受け取る（state-zellij-send.sh が呼ぶ）。
 SESSION と PANE はフックが継承した ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID、
 EVENT は hook_event_name、DETAIL は tool_name か notification_type、
 TRANSCRIPT はフックの transcript_path。
 対応する黒板の `zellij-send--hook-state' と
 `zellij-send--hook-transcript-path' を立てるだけで、zellij は呼ばない。
-emacsclient から呼ばれるので、すぐに返る。"
+emacsclient から呼ばれるので、すぐに返る。
+
+_LATER は将来のスクリプトが足す引数の受け皿。フックのスクリプトだけ
+新しくなると引数が増え、引数の数が合わずに毎回黙って失敗していた
+（2026-10-19、elpaca の古いビルドで実際に起きた）。"
   (let ((state (zellij-send--hook-event-state event detail))
         (buf (zellij-send--hook-buffer session pane)))
     (when buf

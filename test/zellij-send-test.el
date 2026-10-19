@@ -1779,6 +1779,8 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
           (should (eq (buffer-local-value 'zellij-send--hook-state b) 'idle))
           ;; 知らないセッション・イベントでもエラーにしない
           (should-not (zellij-send--on-claude-hook "nosuch" "1" "Stop" ""))
+          ;; 新しいスクリプトが引数を足しても失敗しない
+          (should-not (zellij-send--on-claude-hook "nosuch" "1" "Stop" "" nil "将来の引数"))
           ;; Emacs から中断したら捨てる（中断では Stop が来ない）
           (with-current-buffer b
             (setq-local zellij-send--hook-state 'working)
