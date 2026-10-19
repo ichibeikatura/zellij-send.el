@@ -436,7 +436,7 @@ Drafts and transcripts always wrap.
 The blackboard is kept live by `zellij subscribe`, so everything works without a hook. With the Stop hook installed, every finished response also:
 
 1. **Markdown log**: appends Claude's final reply (`last_assistant_message` from the Stop input; the transcript on versions without it) to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`). Once it passes `ZJS_LOG_MAX_BYTES` at the top of the script (default 1 MB) it is moved to `claude-log.1.md` (replacing the previous one) and a new log starts; `C-u C-c C-a l` opens the previous log.
-2. **Screen refresh**: refetches the blackboards with `dump-screen` via `emacsclient`. This needs an Emacs server (`(server-start)` or `emacs --daemon`).
+2. **Screen refresh**: refetches that session's blackboard with `dump-screen` via `emacsclient`, unless its subscribe stream is up (it is already current). This needs an Emacs server (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
 
@@ -494,10 +494,15 @@ if last and cwd:
         out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 
+# Tell Emacs which blackboard stopped, by the names inherited from zellij
+# (anything but plain characters is dropped)
+ZJS_SESSION=$(printf '%s' "$ZELLIJ_SESSION_NAME" | tr -cd 'A-Za-z0-9_.-')
+ZJS_PANE=$(printf '%s' "$ZELLIJ_PANE_ID" | tr -cd '0-9')
+
 # Run emacsclient in the background with a 10s watchdog so a busy/frozen
 # Emacs never blocks the Stop hook
 (
-  emacsclient -e "(zellij-send--on-claude-stop)" >/dev/null 2>&1 &
+  emacsclient -e "(zellij-send--on-claude-stop \"$ZJS_SESSION\" \"$ZJS_PANE\")" >/dev/null 2>&1 &
   EC_PID=$!
   sleep 10
   kill "$EC_PID" 2>/dev/null

@@ -436,7 +436,7 @@ exit 0
 黒板の画面は `zellij subscribe` で常時更新されるので、フックが無くても動きます。Stop フックを入れると、回答完了のたびに次の 2 つを行います:
 
 1. **markdown ログ**: Stop フックの入力にある最後の回答（`last_assistant_message`。無い版では transcript から）を、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開く）。スクリプト冒頭の `ZJS_LOG_MAX_BYTES`（既定 1 MB）を超えたら `claude-log.1.md` へ退避して新しく始めます（前の退避分は上書き）。以前のログは `C-u C-c C-a l` で開きます。
-2. **画面の取り直し**: `emacsclient` 経由で黒板を `dump-screen` で更新します。Emacs server の起動が必要です（`(server-start)` または `emacs --daemon`）。
+2. **画面の取り直し**: `emacsclient` 経由で、そのセッションの黒板を `dump-screen` で更新します。subscribe が画面を受け取れている黒板は取り直しません（既に最新なので）。Emacs server の起動が必要です（`(server-start)` または `emacs --daemon`）。
 
 ### 1. フックスクリプトを作成
 
@@ -492,10 +492,14 @@ if last and cwd:
         out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 
+# どの黒板の Stop かを zellij から受け継いだ名前で知らせる（記号は落とす）
+ZJS_SESSION=$(printf '%s' "$ZELLIJ_SESSION_NAME" | tr -cd 'A-Za-z0-9_.-')
+ZJS_PANE=$(printf '%s' "$ZELLIJ_PANE_ID" | tr -cd '0-9')
+
 # Emacs がビジー/フリーズしていても Stop フックをブロックしないよう、
 # emacsclient はバックグラウンド起動して 10 秒で打ち切る
 (
-  emacsclient -e "(zellij-send--on-claude-stop)" >/dev/null 2>&1 &
+  emacsclient -e "(zellij-send--on-claude-stop \"$ZJS_SESSION\" \"$ZJS_PANE\")" >/dev/null 2>&1 &
   EC_PID=$!
   sleep 10
   kill "$EC_PID" 2>/dev/null

@@ -1873,6 +1873,46 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
         (should (eq (and (zellij-send-dashboard--spinner-p (current-buffer)) t)
                     (cdr case)))))))
 
+;;; Stop フックでの取り直し
+
+(ert-deftest zellij-send-test-on-claude-stop-narrows ()
+  "Stop では、知らされたセッションの、subscribe が切れている黒板だけを取り直す。"
+  (let ((a (generate-new-buffer " *zjs-stop-a*"))
+        (b (generate-new-buffer " *zjs-stop-b*"))
+        (live (make-process :name "zjs-live" :command '("sleep" "30") :noquery t))
+        dumped)
+    (unwind-protect
+        (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                   (lambda (session _cb &optional _full) (push session dumped))))
+          (dolist (spec `((,a "proj00") (,b "proj01")))
+            (with-current-buffer (car spec)
+              (setq major-mode 'zellij-send-mode)
+              (setq-local zellij-send--session (cadr spec))
+              (setq-local zellij-send--pane-id "terminal_1")))
+          ;; セッションを知らされたら、その黒板だけ
+          (zellij-send--on-claude-stop "proj01" "1")
+          (should (equal dumped '("proj01")))
+          ;; 古いスクリプト（引数なし）なら全部
+          (setq dumped nil)
+          (zellij-send--on-claude-stop)
+          (should (equal (sort dumped #'string<) '("proj00" "proj01")))
+          ;; subscribe が画面を受け取れている黒板は取り直さない
+          (with-current-buffer b
+            (setq-local zellij-send--subscribe-process live)
+            (setq-local zellij-send--subscribe-pane-id "terminal_1")
+            (setq-local zellij-send--last-event-time (float-time)))
+          (setq dumped nil)
+          (zellij-send--on-claude-stop "proj01" "1" "将来の引数")
+          (should-not dumped)
+          ;; 繋いだが初回イベントがまだ来ていない subscribe は、生きていないとみなす
+          (with-current-buffer b
+            (setq-local zellij-send--last-event-time nil))
+          (zellij-send--on-claude-stop "proj01" "1")
+          (should (equal dumped '("proj01"))))
+      (delete-process live)
+      (kill-buffer a)
+      (kill-buffer b))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

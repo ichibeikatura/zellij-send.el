@@ -4342,15 +4342,27 @@ claude 以外を動かしているセッションを見分けるためだけの�
 ;;; Stop フックハンドラ
 
 ;;;###autoload
-(defun zellij-send--on-claude-stop ()
-  "Claude Code 停止時に全 zellij-send バッファを dump-screen で更新する。
+(defun zellij-send--on-claude-stop (&optional session pane &rest _later)
+  "Claude Code 停止時に、黒板を dump-screen で取り直す。
 ~/.claude/hooks/stop-zellij-send.sh から emacsclient 経由で呼ばれる。
-ユーザーが意図してクリアしたバッファは更新しない。"
-  (dolist (buf (buffer-list))
+
+SESSION と PANE はフックが継承した ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID。
+渡されたらそのセッションの黒板だけを対象にする（`zellij-send--hook-buffer'）。
+渡されない（古いスクリプト・zellij の外の Claude Code）ときは全部の黒板が対象。
+
+**subscribe が生きている黒板は取り直さない**。画面は subscribe で常に最新に
+なっているので、Stop のたびに全セッションへ `dump-screen' を投げるのは
+zellij を呼ぶだけ無駄だった。取り直すのは subscribe が切れている黒板だけ
+（再接続をあきらめた後の取りこぼしを拾う）。ユーザーがクリア・編集中の
+黒板は従来どおり更新しない。_LATER は将来のスクリプトが足す引数の受け皿。"
+  (dolist (buf (if (and (stringp session) (not (string-empty-p session)))
+                   (delq nil (list (zellij-send--hook-buffer session pane)))
+                 (buffer-list)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (and (eq major-mode 'zellij-send-mode)
                    zellij-send--session
+                   (not (zellij-send--subscribe-live-p))
                    (not zellij-send--user-cleared)
                    (not (buffer-modified-p)))
           (zellij-send--dump-screen-async
@@ -4359,7 +4371,17 @@ claude 以外を動かしているセッションを見分けるためだけの�
              (when (and content
                         (not zellij-send--user-cleared)
                         (not (buffer-modified-p)))
-               (zellij-send--update-buffer content)))))))))
+               (zellij-send--update-buffer content))))))))
+  nil)
+
+(defun zellij-send--subscribe-live-p ()
+  "カレントの黒板の subscribe が生きていて、画面を受け取れていれば non-nil。
+プロセスが生きていても初回イベントがまだなら、繋がっているとは言えない
+（存在しないセッションでも subscribe は黙って生き続ける）。"
+  (and zellij-send--subscribe-process
+       (process-live-p zellij-send--subscribe-process)
+       zellij-send--last-event-time
+       (equal zellij-send--subscribe-pane-id zellij-send--pane-id)))
 
 ;;; 状態フック（Claude Code の hooks から状態を受け取る）
 
