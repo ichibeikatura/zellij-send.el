@@ -33,126 +33,82 @@ everything else you have open — which suits a particular way of working:
 > terms. That fits people who open files from all over the place, potter about with
 > whatever they feel like at the moment, and wait for the hyperfocus to arrive.
 
-That is the goal here. Not an IDE that writes your code for you while you watch, but a
-workbench where an agent can be building software in one buffer while another agent helps
-you draft prose in a second, and you move between them as your attention moves. Elaborate
-things are possible when you want them — the point is that pottering stays cheap.
+The goal is a workbench where an agent can be building software in one buffer while
+another agent helps you draft prose in a second, and you move between them as your
+attention moves. The point is that pottering stays cheap.
 
-What follows from that:
-
-- **The agents outlive their windows.** Sessions are created with
-  `zellij attach --create-background` and driven by pane id, so no terminal client is
-  ever required. Close the frame, restart Emacs, come back tomorrow — `zellij attach` in
-  any terminal still shows you the same session if you want to look at it directly.
+- **The agents outlive their windows.** Close the frame, restart Emacs, come back
+  tomorrow — `zellij attach` in any terminal still shows you the same session.
 - **Several at once is the normal case.** The [dashboard](#dashboard-zellij-send-dashboardel)
-  lists every session with its state, how long it has been in that state, and how long
-  since its screen last changed — so a stuck one is visible without visiting it.
-- **Emacs composes the text, not the terminal.** You write in a normal buffer, with your
-  input method, your abbrevs and snippets, text yanked from other buffers, and as many
-  passes over the wording as you like before anything is sent.
-- **The conversation is a buffer.** Search it, save it, feed it to something else. `C-c C-a`
-  → `a` rebuilds the whole conversation from Claude Code's own transcript, so what scrolled
-  off the pane is not lost.
+  lists every session with its state, so a stuck one is visible without visiting it.
+- **Emacs composes the text, not the terminal.** Your input method, abbrevs, snippets
+  and yanks from other buffers all work.
+- **The conversation is a buffer.** `C-c C-a` → `a` rebuilds the whole conversation from
+  Claude Code's own transcript, so what scrolled off the pane is not lost.
 
 ### If your input method breaks inside `vterm` / `eat`
 
-This was the original reason the package exists, and it is still the sharpest one for the
-people it affects.
-
-Emacs terminal emulators such as `vterm` and `eat` hand key events straight to the child
-process. That is exactly what you want for a TUI — and it means **input methods that run
-inside Emacs never get a chance to see your keys**. Not "work badly": they do not run at
-all. `shell-mode` and `eshell` do keep them, but they cannot host an interactive TUI like
-Claude Code.
-
-Note the shape of the problem: an OS-level IME (macOS, ibus, fcitx) composes text before
-Emacs is involved, so it is usually fine inside `vterm`. What breaks is **Emacs's own
-input**, and there are more people in that boat than you might expect:
+This was the original reason the package exists. Emacs terminal emulators such as
+`vterm` and `eat` hand key events straight to the child process — exactly what you want
+for a TUI, and it means **input methods that run inside Emacs never see your keys**. An
+OS-level IME (macOS, ibus, fcitx) composes text before Emacs is involved and is usually
+fine; what breaks is **Emacs's own input**:
 
 | | |
 |---|---|
 | Japanese | [ddSKK](https://github.com/skk-dev/ddskk) — conversion runs in Emacs Lisp |
 | Chinese | [`pyim`](https://github.com/tumashu/pyim), [`emacs-rime`](https://github.com/DogLooksGood/emacs-rime) |
-| Russian, Greek, … | `C-\` with `russian-computer` and friends — switching the *OS* layout would break every keybinding you have, so the Emacs-side method is the standard answer |
+| Russian, Greek, … | `C-\` with `russian-computer` and friends — switching the *OS* layout would break every keybinding you have |
 | Vietnamese, Indic scripts | built-in Quail methods (`vietnamese-telex`, `devanagari-itrans`, …) |
-| Not a language at all | `agda-input`, `lean4-input`, the `TeX` method — typing `\forall` to get ∀ is the same mechanism |
+| Not a language at all | `agda-input`, `lean4-input`, the `TeX` method |
 
-If you are in that table, the fix is the same for all of you: compose in a regular Emacs
-buffer where your input works, and let zellij-send deliver it to a pane where the TUI is
-happy.
+If you are in that table: compose in a regular Emacs buffer where your input works, and
+let zellij-send deliver it to a pane where the TUI is happy.
 
 ## Requirements
 
 - Emacs 28 or later (`transient` is built in)
-- [zellij](https://zellij.dev/) **0.44 or later** installed and available on `$PATH` (older versions have a different `dump-screen` CLI and cannot target panes by id)
-- [`markdown-mode`](https://github.com/jrblevin/markdown-mode) (optional): enables Markdown font decoration when installed
+- [zellij](https://zellij.dev/) **0.44 or later** on `$PATH`
+- [`markdown-mode`](https://github.com/jrblevin/markdown-mode) (optional): Markdown decoration in the blackboard
+- `python3` if you use the Stop hook or the usage display
 
 ## Installation
 
-### Manual
-
-Put `zellij-send.el` on your load path and add to `init.el`:
-
 ```elisp
+;; Manual
 (add-to-list 'load-path "/path/to/zellij-send")
 (require 'zellij-send)
-```
 
-### use-package + elpaca (recommended)
-
-```elisp
+;; use-package + elpaca
 (use-package zellij-send
-  :ensure (zellij-send
-           :url "https://github.com/ichibeikatura/zellij-send.el"))
-```
-
-### use-package (manual load path)
-
-```elisp
-(use-package zellij-send
-  :load-path "/path/to/zellij-send")
+  :ensure (zellij-send :url "https://github.com/ichibeikatura/zellij-send.el"))
 ```
 
 ## Usage
 
 ### 1. Open a session
 
-```
-M-x zellij-send
-```
+`M-x zellij-send` lists the running zellij sessions; selecting one opens `*ai-session-name*`.
 
-A list of running zellij sessions is shown. Selecting one opens the `*ai-session-name*` buffer.
+`[New]` asks for a working directory and a command (default `zellij-send-default-command`, i.e. `claude`) and creates a new session named after the **directory plus a two-digit counter** (`myproj00`). The session stays detached and the pane id is remembered, so no terminal needs to be attached. To watch it live, run `zellij attach SESSION` in any terminal.
 
-Select `[New]` to create a new zellij session. You will be prompted for a working directory; the session name is the **directory name plus a two-digit counter** (`myproj00`). Starting another agent in the same directory gives you `myproj01`, `myproj02`, … (`C-c C-a` → `+`; see "Adding agents" below). A **detached** (background) zellij session is created, and the command configured in `zellij-send-default-command` (default: `claude`) is launched in a new pane. The pane id is remembered, so no terminal client needs to be attached — everything works in the background. To watch the session live, run `zellij attach SESSION` in any terminal.
-
-For **existing** sessions (not created by this package), the pane id is unknown, so input is sent to the focused pane. This requires at least one attached client (e.g. your terminal); fully detached foreign sessions will not receive input.
+When you connect to an **existing** session, its working directory, target pane and running command are recovered from zellij (the agent pane is picked from the COMMAND column of `list-panes --all`). Only if no pane can be identified is input sent to the focused pane, which then needs an attached client.
 
 ### 2. Send text
 
-Type your message in the buffer and press `C-c C-c` to send.
+Write in the buffer and press `C-c C-c`. On success the buffer is cleared, unless you edited it while the send was in flight; failed sends keep the text.
 
-Sending only clears the buffer (or closes a reply buffer) if it has not been edited
-since the send started. Edits during sending preserve the entire buffer, including
-the already sent text. Failed sends preserve the text as well.
+### 3. Read the answer
 
-### 3. Read the AI's response
+The blackboard mirrors the pane continuously (`zellij subscribe`). While point is at the end of the buffer, updates keep it there; move up to read and it stays put (`M->` to follow again).
 
-When Claude Code finishes its reply, the `*ai-session-name*` buffer **updates automatically**.
+**Automatic updates pause while you are editing the buffer and after you clear it**, so a draft is never overwritten. If the screen looks frozen, `C-c C-a` → `g` brings it back.
 
-While point is at the end of the buffer, updates keep it there and keep the last line at the
-bottom of the window. Sending clears the buffer, so this is where you land right after a send.
-Move up to read and the buffer stays put; `M->` back to the end and it follows again.
-
-The buffer mirrors the pane, which means it shows one screenful — a TUI in the alternate
-screen has no scrollback, so whatever scrolled past is gone as far as the terminal is
-concerned. To read the conversation from the beginning, open the menu with `C-c C-a` and
-press `a`: for Claude Code this replaces the buffer with the whole conversation, rebuilt
-from the transcript JSONL that Claude Code writes. Press `g` to go back to the pane as it
-is right now and resume the live stream.
+You see one screenful — a full-screen TUI has no scrollback — so read the conversation from the start with `C-c C-a` → `a` (rebuilt from Claude Code's transcript).
 
 ## Key Bindings
 
-Inside the `*ai-session-name*` buffer:
+Inside `*ai-session-name*`:
 
 | Key       | Action                                  |
 |-----------|-----------------------------------------|
@@ -171,10 +127,11 @@ Inside the `*ai-session-name*` buffer:
 | Key | Action                                                                          |
 |-----|---------------------------------------------------------------------------------|
 | `d` | Open the dashboard (all sessions at a glance)                                    |
-| `a` | Show the whole conversation (from the transcript; `C-u a` dumps the screen instead) |
+| `a` | Show the whole conversation (from the transcript; `C-u a` dumps the screen)     |
 | `g` | Back to the live pane — refetch the screen and resume automatic updates          |
 | `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
 | `x` | Clear the buffer                                                                |
+| `w` | Toggle line wrapping of the screen (for reading tables)                          |
 
 **Send**
 
@@ -186,39 +143,33 @@ Inside the `*ai-session-name*` buffer:
 | `u` | Answer the on-screen question (AskUserQuestion)               |
 | `k` | Key passthrough mode (arrows / RET / SPC go to the pane)      |
 
-**Claude Code commands**
+**Commands**
 
 | Key | Action                                                    |
 |-----|-----------------------------------------------------------|
 | `i` | Interrupt what the AI is doing (sends Esc)                                     |
 | `/` | Pick a slash command from the minibuffer and send it (`/compact`, `/clear`, …) |
-| `s` | Ask Claude to record progress to `CLAUDE.md`                                   |
+| `s` | Ask the agent to fold decisions into `CLAUDE.md` etc. (`C-u s`: a work log in a separate file) |
 | `+` | Add another agent in the same directory                                        |
 | `q` | Delete session: remove the zellij session and close buffer (asks confirmation) |
 
-### Adding agents
+### Recording progress (`s`)
 
-`C-c C-a` → `+` (`M-x zellij-send-add-agent`) starts another agent in the **same directory as the current buffer**. You are not asked for a working directory.
+`s` asks the agent to fold only the lasting decisions (constraints, design decisions with their reasons, prohibitions) into its instruction file **as an update, not an append** — merge what overlaps, delete what is stale, leave out the play-by-play. The file depends on the agent: `zellij-send-progress-file-alist` (`CLAUDE.md` for claude, `AGENTS.md` for codex, `GEMINI.md` for agy).
 
-The new session takes the current session's base name plus the lowest free counter (`myproj00` → `myproj01`). The counter looks at both the zellij session list and the open blackboard buffers, so it never collides with a session that was just created and has not shown up in the list yet. Gaps are filled in.
+To keep a log of the session itself, use `C-u s`: it goes to `zellij-send-progress-log-file` (default `.zellij-send/worklog-%Y-%m-%d.md`, dated) and never into `CLAUDE.md`.
 
-**One zellij session per agent**, so sending, auto-receiving and `q` (quit) keep working per buffer as before — quitting one agent leaves the others alone. The dashboard (`d`) lists each of them on its own row.
+### Adding agents (`+`)
 
-`a` (transcript view) asks you to select the JSONL on first use and retains that association in each session buffer. It never chooses another agent’s history by modification time.
+Starts another agent in the **same directory, with the same command** as the current buffer, under the lowest free counter (`myproj00` → `myproj01`). `C-u C-c C-a +` lets you pick a different command. One zellij session per agent, so sending, live updates and quitting work per buffer, and the dashboard lists each on its own row.
 
 ### Multiple CLIs (Claude Code / Codex / …)
 
-**Each session can run a different command.** When you create a session with `[New]`, you are asked for the command right after the working directory (the default is `zellij-send-default-command`, so `RET` keeps the old behaviour). Completion offers `zellij-send-commands` (default `("claude" "codex" "agy")`), but any other command can be typed in. `agy` is the Antigravity CLI executable.
-
-`+` (add an agent) **inherits the command of the current buffer**. Use `C-u C-c C-a +` to pick a different one.
-
-When connecting to an existing session, the running command is recovered from the COMMAND column of `zellij action list-panes --all`, so a codex session started from a terminal is picked up automatically.
-
-Buffers running something other than claude show the command in the header line (`Session: myproj00 [codex]`).
+Each session can run a different command. Completion offers `zellij-send-commands` (default `("claude" "codex" "agy")`), but anything can be typed in. Buffers running something other than claude show it in the header line (`Session: myproj00 [codex]`).
 
 | Feature | claude | codex | agy | others |
 |---|---|---|---|---|
-| Sending (`C-c C-c`), history, reply buffer | yes | yes | yes | yes |
+| Sending, history, reply buffer | yes | yes | yes | yes |
 | Live screen (auto-receive), dashboard | yes | yes | yes | yes |
 | **Key passthrough mode (`C-c C-t`)** | yes | yes | yes | yes |
 | Interrupt (`C-c C-k`), quit (`q`) | yes | yes | yes | yes |
@@ -231,128 +182,75 @@ Buffers running something other than claude show the command in the header line 
 | Answering AskUserQuestion (`u` / automatic) | yes | — | — | — |
 | Remote Control QR, usage bars | yes | — | — | — |
 
-The bottom four rows read the **shape of Claude Code's screen** or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens instead — it does not interpret the screen at all, so it works with any TUI.
+The bottom four rows read the shape of Claude Code's screen or its transcript, so they stop with a `user-error` on other CLIs. Use **key passthrough mode** for choices, permission dialogs and settings screens there — it does not interpret the screen, so it works with any TUI.
 
-The `no` cells were measured on 2026-09-07. **codex does not accept digit keys as a selection** (sending `1` to its trust dialog did nothing; Enter confirmed it), and **agy has no `/compact`** (typing `/comp` in its completion menu gives `No matches` — it claimed otherwise, the pane disagreed). Both live in `zellij-send-number-reply-commands` and `zellij-send-slash-support-alist`; **do not add an unverified CLI to either** — these are sent as ordinary text plus Enter, so a receiver that does not treat them as a selection will do something else.
-
-Choice detection matches claude's `❯ 1.`, codex's `› 1.` and agy's `> 1.`. The ASCII `>` is enabled **only in agy buffers** (`zellij-send-prompt-marker-alist`): enabling it everywhere would false-positive on markdown blockquotes (`> 1. …`) in the output, and the dashboard's digit keys gate on that detection, so a stray digit would be sent as plain input. False positives inside agy's own output remain possible.
+The `no` cells were measured on real panes. The capability tables (`zellij-send-number-reply-commands`, `zellij-send-slash-support-alist`) contain **only verified CLIs**; do not add an unverified one.
 
 ### Send history
 
-Every message you send is remembered per session (`zellij-send-history-max`, default 50). `M-p` walks back through it and `M-n` forward; going past the newest entry restores whatever you had typed before you started browsing. `C-c C-a` → `h` picks an entry with completion. The history is shared between the blackboard and the reply buffer, and survives closing either.
-
-### Interrupting
-
-`C-c C-k` (or `i` in the dashboard) sends `Esc` to the pane, which is how you stop Claude Code mid-answer. It works in any state on purpose: the dashboard's status is a few seconds old, so refusing to interrupt a session that merely *looks* idle would be the wrong call.
-
-### Reply buffer (`C-c C-a` → `e`)
-
-Opens `*zellij-reply-session-name*`. You can read the AI's response in `*ai-session-name*` while composing your reply in the separate buffer.
-
-| Key       | Action                              |
-|-----------|-------------------------------------|
-| `C-c C-c` | Send text and close the buffer      |
-
-After sending, the original window layout is restored automatically.
-
-### Reading the whole conversation (`C-c C-a` → `a`)
-
-The pane only ever holds one screenful, and long text you send is folded into
-`[Pasted text #1 +N lines]`, so the screen cannot be used to reconstruct what was said.
-`a` reads Claude Code's transcript instead — the JSONL under
-`~/.claude/projects/<slug>/` — and lays the conversation into the blackboard from the
-beginning: your messages, the assistant's prose, its thinking, every tool call and every
-tool result, in order.
-
-The buffer is marked as cleared while the transcript is showing, so the live stream does
-not overwrite it.
-
-### Back to the live pane (`C-c C-a` → `g`)
-
-`g` is the way back: it refetches the pane with `dump-screen` and resumes automatic
-updates. Use it after reading history with `a`, and equally after typing a draft you have
-decided not to send — editing the buffer also stops automatic updates, which is what makes
-the screen look frozen. `g` warns before discarding a non-empty draft. `C-u g` includes
-the scrollback (only meaningful for commands that are not full-screen TUIs).
-
-- Non-Claude commands, and `C-u a`, keep the old behaviour: dump the zellij screen.
-- On first use, select the JSONL named for the Claude session ID, even if there is only
-  one candidate. The association lasts until the buffer is closed. After switching
-  conversations in Claude, use `M-x zellij-send-select-transcript` to choose again.
-  A missing selected file raises an error instead of switching to another history.
-- Images are never printed as base64. An image in a tool result becomes a one-line summary
-  (`[画像 image/png 66 KB]`) — the data is megabytes long and unreadable anyway.
-- Any line longer than `zellij-send-transcript-max-line-length` (default 2000 characters)
-  is cut with a note of how much was dropped. Tool inputs are stored as single-line JSON,
-  so without this one `Write` can fill the window. Set it to `nil` to keep lines whole.
-- Set `zellij-send-transcript-max-block-lines` to a number if huge tool outputs make the
-  buffer unwieldy (default `nil`, meaning no block is shortened by line count).
-
-### Numbered prompts
-
-When Claude Code displays a numbered choice prompt (e.g. `❯ 1.`), the buffer updates automatically and the choices are highlighted. Send your choice with `C-c C-a` → `n`.
-
-### Answering questions (AskUserQuestion)
-
-When Claude Code asks you a question — the boxed UI with `❯ 1.` options, tabs across the top and a final *Review your answers* screen — you no longer have to switch to the terminal to work the arrow keys.
-
-The blackboard buffer already mirrors the pane, so zellij-send reads the question straight out of it, asks you in the minibuffer, and presses the matching keys in the pane for you:
-
-- **Single choice** — pick with completion; one keypress answers it and Claude Code moves to the next question by itself.
-- **Multiple choice** (`multiSelect`) — pick several with `completing-read-multiple` (comma separated). zellij-send toggles exactly the options whose state needs to change, then walks to the confirmation screen.
-- **Other / free text** — choose `Type something`, type your answer in the minibuffer, and it is pasted into the field.
-- **Review screen** — you get a `y/n` prompt before anything is submitted; answering `n` cancels.
-
-By default (`zellij-send-askq-auto` = `keys`) a question does **not** open the minibuffer: the blackboard buffer is shown and [key passthrough mode](#key-passthrough-mode-c-c-c-t) turns itself on, so you can read the option descriptions and examples on screen and answer with the number keys (`↑↓` / `RET` work too). It turns itself back off once the question is gone — unless you had turned it on yourself, in which case it is left alone. The window is only displayed, never selected, so move to it before typing.
-
-Set it to `minibuffer` for the old behaviour (options offered in the minibuffer by label only), or to `nil` to trigger it yourself with `C-c C-q` (or `C-c C-a` → `u`). `C-g` backs out at any point and leaves the question untouched in the pane.
+Every message you send is remembered per session (`zellij-send-history-max`, default 50). `M-p` walks back and `M-n` forward; going past the newest entry restores your draft. `C-c C-a` → `h` picks an entry with completion.
 
 ### Slash commands (`C-c C-s`)
 
 ![Picking a slash command](Screen03.png)
 
-Every Claude Code slash command. This replaces the old `/compact` and `/clear` menu
-entries — `M-x zellij-send-compact` and `M-x zellij-send-cc-clear` still exist, and the
-dashboard keeps its one-key `c` for `/compact`. The list is read
-from the pane's own completion menu — type `/` in the minibuffer, keep typing to narrow
-it down, `RET` to pick.
+Every Claude Code slash command, picked in the minibuffer. The list is read from the pane's own completion menu, so it matches what is available right now (built-ins, skills, project commands).
 
-Commands that take an argument ask for it right after, and both of Claude Code's two
-argument styles are handled. A **ghost hint** (`/effort  [low|medium|high|…]`,
-`/add-dir  <path>`) becomes completion candidates for a fixed set of choices, Emacs
-directory completion for `<path>`, free text otherwise. A **candidate menu** — the kind
-you would pick with the cursor in the pane (`/config`, `/plugin`, `/claude-api`) — is
-read off the pane and offered in the minibuffer, one level at a time when the candidates
-nest (`/plugin` → `enable` → the plugin name; `/config` → `autoScroll=` →
-`autoScroll=true`). Claude Code only ever offers **12 candidates at a time**, so typing
-something that is not in the list narrows it and asks again (`install` → `air` →
-`airwallex-…`). Commands that take no argument are sent as they are.
+Commands that take an argument ask for it right after: a fixed set of choices (`/effort  [low|medium|…]`) becomes completion candidates, `<path>` becomes directory completion, and a menu you would pick from in the pane (`/config`, `/plugin`) is gathered and offered in the minibuffer, one level at a time when it nests. Typing something not in the list and pressing `RET` narrows the candidates and asks again.
 
-Reading the list takes a few seconds (102 commands here), so it is **prefetched in the
-background** a few seconds after the blackboard buffer connects — by the time you press
-`C-c C-s` there is nothing to wait for. The result is **shared per working directory**,
-so the second session on the same project opens with no fetch at all. `C-u C-c C-s`
-reads it again after you add a skill or a project command, and
-`zellij-send-slash-prefetch` turns the prefetch off.
+Reading the list takes a few seconds, so it is prefetched in the background a few seconds after the blackboard connects and **shared per working directory**. `C-u C-c C-s` reads it again after you add a skill or a command; `zellij-send-slash-prefetch` turns the prefetch off.
 
-The list is gathered by typing into the pane, so nothing happens while the pane's input
-box has text in it, and a fetch already under way stops the moment you start typing
-there — your draft is never wiped. Commands that open a dialog (`/model`,
-`/config`) are simply sent; drive the dialog with key passthrough mode below.
+The list is gathered by typing into the pane, so **nothing happens while the pane's input box has text in it**, and a fetch under way stops the moment you start typing there.
+
+### Interrupting
+
+`C-c C-k` (or `i` in the dashboard) sends `Esc` to the pane. It works in any state.
+
+### Reply buffer (`C-c C-a` → `e`)
+
+Opens `*zellij-reply-session-name*`: read the answer in the blackboard and write your reply in a separate buffer; `C-c C-c` sends it, closes the buffer and restores the window layout. The target is read from the original blackboard at send time, so once that blackboard is killed the reply cannot be sent (the text stays).
+
+### Reading the whole conversation (`C-c C-a` → `a`)
+
+Reads Claude Code's transcript (the JSONL under `~/.claude/projects/<slug>/`) and lays the conversation into the blackboard in order: your messages, the assistant's prose, its thinking, every tool call and result.
+
+- On first use, pick the JSONL (newest first, shown as `MM-DD HH:MM  size  title`), even if there is only one. The choice lasts until the buffer is closed; another agent's history is never chosen by modification time. `M-x zellij-send-select-transcript` picks again.
+- Automatic updates pause while it is shown; `g` goes back.
+- Images become a one-line summary (`[画像 image/png 66 KB]`), and lines longer than `zellij-send-transcript-max-line-length` (default 2000) are cut. Set `zellij-send-transcript-max-block-lines` if tool outputs are too long.
+- Non-Claude commands, and `C-u a`, dump the zellij screen instead.
+
+### Back to the live pane (`C-c C-a` → `g`)
+
+Refetches the pane and resumes automatic updates — after `a`, and equally after typing a draft you decided not to send. It asks before discarding a non-empty draft. `C-u g` includes the scrollback (only meaningful outside full-screen TUIs).
+
+### Numbered prompts
+
+Numbered choices (claude's `❯ 1.`, codex's `› 1.`, agy's `> 1.`) are highlighted. Send your choice with `C-c C-a` → `n`.
+
+### Answering questions (AskUserQuestion / `C-c C-q`)
+
+When Claude Code asks a question — the boxed UI with `❯ 1.` options, tabs across the top and a final *Review your answers* screen — zellij-send reads it from the pane, asks you in the minibuffer and presses the matching keys:
+
+- **Single choice** — one keypress answers it; Claude Code moves on by itself.
+- **Multiple choice** — pick several with `completing-read-multiple` (comma separated).
+- **Other / free text** — what you type in the minibuffer is pasted into the field.
+- **Review screen** — a `y/n` prompt before anything is submitted.
+
+By default (`zellij-send-askq-auto` = `keys`) a question turns on [key passthrough mode](#key-passthrough-mode-c-c-c-t) instead of opening the minibuffer, so you can read the option descriptions on screen and answer with the number keys (`↑↓` / `RET` work too); it turns itself off when the question is gone. The window is only displayed, never selected — move to it before typing. `minibuffer` opens the minibuffer flow above automatically; `nil` leaves it to `C-c C-q`. `C-g` backs out at any point and leaves the question in the pane.
 
 ### Key passthrough mode (`C-c C-t`)
 
-Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij-send does not parse. Toggle key passthrough mode and the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary characters are sent to the pane instead of editing the buffer. The header line and the mode line (` →zellij`) tell you it is on; `C-c C-t` or `C-g` turns it off. The buffer is read-only while it is on, so a stray keystroke cannot stall the automatic screen updates.
+While on, the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary characters go to the pane instead of editing the buffer — for permission dialogs, `/model`, or any menu zellij-send does not parse. `C-c C-t` (menu `k`) or `C-g` turns it off. The buffer is read-only while it is on.
 
 ## Dashboard (`zellij-send-dashboard.el`)
 
-`M-x zellij-send-dashboard` (or `C-c C-a` → `d`) lists every open session in one table, sorted so the ones needing your attention come first.
+`M-x zellij-send-dashboard` (or `C-c C-a` → `d`) lists every open session, sorted so the ones needing your attention come first.
 
 ![The dashboard under the blackboard](Screen02.png)
 
 | Column   | Meaning                                                            |
 |----------|--------------------------------------------------------------------|
-| Flag     | `✎` unsent draft / `‖` cleared — polling is paused, display is stale |
+| Flag     | `✎` unsent draft / `‖` cleared — the blackboard's automatic updates are paused |
 | 状態     | Waiting for choice / Done / Working / Idle                          |
 | 経過     | Time since entering the current state                               |
 | 無変化   | Time since the screen last changed (spots stuck sessions)           |
@@ -374,38 +272,25 @@ Sometimes you want the raw keys — a permission dialog, `/model`, a menu zellij
 | `G`     | Connect to any zellij session not yet listed |
 | `?`     | Show the key list                          |
 
-The bindings follow Emacs convention: `g` refreshes (`revert-buffer-function` is replaced too, so `M-x revert-buffer` and mouse-driven reverts run the same refresh), the stronger `G` connects, and `?` lists the keys in `*zellij-dashboard-help*` (`q` closes it). `C-h m` works as well.
+Opening the dashboard connects, without asking, to every running zellij session that has no buffer yet (`zellij-send-dashboard-auto-connect`). It rescans every `zellij-send-dashboard-scan-interval` seconds (default 15), picking up sessions started from a terminal and removing the blackboards of sessions that ended (buffers you are editing are kept).
 
-Opening the dashboard **connects to every running zellij session** that does not have a buffer yet (`zellij-send-dashboard-auto-connect`, default `t`). No prompts: the working directory comes from `zellij action dump-layout` and the pane id from `zellij action list-panes` (the pane titled after `zellij-send-default-command` wins, then one titled after any entry of `zellij-send-commands`, otherwise the first terminal pane); the running command comes from the COMMAND column of `list-panes --all`. Because the pane id is recovered this way, sessions you connect to now accept input without a terminal client attached — including after an Emacs restart.
+A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
 
-Connecting is not a one-shot at startup: the list is rescanned every `zellij-send-dashboard-scan-interval` seconds (default 15), so **a zellij session you start in the terminal while Emacs is already running shows up on its own** (press `G` if you want it immediately). The same scan kills the blackboard buffer of any session that has disappeared from `zellij list-sessions`, removing its row (`zellij-send-dashboard-prune-gone`, default `t`). Buffers you are editing (`buffer-modified-p`) are kept so unsent text is never lost, and a `list-sessions` timeout is not treated as "no sessions", so rows are never pruned on a hiccup. This scan is the only thing that calls `zellij`; the 3-second redraw just reads buffer contents.
-
-State is derived from each session buffer's contents — no extra `zellij` calls are made. A session counts as **working** when the spinner line is present (`zellij-send-dashboard-working-regexp`, default `esc to \(?:interrupt\|cancel\)` — agy says cancel) **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). The screen check matters: while Claude Code streams plain prose it shows no spinner at all, so spinner-only detection reports an actively answering session as idle. When neither holds, the session flips to **done**, which clears once you look at that buffer.
-
-`Q` does the same thing as `C-c C-a q` in the blackboard buffer: it asks for confirmation, send `/exit`, wait for the agent to exit, and delete the zellij session, in any state. If the agent has not exited within `zellij-send-quit-timeout` seconds (default 10) — or `/exit` could not be sent — the session is force-deleted. The state column is inferred from screen changes and can lag by a few seconds, so refusing to quit a session that merely *looks* busy only got in the way.
+`Q` asks for confirmation, sends `/exit`, waits for the agent to exit and deletes the zellij session; it force-deletes if the agent has not exited within `zellij-send-quit-timeout` seconds (default 10).
 
 ### Remote Control QR (`r`)
 
-`r` connects the session under the cursor to [Remote Control](https://claude.ai/code) and shows its QR code in Emacs, so you can carry on from your phone.
+Connects the session under the cursor to [Remote Control](https://claude.ai/code) and shows the QR code Claude Code draws, as an image in `*zellij-qr-SESSION*`; the session URL is copied to the kill ring. It exposes a local session to claude.ai, so it always asks first, and it only works on an **idle** session.
 
-Claude Code draws the QR itself using half-block characters, so no QR generator is needed — zellij-send sends `/remote-control` to the pane, waits for the menu, picks **Show QR code**, captures the screen, and dismisses the overlay with `Esc` so the pane returns to its prompt. The session URL is extracted too and copied to the kill ring.
+**If you always want phone access, set `zellij-send-remote-control` to `t` instead.** New Claude Code sessions then start as `claude --remote-control SESSION` and show up in claude.ai and the mobile app under their zellij name without scanning anything.
 
-Because this exposes a local session to claude.ai, `r` always asks for confirmation, and it only works on an **idle** session, since it types into the pane.
+| Option | Meaning |
+|---|---|
+| `zellij-send-dashboard-remote-control-timeout` | How long to wait for the screens (default 40s) |
+| `zellij-send-dashboard-remote-control-poll` | Polling interval while waiting (default 1.5s) |
+| `zellij-send-dashboard-qr-module-size` | Pixels per QR module (default 4) |
 
-**If you always want phone access, set `zellij-send-remote-control` to `t` instead.** New Claude Code sessions are then started as `claude --remote-control SESSION`, so they show up in claude.ai and the mobile app under their zellij name (`myproj00`) without scanning anything. It does not read the screen, so it is sturdier than `r`. It only affects sessions created from now on via `[New]` or `+` (`zellij-send-add-agent`), and is never added to non-claude commands.
-
-```elisp
-(setq zellij-send-remote-control t)
-```
-
-| Option                                            | Meaning                                        |
-|---------------------------------------------------|------------------------------------------------|
-| `zellij-send-dashboard-remote-control-timeout`    | How long to wait for the screens (default 40s) |
-| `zellij-send-dashboard-remote-control-poll`       | Polling interval while waiting (default 1.5s)  |
-
-Connecting takes ~10 seconds, so the wait is a poll with a timeout rather than a fixed sleep. The QR is shown in `*zellij-qr-SESSION*` as an **SVG image**, not as text: the half-block characters are parsed back into a module matrix (`█` = both, `▀` = upper, `▄` = lower) and redrawn as black squares on white with a 4-module quiet zone. Drawing it as text depends on the font's glyph metrics and usually will not scan. Size it with `zellij-send-dashboard-qr-module-size` (pixels per module, default 4 — about 165px for a 33-module code). If the frame has no SVG support the text version is used, with block characters forced to one column wide.
-
-By default the dashboard opens below the current window, sized to fit its contents rather than taking over the frame:
+### Display options
 
 | Option                                  | Meaning                                                     |
 |-----------------------------------------|-------------------------------------------------------------|
@@ -413,24 +298,15 @@ By default the dashboard opens below the current window, sized to fit its conten
 | `zellij-send-dashboard-fit-window`      | Re-fit the height on every refresh (default `t`)            |
 | `zellij-send-dashboard-max-height`      | Height cap in lines (default 16)                            |
 | `zellij-send-dashboard-tail-width`      | Width of the 状況 column (default 40)                       |
-| `zellij-send-dashboard-refresh-interval`| Redraw interval in seconds (default 3; too short makes the list hard to navigate) |
-| `zellij-send-dashboard-scan-interval`   | Seconds between session scans (default 15; 0 disables auto-detection) |
+| `zellij-send-dashboard-refresh-interval`| Redraw interval in seconds (default 3)                      |
+| `zellij-send-dashboard-scan-interval`   | Seconds between session scans (default 15; 0 disables)      |
 | `zellij-send-dashboard-prune-gone`      | Drop rows for sessions that ended (default `t`)             |
 
-The dashboard requires `zellij-send-dashboard.el` to be on your load path; `zellij-send.el` itself does not depend on it.
+`zellij-send.el` itself does not depend on the dashboard.
 
 ### Usage limits (`/usage`) in the dashboard
 
-The dashboard can show the same session/weekly limits that `/usage` prints inside Claude Code:
-
-It sits under the table (see the screenshot above), one line per limit, so it costs
-three lines of height.
-
-The bar is drawn as spaces with a background colour rather than block glyphs (`█`), because in some fonts (M PLUS, for one) the block glyph is taller than the line box and the bar breaks up. Set `zellij-send-dashboard-usage-bar-style` to `block` or `ascii` if you prefer.
-
-The two bars share the same colour scale — green, amber, red by how much is used — so when the two percentages are close the bars are hard to tell apart. The session bar is therefore drawn a shade paler than the week bar (`zellij-send-dashboard-usage-light-ratio`, `0` to turn that off). Hues are left alone, since colour here means "how close to the limit", not which limit it is.
-
-`/usage` only exists inside the TUI and the `claude` CLI has no `usage` subcommand, so this data has exactly one supported source: the JSON that Claude Code pipes to a **statusLine command** on stdin. Set up a status line that caches that JSON and the dashboard reads the cache — no extra processes, no undocumented APIs.
+The dashboard can show the session/weekly limits that `/usage` prints, one line per limit under the table. The only supported source for this data is the JSON Claude Code pipes to a **statusLine command** on stdin, so set up a status line that caches it and the dashboard reads the cache.
 
 **1. Create `~/.claude/hooks/statusline-zellij-send.sh`:**
 
@@ -482,7 +358,7 @@ exit 0
 
 `chmod +x ~/.claude/hooks/statusline-zellij-send.sh`
 
-**2. Register it in `~/.claude/settings.json`:**
+**2. Register it in `~/.claude/settings.json`** (restart Claude Code afterwards):
 
 ```json
 {
@@ -493,11 +369,7 @@ exit 0
 }
 ```
 
-Restart Claude Code (or open `/statusline` once) so the new status line takes effect.
-
-The script above prints nothing, so no status line appears in Claude Code — the hook still runs on every update, which is all the cache needs. Print something there if you want the TUI status line back.
-
-The cache is refreshed by any running Claude Code session, so the dashboard shows how old the reading is (`12s前の記録`). Rate limits are only present for Claude subscription accounts, and only after the first API response of a session — which is why the script above keeps the previous reading instead of letting a freshly started session blank it out.
+Rate limits are only present for Claude subscription accounts, and only after a session's first API response.
 
 | Option                                        | Meaning                                             |
 |-----------------------------------------------|-----------------------------------------------------|
@@ -505,81 +377,69 @@ The cache is refreshed by any running Claude Code session, so the dashboard show
 | `zellij-send-dashboard-usage-file`            | Cache path (default `~/.claude/zellij-send-usage.json`) |
 | `zellij-send-dashboard-usage-bar-width`       | Bar width in columns (default 24)                   |
 | `zellij-send-dashboard-usage-bar-style`       | `face` coloured spaces (default), `block` █ glyphs, `ascii` `#`/`-` |
-| `zellij-send-dashboard-usage-light-ratio`     | How much paler the session bar is than the week bar (default 0.4; 0 makes them identical) |
+| `zellij-send-dashboard-usage-light-ratio`     | How much paler the session bar is (default 0.4; 0 makes them identical) |
 | `zellij-send-dashboard-usage-timezone`        | Timezone label; `nil` uses `$TZ`, then `%Z`         |
 
 ## Customization
 
-To set a custom path to the `zellij` executable:
-
 ```elisp
+;; The zellij executable
 (setq zellij-send-executable "/usr/local/bin/zellij")
-```
 
-The Claude output log location (relative to the session's working directory; keep it in sync with the hook script):
-
-```elisp
-(setq zellij-send-log-file ".zellij-send/claude-log.md")
-```
-
-The commands offered when creating a session (any other command can still be typed in):
-
-```elisp
+;; Commands offered for new sessions, and the default
 (setq zellij-send-commands '("claude" "codex" "agy"))
-(setq zellij-send-default-command "claude")  ; the default, chosen by RET
-```
+(setq zellij-send-default-command "claude")
 
-Per-CLI capability tables, based on measurement. **Do not add an unverified CLI:**
+;; Claude output log (relative to the working directory; keep in sync with the hook)
+(setq zellij-send-log-file ".zellij-send/claude-log.md")
 
-```elisp
-(setq zellij-send-number-reply-commands '("claude" "agy"))
-(setq zellij-send-slash-support-alist
-      '(("/compact" . ("claude" "codex"))
-        ("/clear"   . ("claude" "codex" "agy"))))
+;; Files `s' asks the agent to update, and the `C-u s' work log
 (setq zellij-send-progress-file-alist
       '(("claude" . "CLAUDE.md") ("codex" . "AGENTS.md") ("agy" . "GEMINI.md")))
+(setq zellij-send-progress-log-file ".zellij-send/worklog-%Y-%m-%d.md")
 ```
 
-Question answering (see [Answering questions](#answering-questions-askuserquestion)):
+### Session size
 
-| Option                            | Meaning                                                                    |
-|-----------------------------------|----------------------------------------------------------------------------|
-| `zellij-send-askq-auto`           | What a question opens: `keys` (key passthrough, default), `minibuffer`, `nil` |
-| `zellij-send-askq-settle-delay`   | Seconds to wait after a keypress before reading the screen (default `0.8`) |
-| `zellij-send-askq-max-rounds`     | Give up after this many questions in one run (default 12)                  |
+A background session created by `[New]` is only 50 columns by 48 lines by default, and Claude Code hard-wraps its output to the pane width, so paragraphs arrive shredded. zellij-send widens new sessions by attaching for a moment; `M-x zellij-send-resize-session` widens an existing one. Attaching from a terminal shrinks the session to that client's size — that is how zellij works.
 
-### Session width
+| Option | Meaning |
+|---|---|
+| `zellij-send-session-size` | (COLUMNS . LINES) for new sessions (default `(320 . 80)`; `nil` disables) |
+| `zellij-send-resize-detach-delay` | Seconds before the resize client detaches (default 2.0) |
+| `zellij-send-resize-timeout` | Seconds before the resize client is killed no matter what (default 8.0) |
+| `zellij-send-max-blank-lines` | Squeeze runs of blank lines down to this many (default 2; `nil` keeps them) |
 
-A session created by `zellij attach --create-background` is only **50 columns by 48 lines**. Claude Code hard-wraps its own output to the pane width, so paragraphs would arrive shredded into short lines.
+### Column alignment and wrapping
 
-Setting `COLUMNS` / `LINES` does not help — measured on zellij 0.44.3 against a freshly started, isolated server (`ZELLIJ_SOCKET_DIR`), `COLUMNS=320 LINES=80`, `COLUMNS=200 LINES=60` and no setting at all all produce the same 50x48 pane. Floating panes with an explicit `--width` get clamped to the viewport, and there is no config-file setting for it.
+The blackboard mirrors a 320-column screen. Emacs in a Japanese environment counts box-drawing characters and arrows (`─` `←`) as two columns where zellij counts one, so tables and frames drift. Inside the blackboard only, column widths follow zellij, and in a GUI frame symbols that do not fit one column are drawn with a scaled-down glyph.
 
-What does work is attaching a client whose pty has the size you want and detaching again: the size sticks, and panes created afterwards inherit it. zellij-send does this automatically when it creates a session, before starting the agent pane:
+| Option | Meaning |
+|---|---|
+| `zellij-send-grid-align` | Align the blackboard's columns with the zellij screen (default `t`) |
+| `zellij-send-grid-symbol-families` | Fonts tried, in order, to fit symbols into one column |
+| `zellij-send-wrap-screen` | Wrap the screen at the window width (default `t`); toggle per buffer with `C-c C-a` → `w` |
 
-```elisp
-(setq zellij-send-session-size '(320 . 80))   ; nil disables the resize
-(setq zellij-send-resize-detach-delay 2.0)    ; wait before sending Ctrl+o d
-(setq zellij-send-resize-timeout 8.0)         ; kill the client no matter what
-```
+Drafts and transcripts always wrap.
 
-The attach client is short-lived (about 2 seconds), fully asynchronous, and its output is discarded by a filter — Emacs must keep reading the pty, otherwise the zellij server blocks writing to the client and the whole session stops accepting input. If the detach keystroke does not work (for example because you rebound it), the watchdog kills the client after `zellij-send-resize-timeout`; the session survives that and keeps the new size.
+### Answering questions
 
-To widen a session that already exists, run `M-x zellij-send-resize-session` from its buffer. Sessions you start yourself from a terminal already take that terminal's width, so this only matters for sessions zellij-send creates via `[New]`.
-
-Attaching from a terminal shrinks the session to that client's size — that is how zellij works. Don't attach if you want to keep the full width.
-
-Claude Code draws its input box on the bottom row, so while the conversation is short the screen is mostly blank lines between the text and the input box (about 485 of them right after start-up in a 500-line session). The buffer squeezes such runs down to `zellij-send-max-blank-lines` (default 2; `nil` keeps them as they are).
+| Option | Meaning |
+|---|---|
+| `zellij-send-askq-auto` | What a question opens: `keys` (key passthrough, default), `minibuffer`, `nil` |
+| `zellij-send-askq-settle-delay` | Seconds to wait after a keypress before reading the screen (default 0.8) |
+| `zellij-send-askq-max-rounds` | Give up after this many questions in one run (default 12) |
 
 ## Auto-receive & Markdown Log Setup (Claude Code Stop Hook)
 
-The Stop hook does two things every time Claude Code finishes a response:
+The blackboard is kept live by `zellij subscribe`, so everything works without a hook. With the Stop hook installed, every finished response also:
 
-1. **Markdown log**: extracts the latest assistant message from the transcript and appends it to `.zellij-send/claude-log.md` in the working directory (open it with `C-c C-a` → `l`). This is a durable, per-project record that survives outside `~/.claude`; for reading back the current conversation, `C-c C-a` → `a` is usually what you want.
-2. **Auto-receive**: updates the `*ai-session-name*` buffer via `emacsclient`. This part requires an Emacs server to be running (`(server-start)` or `emacs --daemon`).
+1. **Markdown log**: appends the latest assistant message from the transcript to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`).
+2. **Screen refresh**: refetches the blackboards with `dump-screen` via `emacsclient`. This needs an Emacs server (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
 
-Create `~/.claude/hooks/stop-zellij-send.sh` (requires `python3`):
+`~/.claude/hooks/stop-zellij-send.sh` (requires `python3`):
 
 ```sh
 #!/bin/sh
@@ -630,68 +490,45 @@ PY
 exit 0
 ```
 
-Then make it executable:
+`chmod +x ~/.claude/hooks/stop-zellij-send.sh`. Add `.zellij-send/` to your `.gitignore` if you don't want the log committed.
 
-```sh
-chmod +x ~/.claude/hooks/stop-zellij-send.sh
-```
+### 2. Register the hook
 
-Tip: add `.zellij-send/` to your `.gitignore` (or global gitignore) if you don't want the log committed.
-
-### 2. Register the hook in Claude Code settings
-
-`~/.claude/settings.json` (the path and format may vary depending on your Claude Code version):
+`~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/stop-zellij-send.sh"
-          }
-        ]
-      }
+      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/stop-zellij-send.sh" } ] }
     ]
   }
 }
 ```
 
-With this in place, the `*ai-session-name*` buffer updates every time Claude Code finishes a response.
-
 ## Troubleshooting
 
-**"No zellij sessions found"**
-- Make sure zellij is running.
-- Run `zellij list-sessions` in a terminal to verify there is output.
-- Check that `zellij-send-executable` points to the correct path (`M-x describe-variable RET zellij-send-executable`).
+**No sessions found**
+- Run `zellij list-sessions` in a terminal to check there is output.
+- Check the path in `zellij-send-executable`.
 
-**Auto-receive not working (buffer not updating)**
-- Make sure the Emacs server is running (`M-x server-start` or `emacs --daemon`).
-- Run `emacsclient -e t` in a terminal to verify the connection.
-- Check that `~/.claude/hooks/stop-zellij-send.sh` is executable (`chmod +x`).
+**The blackboard stopped updating**
+- Automatic updates pause while you are editing and after a clear. `C-c C-a` → `g` brings the live screen back.
+- The dashboard's flag column shows `✎` / `‖` in that state.
 
-**Garbled characters / text not sending**
-- `zellij action paste` assumes UTF-8. Make sure your terminal encoding is set to UTF-8.
+**The Stop hook does nothing**
+- Check that the Emacs server is running (`emacsclient -e t`) and that the script is executable.
 
 **Long text shows as `[Pasted text #1 +N lines]` in the pane**
-- Expected. Text is sent with `zellij action paste` (bracketed paste), and Claude Code collapses
-  large pastes into a placeholder in its input box. The full text is still submitted; only the
-  pane's display is collapsed, so the `*ai-SESSION*` buffer mirrors the placeholder rather than
-  the body.
+- Expected. Text is sent as a bracketed paste and Claude Code folds large pastes in its input box. The full text is still submitted.
 
 ## How It Works
 
-- **New session**: `zellij attach --create-background` creates a detached session; `zellij run --cwd DIR -- claude` starts the agent in a new pane and returns its pane id, which is remembered for all later commands. No attached client (terminal emulator) is needed.
-- **Sending text**: `zellij action paste --pane-id ID` sends the text as a bracketed paste; `zellij action write --pane-id ID 13` (CR) sends Enter. Without a known pane id, the focused pane is targeted instead (requires an attached client). `paste` is used instead of `write-chars` because `write-chars` passes newlines through as bare LF, which a shell (or any agent that submits on LF) treats as multiple separate lines. `paste` wraps the text in bracketed-paste markers only when the receiving pane has that mode enabled, so panes that do not support it still receive plain text.
-- **Reading response**: `zellij action dump-screen` prints the pane content to stdout (zellij 0.44+); ANSI escapes are stripped before displaying in the buffer
-- **Reading history**: the pane cannot provide it (no scrollback in the alternate screen, and pasted text is folded into a placeholder), so `C-c C-a` → `a` parses Claude Code's transcript JSONL directly
-- **All zellij calls are asynchronous** (`make-process` + sentinel) so Emacs never blocks
-- **Auto-receive (Stop hook)**: Claude Code Stop hook → appends the latest assistant message to the markdown log, then `emacsclient` → `zellij-send--on-claude-stop` → updates all zellij-send buffers
-- **Live updates**: One long-running `zellij subscribe --pane-id ID --format json` process per session streams pane changes as NDJSON; the buffer is rewritten from the `viewport` field (which always carries the full pane, not a diff). Updates are skipped while the user is editing (`buffer-modified-p`) or after an explicit clear, but the last-change timestamp keeps being recorded so the dashboard still sees activity. An idle session produces one event (the initial delivery) rather than a `dump-screen` process every 2 seconds, and a change reaches the buffer in tens of milliseconds instead of up to 2 seconds. If the stream drops, it reconnects with exponential backoff (`zellij-send-subscribe-initial-timeout`, `zellij-send-subscribe-max-retries`, `zellij-send-subscribe-backoff-max`).
-- **Reply buffer**: Opens via `pop-to-buffer`; after sending, `set-window-configuration` restores the previous window layout
+- **New session**: `zellij attach --create-background` creates a detached session; it is widened by attaching for a moment, then `zellij run` starts the agent and the returned pane id is used for every later command
+- **Sending**: `zellij action paste --pane-id ID` sends the text, `zellij action write --pane-id ID 13` sends Enter
+- **Screen**: one `zellij subscribe --pane-id ID --format json` process per session streams the pane into the blackboard; manual refreshes use `zellij action dump-screen`
+- **History**: the pane cannot provide it, so Claude Code's transcript JSONL is read directly
+- **All zellij calls are asynchronous** (`make-process` + sentinel); Emacs never blocks
 
 ## License
 
