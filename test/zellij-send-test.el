@@ -2163,6 +2163,28 @@ C-u で捨てたものは戻らない。"
         (should (equal (zellij-send-dashboard--tail-line (current-buffer))
                        (cdr case)))))))
 
+(ert-deftest zellij-send-test-dashboard-line-start ()
+  "直前の改行の次の位置を返す。改行が無ければ 0。"
+  (should (= (zellij-send-dashboard--line-start "abc" 3) 0))
+  (should (= (zellij-send-dashboard--line-start "" 0) 0))
+  ;; 先頭が改行
+  (should (= (zellij-send-dashboard--line-start "\nabc" 4) 1))
+  (should (= (zellij-send-dashboard--line-start "\nabc" 0) 0))
+  ;; 末尾が改行（最終行は空）
+  (should (= (zellij-send-dashboard--line-start "abc\n" 4) 4))
+  (should (= (zellij-send-dashboard--line-start "abc\n" 3) 0))
+  (should (= (zellij-send-dashboard--line-start "ab\ncd\nef" 8) 6)))
+
+(ert-deftest zellij-send-test-session-screen-normal-form ()
+  "まだ 1 件も受けていない黒板でも、画面は行末の空白を落とした形で返す。"
+  (with-temp-buffer
+    (insert "表   \n  本文\t\n\n")
+    (set-buffer-modified-p nil)
+    (should (equal (zellij-send-session-screen (current-buffer)) "表\n  本文"))
+    ;; 受け取った画面があればそれをそのまま返す
+    (setq-local zellij-send--last-content "受けた画面")
+    (should (equal (zellij-send-session-screen (current-buffer)) "受けた画面"))))
+
 (ert-deftest zellij-send-test-dashboard-usage-cache ()
   "使用状況 JSON は mtime が変わったときだけ読み直す。"
   (let* ((file (make-temp-file "zjs-usage" nil ".json"))

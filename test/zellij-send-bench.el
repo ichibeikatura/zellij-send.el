@@ -28,6 +28,7 @@
 (require 'ert)
 (require 'benchmark)
 (require 'zellij-send)
+(require 'zellij-send-dashboard)
 
 (defconst zellij-send-bench--limit-ms 10.0
   "1 回あたりの上限（ミリ秒）。")
@@ -78,6 +79,31 @@
         (message "subscribe-handle-line: %.2f ms" ms)
         (should zellij-send--last-content)
         (should (< ms zellij-send-bench--limit-ms))))))
+
+;; 2026-10-20 に測った値（同じ機械）:
+;;
+;;   「状況」列（`zellij-send-dashboard--tail-line'）表 0.04 ms・罫線 1.9 ms
+;;   退行（行を `string-trim' に戻した場合）        表 0.60 ms・罫線 23.7 ms
+
+(ert-deftest zellij-send-bench-dashboard-tail-line ()
+  "ダッシュボードの「状況」列。`zellij-send-bench-trim-end' と同じ画面を食わせる。
+同じ画面だと最終行が意味のある行なので 1 行しか読まない。下から 40 行を
+全部読ませるため、読み飛ばす行（罫線）の間を 318 個の空白で空けた画面も測る。
+行を `string-trim' で削ると、1 行ごとに空白の連なりの長さの 2 乗かかる。"
+  (let* ((table (concat "A" (make-string 318 ?\s) "B"))
+         (border (concat "│" (make-string 318 ?\s) "│"))
+         (zellij-send-dashboard-tail-width 40))
+    (dolist (case `(("表" ,table "A") ("罫線" ,border "")))
+      (with-temp-buffer
+        (setq-local zellij-send--last-content
+                    (mapconcat #'identity (make-list 78 (nth 1 case)) "\n"))
+        (let* ((buf (current-buffer))
+               (ms (zellij-send-bench--ms
+                    (lambda () (zellij-send-dashboard--tail-line buf)))))
+          (message "dashboard-tail-line (%s): %.2f ms" (nth 0 case) ms)
+          (should (string-prefix-p (nth 2 case)
+                                   (zellij-send-dashboard--tail-line buf)))
+          (should (< ms zellij-send-bench--limit-ms)))))))
 
 (provide 'zellij-send-bench)
 

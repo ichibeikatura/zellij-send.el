@@ -321,14 +321,19 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
 読むのは黒板の中身ではなく受け取った画面（`zellij-send-dashboard--screen'）。"
   ;; 画面は末尾の改行を落として入るので、最終行から読む。下から 40 行まで。
   ;; 3 秒ごとにセッションの数だけ走るので、500 行の画面を毎回全部
-  ;; `split-string' せず、後ろから 1 行ずつ切り出す
+  ;; `split-string' せず、後ろから 1 行ずつ切り出す。
+  ;; 行は `string-trim' で削らない。右側の正規表現は行の途中の空白の連なり
+  ;; ごとに後戻りするので、列の間が大きく空いた表の画面で 2 乗になる
+  ;; （`zellij-send--trim-end' の docstring）。削るのは左だけで、こちらは
+  ;; 先頭に錨があるので線形。行末の空白は `zellij-send-session-screen' が
+  ;; 落としてある（正規形）
   (let* ((screen (zellij-send-dashboard--screen buf))
          (end (length screen))
          (count 0)
          (line nil))
     (while (and (null line) (< count 40) (>= end 0))
       (let* ((start (zellij-send-dashboard--line-start screen end))
-             (s (string-trim (substring screen start end))))
+             (s (string-trim-left (substring screen start end))))
         (unless (zellij-send-dashboard--noise-p s)
           (setq line s))
         (setq end (1- start)

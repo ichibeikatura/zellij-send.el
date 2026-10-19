@@ -1075,9 +1075,16 @@ Stop フックが来ないため）。"
 
 (defun zellij-send-session-screen (buf)
   "黒板 BUF が最後に受け取ったペインの画面を返す。分からなければ nil。
-黒板の中身ではない（`zellij-send--last-screen'）。zellij は呼ばない。"
+黒板の中身ではない（`zellij-send--last-screen'）。zellij は呼ばない。
+
+返すのは正規形（`zellij-send--normalize-screen'。行末の空白は落としてある）。
+まだ 1 件も受けていない黒板では中身で代用するので、そのときだけ整えて返す。
+呼び出し側が行末を `string-trim-right' で削らずに済むようにするため
+（列の間が大きく空いた画面で 2 乗になる。`zellij-send--trim-end'）。"
   (with-current-buffer buf
-    (zellij-send--last-screen)))
+    (or zellij-send--last-content
+        (let ((screen (zellij-send--last-screen)))
+          (and screen (zellij-send--normalize-screen screen))))))
 
 (defun zellij-send-session-state (buf)
   "黒板 BUF の状態を plist で返す。zellij は呼ばない。
