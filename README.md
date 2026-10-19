@@ -435,7 +435,7 @@ Drafts and transcripts always wrap.
 
 The blackboard is kept live by `zellij subscribe`, so everything works without a hook. With the Stop hook installed, every finished response also:
 
-1. **Markdown log**: appends the latest assistant message from the transcript to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`).
+1. **Markdown log**: appends the latest assistant message from the transcript to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`). Once it passes `ZJS_LOG_MAX_BYTES` at the top of the script (default 1 MB) it is moved to `claude-log.1.md` (replacing the previous one) and a new log starts; `C-u C-c C-a l` opens the previous log.
 2. **Screen refresh**: refetches the blackboards with `dump-screen` via `emacsclient`. This needs an Emacs server (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
@@ -444,9 +444,13 @@ The blackboard is kept live by `zellij subscribe`, so everything works without a
 
 ```sh
 #!/bin/sh
+# Log size limit in bytes. Past it the log moves to claude-log.1.md and a new
+# one starts (0 = no limit)
+ZJS_LOG_MAX_BYTES=1048576
+
 # The hook JSON is passed via an env var because the heredoc occupies stdin
 ZJS_HOOK_INPUT=$(cat)
-export ZJS_HOOK_INPUT
+export ZJS_HOOK_INPUT ZJS_LOG_MAX_BYTES
 
 /usr/bin/python3 - <<'PY' 2>/dev/null
 import json, os, datetime
@@ -475,8 +479,12 @@ if transcript_path and cwd and os.path.isfile(transcript_path):
     if last:
         log_dir = os.path.join(cwd, ".zellij-send")
         os.makedirs(log_dir, exist_ok=True)
+        log = os.path.join(log_dir, "claude-log.md")
+        limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
+        if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
+            os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(os.path.join(log_dir, "claude-log.md"), "a") as out:
+        with open(log, "a") as out:
             out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 

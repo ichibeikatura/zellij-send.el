@@ -435,7 +435,7 @@ exit 0
 
 黒板の画面は `zellij subscribe` で常時更新されるので、フックが無くても動きます。Stop フックを入れると、回答完了のたびに次の 2 つを行います:
 
-1. **markdown ログ**: transcript から最新の assistant 出力を抜き出し、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開く）。
+1. **markdown ログ**: transcript から最新の assistant 出力を抜き出し、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開く）。スクリプト冒頭の `ZJS_LOG_MAX_BYTES`（既定 1 MB）を超えたら `claude-log.1.md` へ退避して新しく始めます（前の退避分は上書き）。以前のログは `C-u C-c C-a l` で開きます。
 2. **画面の取り直し**: `emacsclient` 経由で黒板を `dump-screen` で更新します。Emacs server の起動が必要です（`(server-start)` または `emacs --daemon`）。
 
 ### 1. フックスクリプトを作成
@@ -444,9 +444,12 @@ exit 0
 
 ```sh
 #!/bin/sh
+# ログの上限（バイト）。超えたら claude-log.1.md へ退避して新しく始める（0 で無制限）
+ZJS_LOG_MAX_BYTES=1048576
+
 # ヒアドキュメントが stdin を占有するため、フックの JSON は環境変数で渡す
 ZJS_HOOK_INPUT=$(cat)
-export ZJS_HOOK_INPUT
+export ZJS_HOOK_INPUT ZJS_LOG_MAX_BYTES
 
 /usr/bin/python3 - <<'PY' 2>/dev/null
 import json, os, datetime
@@ -475,8 +478,12 @@ if transcript_path and cwd and os.path.isfile(transcript_path):
     if last:
         log_dir = os.path.join(cwd, ".zellij-send")
         os.makedirs(log_dir, exist_ok=True)
+        log = os.path.join(log_dir, "claude-log.md")
+        limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
+        if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
+            os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(os.path.join(log_dir, "claude-log.md"), "a") as out:
+        with open(log, "a") as out:
             out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 

@@ -1032,11 +1032,12 @@ claude.ai への接続時間は読めないので固定待ちにはしない。"
          (when ok
            (zellij-send-dashboard--qr-step-menu buf session)))))))
 
-(defun zellij-send-dashboard-open-log ()
-  "カーソル行のセッションの出力ログを開く。"
-  (interactive)
+(defun zellij-send-dashboard-open-log (&optional previous)
+  "カーソル行のセッションの出力ログを開く。
+PREVIOUS（`\\[universal-argument]'）付きなら退避した以前のログを開く。"
+  (interactive "P")
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
-    (zellij-send-open-log)))
+    (zellij-send-open-log previous)))
 
 
 ;;; タイマー

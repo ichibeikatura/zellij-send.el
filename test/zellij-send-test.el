@@ -1718,6 +1718,31 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (should (string-match-p "^@@ -0,0 \\+1,2 @@$" d))
       (should (string-match-p "^\\\\ 残り 2 行は省略$" d)))))
 
+;;; 出力ログのローテーション
+
+(ert-deftest zellij-send-test-log-choose ()
+  "退避したログがあれば知らせ、C-u ではそちらを開く。"
+  (should (equal (zellij-send--log-rotated-file "/p/.zellij-send/claude-log.md")
+                 "/p/.zellij-send/claude-log.1.md"))
+  (let* ((dir (make-temp-file "zjs-log" t))
+         (cur (expand-file-name "claude-log.md" dir))
+         (old (expand-file-name "claude-log.1.md" dir)))
+    (unwind-protect
+        (progn
+          (should-not (zellij-send--log-choose cur nil))
+          (write-region "now" nil cur nil 'silent)
+          (should (equal (zellij-send--log-choose cur nil) (cons cur nil)))
+          ;; C-u でも、以前のログが無ければ現在のログ
+          (should (equal (car (zellij-send--log-choose cur t)) cur))
+          (write-region "before" nil old nil 'silent)
+          (let ((c (zellij-send--log-choose cur nil)))
+            (should (equal (car c) cur))
+            (should (string-match-p "claude-log\\.1\\.md" (cdr c))))
+          (should (equal (car (zellij-send--log-choose cur t)) old))
+          (delete-file cur)
+          (should (equal (car (zellij-send--log-choose cur nil)) old)))
+      (delete-directory dir t))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

@@ -267,7 +267,9 @@ ai-title 行は会話が進むたび追記されるので末尾側にある（�
 (defcustom zellij-send-log-file ".zellij-send/claude-log.md"
   "Claude の出力ログファイルのパス（セッション作業ディレクトリからの相対）。
 実際の追記は Stop フック（stop-zellij-send.sh）が行うため、
-変更する場合はフックスクリプト側も合わせること。"
+変更する場合はフックスクリプト側も合わせること。
+フックはこのファイルが上限（スクリプト冒頭の `ZJS_LOG_MAX_BYTES'）を超えると
+`claude-log.1.md' の形の名前へ退避して新しく始める（`zellij-send-open-log'）。"
   :type 'string
   :group 'zellij-send)
 
@@ -3359,21 +3361,50 @@ DEADLINE（`float-time' の値）を過ぎたら `delete-session --force' に切
          (zellij-send--force-delete-session
           session main-buf "/exit を送信できなかったため"))))))
 
-(defun zellij-send-open-log ()
+(defun zellij-send--log-rotated-file (file)
+  "出力ログ FILE を Stop フックが退避した先の名前を返す。
+`claude-log.md' なら `claude-log.1.md'。README のフックスクリプトと同じ規則。"
+  (concat (file-name-sans-extension file) ".1" (file-name-extension file t)))
+
+(defun zellij-send--log-choose (file previous)
+  "出力ログを開く対象を決める。FILE は現在のログ、PREVIOUS は以前のログを望むか。
+返り値は (開くファイル . 添えるメッセージ)。開くものが無ければ nil。
+
+Stop フックはログが上限を超えると `zellij-send--log-rotated-file' へ退避して
+新しく書き始める。退避した後の現在のログは短いので、以前のログがあることを
+メッセージで知らせる。"
+  (let* ((rotated (zellij-send--log-rotated-file file))
+         (cur-p (file-exists-p file))
+         (old-p (file-exists-p rotated)))
+    (cond
+     ((and previous old-p) (cons rotated "以前のログを開きました"))
+     ((and cur-p old-p)
+      (cons file (format "以前のログもあります: %s（C-u で開く）"
+                         (file-name-nondirectory rotated))))
+     (cur-p (cons file nil))
+     (old-p (cons rotated "現在のログが無いので、以前のログを開きました")))))
+
+(defun zellij-send-open-log (&optional previous)
   "Claude の出力ログ（markdown）を別ウィンドウで開く。
 ログは Claude Code の Stop フックが `zellij-send-log-file' に追記する。
+フックはログが上限を超えると `claude-log.1.md' へ退避して新しく始めるので、
+PREVIOUS（`\\[universal-argument]'）を付けるとそちらを開く。退避した
+ログがあるときは、現在のログを開いたときにもそう知らせる。
 
 **Claude Code 専用**。同じディレクトリで codex を動かしていると
 claude のログが開けてしまい、自分の出力だと誤解する（astra の指摘）。"
-  (interactive)
+  (interactive "P")
   (zellij-send--assert-session)
   (unless (zellij-send--claude-p)
     (user-error "出力ログは Claude Code の Stop フックが書くものです（いまは %s）"
                 (or (zellij-send--buffer-command) "コマンド不明")))
-  (let ((file (expand-file-name zellij-send-log-file default-directory)))
-    (unless (file-exists-p file)
+  (let* ((file (expand-file-name zellij-send-log-file default-directory))
+         (choice (zellij-send--log-choose file previous)))
+    (unless choice
       (user-error "ログファイルがまだありません: %s" file))
-    (find-file-other-window file)))
+    (find-file-other-window (car choice))
+    (when (cdr choice)
+      (message "%s" (cdr choice)))))
 
 ;;; 返信バッファ
 
