@@ -718,7 +718,7 @@ FULL が非 nil なら `--full' を付けてスクロールバックまで取る
 無いため、`--full' でも viewport と同じ内容しか返らない（2026-07-28 実測）。
 alt-screen でないコマンド（`zellij-send--command' 参照）を動かしている
 セッションのためだけに付けている。流れて消えた Claude の出力は
-`zellij-send-log-file'（Stop フックが transcript から追記）で読む。"
+`zellij-send-log-file'（Stop フックが追記）で読む。"
   (let ((req-buffer (current-buffer))
         (out-buf (generate-new-buffer " *zellij-dump*"))
         (err-buf (generate-new-buffer " *zellij-dump-err*")))

@@ -435,7 +435,7 @@ Drafts and transcripts always wrap.
 
 The blackboard is kept live by `zellij subscribe`, so everything works without a hook. With the Stop hook installed, every finished response also:
 
-1. **Markdown log**: appends the latest assistant message from the transcript to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`). Once it passes `ZJS_LOG_MAX_BYTES` at the top of the script (default 1 MB) it is moved to `claude-log.1.md` (replacing the previous one) and a new log starts; `C-u C-c C-a l` opens the previous log.
+1. **Markdown log**: appends Claude's final reply (`last_assistant_message` from the Stop input; the transcript on versions without it) to `.zellij-send/claude-log.md` in the working directory (open with `C-c C-a` → `l`). Once it passes `ZJS_LOG_MAX_BYTES` at the top of the script (default 1 MB) it is moved to `claude-log.1.md` (replacing the previous one) and a new log starts; `C-u C-c C-a l` opens the previous log.
 2. **Screen refresh**: refetches the blackboards with `dump-screen` via `emacsclient`. This needs an Emacs server (`(server-start)` or `emacs --daemon`).
 
 ### 1. Create the hook script
@@ -459,8 +459,13 @@ data = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
 transcript_path = data.get("transcript_path")
 cwd = data.get("cwd") or ""
 
-if transcript_path and cwd and os.path.isfile(transcript_path):
+# Use the final reply from the Stop input. The transcript may not include
+# this turn yet when the hook fires (per the hooks reference); read it only
+# on versions that lack the field
+last = data.get("last_assistant_message")
+if not (isinstance(last, str) and last.strip()):
     last = None
+if last is None and transcript_path and cwd and os.path.isfile(transcript_path):
     with open(transcript_path) as f:
         for line in f:
             try:
@@ -476,16 +481,17 @@ if transcript_path and cwd and os.path.isfile(transcript_path):
             text = "\n\n".join(t for t in texts if t.strip())
             if text.strip():
                 last = text
-    if last:
-        log_dir = os.path.join(cwd, ".zellij-send")
-        os.makedirs(log_dir, exist_ok=True)
-        log = os.path.join(log_dir, "claude-log.md")
-        limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
-        if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
-            os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
-        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log, "a") as out:
-            out.write("\n## %s\n\n%s\n" % (stamp, last))
+
+if last and cwd:
+    log_dir = os.path.join(cwd, ".zellij-send")
+    os.makedirs(log_dir, exist_ok=True)
+    log = os.path.join(log_dir, "claude-log.md")
+    limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
+    if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
+        os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log, "a") as out:
+        out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 
 # Run emacsclient in the background with a 10s watchdog so a busy/frozen
@@ -495,7 +501,7 @@ PY
   EC_PID=$!
   sleep 10
   kill "$EC_PID" 2>/dev/null
-) &
+) >/dev/null 2>&1 &
 exit 0
 ```
 

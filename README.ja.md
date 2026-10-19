@@ -435,7 +435,7 @@ exit 0
 
 黒板の画面は `zellij subscribe` で常時更新されるので、フックが無くても動きます。Stop フックを入れると、回答完了のたびに次の 2 つを行います:
 
-1. **markdown ログ**: transcript から最新の assistant 出力を抜き出し、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開く）。スクリプト冒頭の `ZJS_LOG_MAX_BYTES`（既定 1 MB）を超えたら `claude-log.1.md` へ退避して新しく始めます（前の退避分は上書き）。以前のログは `C-u C-c C-a l` で開きます。
+1. **markdown ログ**: Stop フックの入力にある最後の回答（`last_assistant_message`。無い版では transcript から）を、作業ディレクトリの `.zellij-send/claude-log.md` に追記します（`C-c C-a` → `l` で開く）。スクリプト冒頭の `ZJS_LOG_MAX_BYTES`（既定 1 MB）を超えたら `claude-log.1.md` へ退避して新しく始めます（前の退避分は上書き）。以前のログは `C-u C-c C-a l` で開きます。
 2. **画面の取り直し**: `emacsclient` 経由で黒板を `dump-screen` で更新します。Emacs server の起動が必要です（`(server-start)` または `emacs --daemon`）。
 
 ### 1. フックスクリプトを作成
@@ -458,8 +458,12 @@ data = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
 transcript_path = data.get("transcript_path")
 cwd = data.get("cwd") or ""
 
-if transcript_path and cwd and os.path.isfile(transcript_path):
+# Stop の入力にある最後の回答を使う。transcript はフックの時点で今回の
+# 回答を含まないことがある（公式リファレンス）。無い版だけ transcript を読む
+last = data.get("last_assistant_message")
+if not (isinstance(last, str) and last.strip()):
     last = None
+if last is None and transcript_path and cwd and os.path.isfile(transcript_path):
     with open(transcript_path) as f:
         for line in f:
             try:
@@ -475,16 +479,17 @@ if transcript_path and cwd and os.path.isfile(transcript_path):
             text = "\n\n".join(t for t in texts if t.strip())
             if text.strip():
                 last = text
-    if last:
-        log_dir = os.path.join(cwd, ".zellij-send")
-        os.makedirs(log_dir, exist_ok=True)
-        log = os.path.join(log_dir, "claude-log.md")
-        limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
-        if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
-            os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
-        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(log, "a") as out:
-            out.write("\n## %s\n\n%s\n" % (stamp, last))
+
+if last and cwd:
+    log_dir = os.path.join(cwd, ".zellij-send")
+    os.makedirs(log_dir, exist_ok=True)
+    log = os.path.join(log_dir, "claude-log.md")
+    limit = int(os.environ.get("ZJS_LOG_MAX_BYTES") or 0)
+    if limit > 0 and os.path.isfile(log) and os.path.getsize(log) >= limit:
+        os.replace(log, os.path.join(log_dir, "claude-log.1.md"))
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log, "a") as out:
+        out.write("\n## %s\n\n%s\n" % (stamp, last))
 PY
 
 # Emacs がビジー/フリーズしていても Stop フックをブロックしないよう、
@@ -494,7 +499,7 @@ PY
   EC_PID=$!
   sleep 10
   kill "$EC_PID" 2>/dev/null
-) &
+) >/dev/null 2>&1 &
 exit 0
 ```
 
