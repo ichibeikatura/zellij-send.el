@@ -132,6 +132,7 @@ Inside `*ai-session-name*`:
 | `l` | Open the Claude output log (markdown, written by the Stop hook)                 |
 | `x` | Clear the buffer                                                                |
 | `w` | Toggle line wrapping of the screen (for reading tables)                          |
+| `=` | Show the latest edits (Edit / Write) as a diff (Claude Code; files are not touched) |
 
 **Send**
 

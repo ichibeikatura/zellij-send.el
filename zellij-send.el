@@ -1062,6 +1062,190 @@ AskUserQuestion の自動起動を伴うので、過去の会話文で誤爆す�
       (message "会話履歴を表示しました（%s）。生画面に戻すには C-c C-a → g"
                (file-name-nondirectory file)))))
 
+;;;; 直近の編集を diff で見る
+
+;; tool_use の input の形（2026-10-19 に手元の transcript で確認）:
+;;   Edit   {file_path, old_string, new_string, replace_all}
+;;   Write  {file_path, content}
+;; MultiEdit は手元の transcript に現れなかった。{file_path, edits: [{old_string,
+;; new_string}…]} の形のときだけ読み、形が違えば黙って飛ばす。
+;; diff は外部の `diff' を呼ばずに Emacs Lisp で組む（新しい依存を足さない）。
+
+(defconst zellij-send--edit-tools '("Edit" "Write" "MultiEdit")
+  "`zellij-send-show-last-diff' が読むツール名。これ以外は対象外。")
+
+(defun zellij-send--transcript-user-turn-p (obj)
+  "transcript の行 OBJ が、あなたの発言（ターンの始まり）なら non-nil。
+role が user でも tool_result だけの行は発言ではない。"
+  (and (equal (alist-get 'type obj) "user")
+       (not (alist-get 'isSidechain obj))
+       (let ((content (alist-get 'content (alist-get 'message obj))))
+         (or (stringp content)
+             (seq-some (lambda (b) (and (listp b)
+                                        (equal (alist-get 'type b) "text")))
+                       content)))))
+
+(defun zellij-send--transcript-edits (text)
+  "transcript の TEXT（JSONL）から直近の編集を古い順に返す。
+直近のターン（最後のあなたの発言より後）の編集をすべて返す。そのターンに
+編集が無ければ、transcript の中で最後の編集 1 件だけを返す。無ければ nil。
+各要素は plist (:name :file :old :new :content)。MultiEdit は
+`edits' の 1 件ずつに分けて Edit と同じ形にする。"
+  (let (turn last)
+    (dolist (line (split-string text "\n" t))
+      (let ((obj (ignore-errors
+                   (json-parse-string line :object-type 'alist
+                                      :array-type 'list
+                                      :null-object nil :false-object nil))))
+        (cond
+         ((null obj) nil)
+         ((zellij-send--transcript-user-turn-p obj) (setq turn nil))
+         ((equal (alist-get 'type obj) "assistant")
+          (let ((content (alist-get 'content (alist-get 'message obj))))
+            (dolist (b (and (listp content) content))
+              (when (and (listp b) (equal (alist-get 'type b) "tool_use")
+                         (member (alist-get 'name b) zellij-send--edit-tools))
+                (dolist (e (zellij-send--tool-use-edits
+                            (alist-get 'name b) (alist-get 'input b)))
+                  (push e turn)
+                  (setq last e)))))))))
+    (cond (turn (nreverse turn))
+          (last (list last)))))
+
+(defun zellij-send--tool-use-edits (name input)
+  "ツール NAME の INPUT を編集の plist のリストにする。形が違えば nil。"
+  (let ((file (alist-get 'file_path input)))
+    (when (stringp file)
+      (pcase name
+        ("Write"
+         (let ((content (alist-get 'content input)))
+           (and (stringp content)
+                (list (list :name name :file file :content content)))))
+        ("Edit"
+         (let ((old (alist-get 'old_string input))
+               (new (alist-get 'new_string input)))
+           (and (stringp old) (stringp new)
+                (list (list :name name :file file :old old :new new)))))
+        ("MultiEdit"
+         (let ((edits (alist-get 'edits input)))
+           (and (listp edits)
+                (delq nil
+                      (mapcar (lambda (e)
+                                (let ((old (and (listp e) (alist-get 'old_string e)))
+                                      (new (and (listp e) (alist-get 'new_string e))))
+                                  (and (stringp old) (stringp new)
+                                       (list :name name :file file
+                                             :old old :new new))))
+                              edits)))))))))
+
+(defun zellij-send--diff-lines (text)
+  "TEXT を diff に載せる行のリストにする。
+1 行の長さは `zellij-send--transcript-clip' で切る（transcript 表示と同じ方針）。
+行数が `zellij-send-transcript-max-block-lines' を超えたら、そこまでの行と
+残りの行数を返す: (LINES . 省いた行数)。"
+  (let* ((lines (split-string (zellij-send--transcript-clip
+                               (string-remove-suffix "\n" (or text "")))
+                              "\n"))
+         (max zellij-send-transcript-max-block-lines))
+    (if (and (natnump max) (> (length lines) max))
+        (cons (seq-take lines max) (- (length lines) max))
+      (cons lines 0))))
+
+(defun zellij-send--diff-hunk (old new)
+  "OLD を NEW に置き換えた差分を、unified diff の 1 ハンクにして返す。
+前後の共通の行は文脈行（` '）にし、間を `-' と `+' にする。
+行番号は置き換えた断片の中での番号（ファイル全体の行番号は transcript に無い）。
+省いた行は `\\ ' 行で知らせる（diff-mode が本文と取り違えない形）。"
+  (let* ((o (zellij-send--diff-lines old))
+         (n (zellij-send--diff-lines new))
+         (ol (car o)) (nl (car n))
+         (head 0) (tail 0))
+    (while (and (< head (length ol)) (< head (length nl))
+                (equal (nth head ol) (nth head nl)))
+      (setq head (1+ head)))
+    (while (and (< tail (- (length ol) head)) (< tail (- (length nl) head))
+                (equal (nth (- (length ol) 1 tail) ol)
+                       (nth (- (length nl) 1 tail) nl)))
+      (setq tail (1+ tail)))
+    (let ((del (seq-subseq ol head (- (length ol) tail)))
+          (add (seq-subseq nl head (- (length nl) tail))))
+      (concat
+       (format "@@ -1,%d +1,%d @@\n" (length ol) (length nl))
+       (mapconcat (lambda (l) (concat " " l "\n")) (seq-take ol head) "")
+       (mapconcat (lambda (l) (concat "-" l "\n")) del "")
+       (mapconcat (lambda (l) (concat "+" l "\n")) add "")
+       (mapconcat (lambda (l) (concat " " l "\n")) (last ol tail) "")
+       (if (> (cdr o) 0) (format "\\ 元の断片の残り %d 行は省略\n" (cdr o)) "")
+       (if (> (cdr n) 0) (format "\\ 新しい断片の残り %d 行は省略\n" (cdr n)) "")))))
+
+(defun zellij-send--edit-diff (edit &optional dir)
+  "EDIT（`zellij-send--transcript-edits' の要素）を unified diff の文字列にする。
+DIR の中のファイルは DIR からの相対パスで出す。
+Write は書き込んだ内容全体を追加として出す（上書きなら前の内容は
+transcript の tool_use に無いので出せない。見出しにそう書く）。"
+  (let* ((file (plist-get edit :file))
+         ;; `file-in-directory-p' は実在するディレクトリでしか判定できないので
+         ;; 文字列で比べる
+         (inside (and dir (string-prefix-p
+                           (file-name-as-directory (expand-file-name dir))
+                           (expand-file-name file))))
+         (name (if inside (file-relative-name file dir) file))
+         ;; diff-mode は a/ b/ を外して default-directory から探す。
+         ;; DIR の外のファイルは絶対パスのまま出す
+         (a (if inside (concat "a/" name) name))
+         (b (if inside (concat "b/" name) name)))
+    (if (equal (plist-get edit :name) "Write")
+        (let ((n (zellij-send--diff-lines (plist-get edit :content))))
+          (concat
+           (format "Write: %s（ファイル全体。上書き前の内容は表示できません）\n" name)
+           "--- /dev/null\n"
+           (format "+++ %s\n" b)
+           (format "@@ -0,0 +1,%d @@\n" (length (car n)))
+           (mapconcat (lambda (l) (concat "+" l "\n")) (car n) "")
+           (if (> (cdr n) 0) (format "\\ 残り %d 行は省略\n" (cdr n)) "")))
+      (concat
+       (format "%s: %s\n" (plist-get edit :name) name)
+       (format "--- %s\n+++ %s\n" a b)
+       (zellij-send--diff-hunk (plist-get edit :old) (plist-get edit :new))))))
+
+(defun zellij-send-show-last-diff ()
+  "Claude Code の直近の編集（Edit / Write / MultiEdit）を diff で表示する。
+直近のターン（最後のあなたの発言より後）の編集をすべて、
+`*zellij-diff-SESSION*' に `diff-mode' で出す。そのターンに編集が無ければ
+最後の編集 1 件を出す。ファイルは書き換えない。
+
+読むのは transcript の tool_use（`zellij-send--transcript-file' で選んだもの）。
+編集が見つからないときは「対象なし」と言って終わる。Claude Code 専用。"
+  (interactive)
+  (zellij-send--assert-session)
+  (unless (zellij-send--claude-p)
+    (user-error "直近の編集の表示は Claude Code 専用です（いまは %s）"
+                (or (zellij-send--buffer-command) "コマンド不明")))
+  (let* ((session zellij-send--session)
+         (dir default-directory)
+         (file (zellij-send--transcript-file dir))
+         (edits (and file
+                     (zellij-send--transcript-edits
+                      (with-temp-buffer
+                        (insert-file-contents file)
+                        (buffer-string))))))
+    (cond
+     ((null file) (message "transcript が見つかりません"))
+     ((null edits) (message "直近の編集はありません（対象なし）"))
+     (t
+      (let ((buf (get-buffer-create (format "*zellij-diff-%s*" session))))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (mapconcat (lambda (e) (zellij-send--edit-diff e dir))
+                               edits "\n"))
+            (diff-mode)
+            (setq default-directory dir)
+            (setq buffer-read-only t)
+            (goto-char (point-min))))
+        (display-buffer buf)
+        (message "直近の編集 %d 件を表示しました" (length edits)))))))
+
 ;;; セッション情報の取得（cwd・pane-id）
 
 (defun zellij-send--zellij-output-async (session args callback)
@@ -4025,7 +4209,8 @@ UTF-8 のバイト列に分解してから送る。"
     ("g" "いまの画面に戻す（自動更新を再開）" zellij-send-show-live)
     ("l" "出力ログを開く (markdown)" zellij-send-open-log)
     ("x" "表示内容をクリア"         zellij-send-clear-buffer)
-    ("w" "折り返しを切り替える（表を見るとき）" zellij-send-toggle-wrap)]
+    ("w" "折り返しを切り替える（表を見るとき）" zellij-send-toggle-wrap)
+    ("=" "直近の編集を diff で見る" zellij-send-show-last-diff)]
    ["送信"
     ("e" "答える（返信バッファを開く）" zellij-send-reply)
     ("n" "答える（数字を送る）"         zellij-send-reply-number)

@@ -1627,6 +1627,97 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (zellij-send--slash-cache-put '(("/clear" . "")))
       (should (equal (zellij-send--slash-cached) '(("/clear" . "")))))))
 
+;;; 直近の編集を diff で見る
+
+(defun zellij-send-test--jsonl (&rest objs)
+  "OBJS（alist）を JSONL の文字列にする。"
+  (mapconcat (lambda (o) (json-encode o)) objs "\n"))
+
+(defun zellij-send-test--tool-use (name input)
+  "NAME の tool_use を 1 つ持つ assistant 行を返す。"
+  `((type . "assistant")
+    (message . ((content . [((type . "tool_use") (name . ,name)
+                             (input . ,input))])))))
+
+(defconst zellij-send-test--user-says
+  '((type . "user") (message . ((content . "直して")))))
+
+(ert-deftest zellij-send-test-transcript-edits ()
+  "直近のターンの編集を古い順に返す。ターンに無ければ最後の 1 件。"
+  (let ((text (zellij-send-test--jsonl
+               (zellij-send-test--tool-use
+                "Edit" '((file_path . "/p/a.el") (old_string . "x") (new_string . "y")))
+               zellij-send-test--user-says
+               (zellij-send-test--tool-use
+                "Write" '((file_path . "/p/b.el") (content . "new\n")))
+               ;; tool_result はターンの区切りではない
+               '((type . "user")
+                 (message . ((content . [((type . "tool_result") (content . "ok"))]))))
+               (zellij-send-test--tool-use
+                "Edit" '((file_path . "/p/c.el") (old_string . "1") (new_string . "2")))
+               (zellij-send-test--tool-use "Bash" '((command . "ls"))))))
+    (should (equal (mapcar (lambda (e) (plist-get e :file))
+                           (zellij-send--transcript-edits text))
+                   '("/p/b.el" "/p/c.el"))))
+  ;; 最後のターンに編集が無ければ、最後の編集 1 件
+  (let ((text (zellij-send-test--jsonl
+               (zellij-send-test--tool-use
+                "Edit" '((file_path . "/p/a.el") (old_string . "x") (new_string . "y")))
+               (zellij-send-test--tool-use
+                "Edit" '((file_path . "/p/z.el") (old_string . "x") (new_string . "y")))
+               zellij-send-test--user-says)))
+    (should (equal (mapcar (lambda (e) (plist-get e :file))
+                           (zellij-send--transcript-edits text))
+                   '("/p/z.el"))))
+  ;; 知らないツール・形の違う入力だけなら対象なし
+  (should-not (zellij-send--transcript-edits
+               (zellij-send-test--jsonl
+                (zellij-send-test--tool-use "NotebookEdit" '((notebook_path . "/p/n")))
+                (zellij-send-test--tool-use "Edit" '((file_path . "/p/a.el")))
+                (zellij-send-test--tool-use "MultiEdit" '((file_path . "/p/a.el")
+                                                          (edits . "壊れた形")))))))
+
+(ert-deftest zellij-send-test-multiedit ()
+  "MultiEdit は edits の 1 件ずつを Edit と同じ形にする。"
+  (should (equal (zellij-send--tool-use-edits
+                  "MultiEdit" '((file_path . "/p/a.el")
+                                (edits . (((old_string . "a") (new_string . "b"))
+                                          ((old_string . "c") (new_string . "d"))))))
+                 '((:name "MultiEdit" :file "/p/a.el" :old "a" :new "b")
+                   (:name "MultiEdit" :file "/p/a.el" :old "c" :new "d")))))
+
+(ert-deftest zellij-send-test-edit-diff ()
+  "Edit は共通の前後を文脈行にした 1 ハンク、Write は全体の追加になる。"
+  (let ((zellij-send-transcript-max-block-lines nil))
+    (should (equal (zellij-send--edit-diff
+                    '(:name "Edit" :file "/p/src/a.el"
+                      :old "(defun f ()\n  1)\n;; end" :new "(defun f ()\n  2)\n;; end")
+                    "/p/")
+                   (concat "Edit: src/a.el\n"
+                           "--- a/src/a.el\n+++ b/src/a.el\n"
+                           "@@ -1,3 +1,3 @@\n"
+                           " (defun f ()\n"
+                           "-  1)\n"
+                           "+  2)\n"
+                           " ;; end\n")))
+    ;; 全部が同じ行でも壊れない
+    (should (string-match-p "@@ -1,1 \\+1,1 @@\n same\n\\'"
+                            (zellij-send--diff-hunk "same" "same")))
+    (should (equal (zellij-send--edit-diff
+                    '(:name "Write" :file "/elsewhere/b.txt" :content "一\n二\n")
+                    "/p/")
+                   (concat "Write: /elsewhere/b.txt（ファイル全体。上書き前の内容は表示できません）\n"
+                           "--- /dev/null\n+++ /elsewhere/b.txt\n"
+                           "@@ -0,0 +1,2 @@\n+一\n+二\n"))))
+  ;; 大きな入力は transcript 表示と同じ方針で切る
+  (let ((zellij-send-transcript-max-block-lines 2)
+        (zellij-send-transcript-max-line-length 5))
+    (let ((d (zellij-send--edit-diff
+              '(:name "Write" :file "/p/b" :content "1234567890\n2\n3\n4") "/p/")))
+      (should (string-match-p "^\\+12345…（この行はあと 5 文字）$" d))
+      (should (string-match-p "^@@ -0,0 \\+1,2 @@$" d))
+      (should (string-match-p "^\\\\ 残り 2 行は省略$" d)))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here
