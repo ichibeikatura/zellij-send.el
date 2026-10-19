@@ -464,9 +464,14 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
   ;; `<...>' は自由入力なので落とす
   (should (equal (zellij-send--slash-hint-values "open|share|<description>")
                  '("open" "share")))
+  ;; 入れ子の括弧の中（`disable' の引数の `all'）は最上位の候補にしない
   (should (equal (zellij-send--slash-hint-values
                   "reconnect <server>|enable|disable [<server>|all")
-                 '("reconnect" "enable" "disable" "all")))
+                 '("reconnect" "enable" "disable")))
+  ;; v2.1.303 の `/effort'（`ultracode' の引数の on/off を候補にしない）
+  (should (equal (zellij-send--slash-hint-values
+                  "low|medium|high|xhigh|max|auto|ultracode [on|off]")
+                 '("low" "medium" "high" "xhigh" "max" "auto" "ultracode")))
   ;; 1 つだけ残る形もある（`[auto|<tokens>]'）。候補に無い値も打てるので出す
   (should (equal (zellij-send--slash-hint-values "auto|<tokens>") '("auto")))
   ;; 選択肢ではないヒントからは候補を作らない

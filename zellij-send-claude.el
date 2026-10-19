@@ -1038,7 +1038,7 @@ TRUNCATED が non-nil なら回数を使い切って打ち切った一覧。"
 ;; 2026-10-19 実測（Claude Code v2.1.303）: `/effort ' のヒントが入れ子になった
 ;; （`/effort  [low|medium|high|xhigh|max|auto|ultracode [on|off]]'）。
 ;; `zellij-send--slash-hint-values' は `|' で切るので、`ultracode' が落ちて
-;; `ultracode' の引数の `off' が候補に混ざる。`/config ' `/plugin ' の候補メニューと
+;; `ultracode' の引数の `off' が候補に混ざる。（→ 同日、括弧の外の `|' でだけ切るよう直した）`/config ' `/plugin ' の候補メニューと
 ;; `/add-dir  <path>' は 2026-09-06 と同じ形だった（test/fixtures/slash-arg-*.txt）。
 
 (defun zellij-send--slash-probe-arg (buf name args open callback)

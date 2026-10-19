@@ -608,25 +608,41 @@ LIMIT が non-nil ならその件数を読んだところでやめる。
 `low|medium|high' のような素直な形だけではない。claude 本体の
 argumentHint を調べると `[codex|gemini] [--dry-run]' や
 `[reconnect <server>|enable|disable [<server>|all]]' のように
-グループが 2 つあったり入れ子になったりする。`|' で切ってから
-`<...>'（自由入力）と括弧の残骸を落とし、1 語で残ったものだけを候補にする。
-候補に無い値も打てる（require-match しない）ので、落としすぎても困らない。"
+グループが 2 つあったり入れ子になったりする。**括弧の外の `|' でだけ**切り、
+各選択肢から入れ子の括弧（その選択肢の引数）と `<...>'（自由入力）を落として、
+1 語で残ったものだけを候補にする。最上位で閉じ括弧が来たら、そこから後ろは
+別のグループ（`[codex|gemini] [--dry-run]' の `--dry-run'）なので読まない。
+候補に無い値も打てる（require-match しない）ので、落としすぎても困らない。
+
+2026-10-19 実測（Claude Code v2.1.303）: `/effort' のヒントが
+`[low|medium|high|xhigh|max|auto|ultracode [on|off]]' になった。`|' で単純に
+切っていた頃は `ultracode' が落ち、その引数の `off' が候補に混ざっていた。"
   (when (and hint (string-match-p "|" hint))
-    (delete-dups
-     (delq nil
-           (mapcar
-            (lambda (piece)
-              ;; グループの閉じ括弧から後ろは別のグループ（`[codex|gemini]
-              ;; [--dry-run]' の `--dry-run'）なので切り落とす。残った
-              ;; `<...>'（自由入力）と括弧は消す
-              (let ((s (string-trim
-                        (replace-regexp-in-string
-                         "<[^>]*>\\|[[]" " "
-                         (car (split-string piece "]"))))))
-                (and (string-match-p
-                      "\\`[A-Za-z0-9][A-Za-z0-9._:@/=+-]*\\'" s)
-                     s)))
-            (split-string hint "|" t))))))
+    (let ((depth 0) (start 0) (i 0) (n (length hint)) (pieces nil) (stop nil))
+      (while (and (< i n) (not stop))
+        (let ((c (aref hint i)))
+          (cond
+           ((memq c '(?\[ ?<)) (setq depth (1+ depth)))
+           ((memq c '(?\] ?>))
+            (if (> depth 0) (setq depth (1- depth)) (setq stop t)))
+           ((and (eq c ?|) (= depth 0))
+            (push (substring hint start i) pieces)
+            (setq start (1+ i)))))
+        (unless stop (setq i (1+ i))))
+      (push (substring hint start i) pieces)
+      (delete-dups
+       (delq nil
+             (mapcar
+              (lambda (piece)
+                ;; 入れ子の括弧から後ろはその選択肢の引数、`<...>' は自由入力
+                (let ((s (string-trim
+                          (replace-regexp-in-string
+                           "<[^>]*>" " "
+                           (car (split-string piece "\\["))))))
+                  (and (string-match-p
+                        "\\`[A-Za-z0-9][A-Za-z0-9._:@/=+-]*\\'" s)
+                       s)))
+              (nreverse pieces)))))))
 
 (defun zellij-send--slash-arg-open-p (token)
   "TOKEN が書きかけ（`=' `:' `/' で終わる）なら non-nil。

@@ -226,7 +226,8 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
     (should (equal effort "low|medium|high|xhigh|max|auto|ultracode [on|off]"))
     (should (equal add-dir "path"))
     (should (eq (zellij-send--slash-hint-kind add-dir) 'directory))
-    (should (member "xhigh" (zellij-send--slash-hint-values effort)))
+    (should (equal (zellij-send--slash-hint-values effort)
+                   '("low" "medium" "high" "xhigh" "max" "auto" "ultracode")))
     ;; ヒントは名前が合うときだけ
     (should-not (zellij-send--slash-arg-hint
                  (zellij-send-parse-test--screen "slash-hint-effort") "/model"))
