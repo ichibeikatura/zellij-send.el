@@ -29,10 +29,10 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 
 - Emacs 28.1+（`lexical-binding: t`）。依存は `transient`（必須）と `markdown-mode`（任意）だけ。
   外部コマンドは `zellij` 0.44+ / `sh` / `python3` のみ。**新しい依存を足さない**
-- テスト（zellij を呼ばない純関数と、バッファ更新の振る舞い）:
-  `emacs -Q --batch -L . -l ert -l test/zellij-send-test.el -f ert-run-tests-batch-and-exit`
-- バイトコンパイル（警告を増やさない）:
-  `emacs -Q --batch -L . -f batch-byte-compile zellij-send.el zellij-send-dashboard.el`
+- 検証は `make`（バイトコンパイル → テスト → checkdoc）。`make test` / `make compile` で個別に。
+  バイトコンパイルは警告もエラーにする（警告を増やさない）。checkdoc は日本語 docstring の
+  誤検知が多いので件数を見るだけ。Emacs は `make EMACS=…` で差し替える
+- テストは zellij を呼ばない純関数と、バッファ更新の振る舞い（`test/zellij-send-test.el`）
 - zellij を叩く経路は、`ZELLIJ_SOCKET_DIR` を分けた使い捨てサーバで手で確かめる
   （普段のダッシュボードが自動接続しないように。パスは 104 バイト未満）
 - GUI の描画を確かめるときは別の `emacs -Q` を使い、既定フォントは
