@@ -103,6 +103,10 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
   `buffer-chars-modified-tick` と比べてから行う。** 失敗・途中編集で下書きを失わない
 - **黒板は編集中（`buffer-modified-p`）・クリア後（`zellij-send--user-cleared`）は書き換えない。**
   ただし `zellij-send--last-change-time` / `--last-content` は記録し続ける
+- **画面を解析する処理は黒板の中身（`buffer-string`）を読まない。** 黒板は下書き・
+  クリア・transcript 表示で画面と食い違う。打ち込む処理（AskUserQuestion・スラッシュ
+  コマンド）はそのつど `dump-screen` で取り直し、読むだけの処理（ダッシュボード）は
+  `zellij-send--last-screen` を読む。例外は `--update-buffer` 直後の自動起動の判定
 - **transcript は明示選択。** 更新日時から所属を推測して自動で選ばない
   （同じディレクトリに複数エージェントがいるため）
 - **ダッシュボードは状態判定で zellij を呼ばない。** 呼ぶのは 15 秒ごとのセッション検出だけ。

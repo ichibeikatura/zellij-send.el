@@ -8,16 +8,17 @@
 ;; 複数の zellij-send セッションの状態を一覧するダッシュボード。
 ;;
 ;; 状態判定はこのファイルが自前で行う。zellij-send 本体は状態フラグを
-;; 持たない（モードライン通知の撤去に伴い削除された）ため、各セッション
-;; バッファの内容（zellij-send の subscribe が受信済み）から毎回算出する。
+;; 持たない（モードライン通知の撤去に伴い削除された）ため、各セッションが
+;; 最後に受け取った画面（`zellij-send--last-screen'）から毎回算出する。
+;; 黒板の中身は下書きやクリアで画面と食い違うので読まない。
 ;; 状態の算出では zellij を呼ばない。呼ぶのは 15 秒ごとのセッション検出
 ;; （`zellij-send-dashboard-scan-interval'）だけ。
 ;;
 ;;   M-x zellij-send-dashboard
 ;;
 ;; 表示される情報:
-;;   Flag  ✎ = 未送信の下書きあり（＝自動更新停止中で表示が古い）
-;;         ‖ = ユーザーがクリアした（＝自動更新停止中）
+;;   Flag  ✎ = 未送信の下書きあり（＝黒板の自動更新停止中。状態列は画面に追随する）
+;;         ‖ = ユーザーがクリアした（＝黒板の自動更新停止中）
 ;;   St    選択待ち / 完了 / 作業中 / 待機
 ;;   経過  その状態になってからの時間
 ;;   無変化 画面内容が最後に変わってからの時間（詰まり検出用）
@@ -272,19 +273,28 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
           (buffer-local-value 'zellij-send--session buf)))
    (buffer-list)))
 
+;; 状態の判定は黒板の中身ではなく、黒板が最後に受け取った画面
+;; （`zellij-send--last-screen'）を読む。黒板は下書き・クリア・transcript 表示の
+;; 間は画面ではない文章を持っているので、それを読むと状態が画面に追随しない。
+;; 「無変化」の時刻（`zellij-send--last-change-time'）も同じく受け取った画面から
+;; 記録されているので、筋が揃う。どちらも zellij を呼ばない。
+
+(defun zellij-send-dashboard--screen (buf)
+  "BUF が最後に受け取ったペインの画面を返す。分からなければ空文字。"
+  (with-current-buffer buf
+    (or (zellij-send--last-screen) "")))
+
 (defun zellij-send-dashboard--spinner-p (buf)
   "BUF の画面にスピナー行があれば non-nil。"
-  (with-current-buffer buf
-    (save-excursion
-      (goto-char (point-max))
-      ;; スピナーは画面下部にしか出ない。全体を毎回走査しないよう末尾に限定する。
-      (let ((beg (max (point-min) (- (point-max) 4000))))
-        (re-search-backward zellij-send-dashboard-working-regexp beg t)))))
+  (let* ((screen (zellij-send-dashboard--screen buf))
+         ;; スピナーは画面下部にしか出ない。全体を毎回走査しないよう末尾に限定する。
+         (start (max 0 (- (length screen) 4000))))
+    (string-match-p zellij-send-dashboard-working-regexp screen start)))
 
 (defun zellij-send-dashboard--prompt-p (buf)
-  "BUF に選択肢プロンプトがあれば non-nil。"
+  "BUF の画面に選択肢プロンプトがあれば non-nil。"
   (with-current-buffer buf
-    (zellij-send--detect-prompt)))
+    (zellij-send--detect-prompt (zellij-send-dashboard--screen buf))))
 
 (defun zellij-send-dashboard--update-state (buf session)
   "BUF（SESSION）の状態を判定して記録し、その plist を返す。
@@ -366,23 +376,18 @@ zellij-send の自動更新は buffer-modified-p と user-cleared のとき
            zellij-send-dashboard-noise-regexps))
 
 (defun zellij-send-dashboard--tail-line (buf)
-  "BUF の画面末尾から、意味のありそうな行を 1 行拾う。"
-  (with-current-buffer buf
-    (save-excursion
-      ;; 画面は末尾の改行を落として入るので、最終行から読み始める
-      ;; （先に `forward-line -1' すると最終行を読み飛ばす）
-      (goto-char (point-max))
-      (let ((line nil) (guard 40) (more t))
-        (while (and (null line) more (> guard 0))
-          (cl-decf guard)
-          (let ((s (string-trim (buffer-substring-no-properties
-                                 (line-beginning-position)
-                                 (line-end-position)))))
-            (unless (zellij-send-dashboard--noise-p s)
-              (setq line s)))
-          (setq more (zerop (forward-line -1))))
-        (truncate-string-to-width (or line "")
-                                  zellij-send-dashboard-tail-width nil nil "…")))))
+  "BUF の画面末尾から、意味のありそうな行を 1 行拾う。
+読むのは黒板の中身ではなく受け取った画面（`zellij-send-dashboard--screen'）。"
+  ;; 画面は末尾の改行を落として入るので、最終行から読む。下から 40 行まで
+  (let ((lines (last (split-string (zellij-send-dashboard--screen buf) "\n") 40))
+        (line nil))
+    (dolist (l (nreverse lines))
+      (unless line
+        (let ((s (string-trim l)))
+          (unless (zellij-send-dashboard--noise-p s)
+            (setq line s)))))
+    (truncate-string-to-width (or line "")
+                              zellij-send-dashboard-tail-width nil nil "…")))
 
 (defun zellij-send-dashboard--status-cell (status)
   "STATUS のラベル文字列（face 付き）を返す。"
@@ -699,7 +704,8 @@ ARG（\\[universal-argument]）付きなら Claude Code でも画面を取得す
 （`zellij-send-number-reply-commands'。codex には効かない）。"
   (with-current-buffer (zellij-send-dashboard--buffer-at-point)
     (zellij-send--assert-number-reply)
-    (unless (zellij-send--detect-prompt)
+    ;; 状態列と同じく、黒板の中身ではなく受け取った画面で確かめる
+    (unless (zellij-send--detect-prompt (or (zellij-send--last-screen) ""))
       (user-error "[%s] は選択肢待ちではありません" zellij-send--session))
     (let ((session zellij-send--session))
       ;; `zellij-send--send' はカレントバッファの pane-id を見るため、

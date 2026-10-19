@@ -1331,13 +1331,31 @@ WHOLE-LINE が非 nil なら行末までマッチする形にする（ハイラ�
                       "[ \t]+[1-9][0-9]*\\.")))
     (if whole-line (concat core ".*$") core)))
 
-(defun zellij-send--detect-prompt ()
-  "バッファに選択肢プロンプトがあれば non-nil を返す。
+(defun zellij-send--detect-prompt (&optional screen)
+  "バッファ（SCREEN を渡せばその文字列）に選択肢プロンプトがあれば non-nil。
 claude の `❯ 1. …' と codex の `› 1. …' の両方を拾う
-\(`zellij-send-prompt-marker-regexp')。"
-  (save-excursion
-    (goto-char (point-min))
-    (re-search-forward (zellij-send--prompt-regexp) nil t)))
+\(`zellij-send-prompt-marker-regexp')。記号はカレントバッファの
+エージェントで決まるので、SCREEN を渡すときも黒板をカレントにして呼ぶ。"
+  (if screen
+      (string-match-p (zellij-send--prompt-regexp) screen)
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward (zellij-send--prompt-regexp) nil t))))
+
+(defun zellij-send--last-screen ()
+  "カレントの黒板が最後に受け取ったペインの画面を返す。分からなければ nil。
+
+黒板の中身（`buffer-string'）は画面とは限らない。下書きを書いている間・
+クリアした後・transcript を表示している間は、画面ではない文章が入っている。
+画面を解析する処理はバッファではなくこれを読む。
+
+subscribe が記録した `zellij-send--last-content' を優先する（更新を
+抑止している間も記録され続ける）。まだ 1 件も受けていなければ、黒板が
+画面を映しているとき（未編集・未クリア）だけバッファの中身で代用する。"
+  (or zellij-send--last-content
+      (and (not (buffer-modified-p))
+           (not zellij-send--user-cleared)
+           (buffer-string))))
 
 (defun zellij-send--clear-prompt-highlight ()
   "選択肢行のハイライトを消す。"
@@ -3435,33 +3453,53 @@ BUF を常にカレントにしてから送るので、pane-id を取り違え�
              (message "キー送信に失敗しました (exit: %d)" exit)
              (when callback (funcall callback nil)))))))))
 
+(defun zellij-send--askq-screen (buf callback)
+  "BUF のペインの画面を `dump-screen' で取り、CALLBACK に渡す。
+取れなければ nil を渡す。CALLBACK は BUF をカレントにして呼ばれる。
+
+回答フローは黒板の中身（`buffer-string'）を読まない。黒板には下書き・
+transcript・クリア後の空が入っていることがあり、それを画面だと思って
+解析すると、質問を見失うか別の選択肢を押す。スラッシュコマンド
+（`zellij-send--slash-wait'）と同じく、毎回ペインから取り直す。
+CALLBACK は sentinel の中で走るので、ミニバッファを開くなら
+`run-at-time' で抜けてからにすること。"
+  (if (not (buffer-live-p buf))
+      (funcall callback nil)
+    (with-current-buffer buf
+      (zellij-send--dump-screen-async zellij-send--session callback))))
+
 (defun zellij-send--askq-focus (buf num callback &optional tries)
   "BUF の画面でカーソル (❯) を選択肢 NUM に合わせてから CALLBACK を呼ぶ。
 移動量を一度に計算せず 1 つずつ動かして毎回確認する。説明文の折り返しで
 行数がずれても壊れないようにするため（QR メニューで踏んだ失敗と同じ轍）。
+画面は毎回ペインから取り直す（`zellij-send--askq-screen'）。
 CALLBACK には成功 t / 失敗 nil を渡す。"
   (let ((tries (or tries 0)))
     (if (or (not (buffer-live-p buf)) (> tries 12))
         (progn (message "カーソルを選択肢 %d に合わせられませんでした" num)
                (funcall callback nil))
-      (let* ((q (with-current-buffer buf (zellij-send--askq-parse (buffer-string))))
-             (opts (plist-get q :options))
-             (cur (seq-position opts nil (lambda (o _) (plist-get o :focused))))
-             (target (seq-position opts nil (lambda (o _) (= (plist-get o :num) num)))))
-        (cond
-         ((or (null cur) (null target))
-          (message "画面から選択肢を読み取れませんでした")
-          (funcall callback nil))
-         ((= cur target) (funcall callback t))
-         (t
-          (zellij-send--askq-send-keys
-           buf (list (if (< cur target) '(27 91 66) '(27 91 65)))
-           (lambda (ok)
-             (if (not ok)
-                 (funcall callback nil)
-               (run-at-time zellij-send-askq-settle-delay nil
-                            #'zellij-send--askq-focus
-                            buf num callback (1+ tries)))))))))))
+      (zellij-send--askq-screen
+       buf
+       (lambda (screen)
+         (let* ((q (zellij-send--askq-parse screen))
+                (opts (plist-get q :options))
+                (cur (seq-position opts nil (lambda (o _) (plist-get o :focused))))
+                (target (seq-position opts nil
+                                      (lambda (o _) (= (plist-get o :num) num)))))
+           (cond
+            ((or (null cur) (null target))
+             (message "画面から選択肢を読み取れませんでした")
+             (funcall callback nil))
+            ((= cur target) (funcall callback t))
+            (t
+             (zellij-send--askq-send-keys
+              buf (list (if (< cur target) '(27 91 66) '(27 91 65)))
+              (lambda (ok)
+                (if (not ok)
+                    (funcall callback nil)
+                  (run-at-time zellij-send-askq-settle-delay nil
+                               #'zellij-send--askq-focus
+                               buf num callback (1+ tries)))))))))))))
 
 ;;;; 回答フロー
 
@@ -3479,12 +3517,26 @@ CALLBACK には成功 t / 失敗 nil を渡す。"
                  #'zellij-send--askq-continue buf)))
 
 (defun zellij-send--askq-continue (buf)
-  "BUF の画面を読み直し、まだ質問があれば続けて答える。"
+  "BUF の画面をペインから取り直し、まだ質問があれば続けて答える。
+取り直すのは、黒板に下書きがあると `buffer-string' が画面ではないため
+（`zellij-send--askq-screen'）。続きの判断はミニバッファを開きうるので、
+sentinel を `run-at-time' で抜けてから行う。"
+  (zellij-send--askq-screen
+   buf
+   (lambda (screen)
+     (run-at-time 0 nil #'zellij-send--askq-continue-1 buf screen))))
+
+(defun zellij-send--askq-continue-1 (buf screen)
+  "`zellij-send--askq-continue' の本体。SCREEN は取り直した画面（nil もある）。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq zellij-send--askq-answering nil)
-      (let ((q (zellij-send--askq-parse (buffer-string))))
+      (let ((q (zellij-send--askq-parse screen)))
         (cond
+         ((null screen)
+          (setq zellij-send--askq-signature nil
+                zellij-send--askq-repeat 0)
+          (message "画面を取得できませんでした。ペインを直接確認してください"))
          ((null q)
           (setq zellij-send--askq-signature nil
                 zellij-send--askq-repeat 0)
@@ -3642,13 +3694,31 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
   (unless (zellij-send--claude-confirmed-p)
     (user-error "AskUserQuestion の解析は Claude Code 専用です（%s）。C-c C-t のキー透過モードを使ってください"
                 (or (zellij-send--agent-name) "コマンド不明")))
-  (let ((q (zellij-send--askq-parse (buffer-string))))
-    (unless q
-      (user-error "画面に選択肢プロンプトが見つかりません"))
-    (setq zellij-send--askq-signature (zellij-send--askq-signature q)
-          zellij-send--askq-repeat 0
-          zellij-send--askq-rounds 0)
-    (zellij-send--askq-answer (current-buffer) q)))
+  (when zellij-send--askq-answering
+    (user-error "回答の途中です"))
+  ;; 黒板ではなくペインの画面を読む。下書きを書いた黒板で C-c C-q を
+  ;; 押しても、画面に出ている質問に答えられるように（`--askq-screen'）
+  (let ((buf (current-buffer)))
+    (zellij-send--askq-screen
+     buf
+     (lambda (screen)
+       (run-at-time 0 nil #'zellij-send--askq-start buf screen)))))
+
+(defun zellij-send--askq-start (buf screen)
+  "取り直した SCREEN に質問があれば、BUF で回答フローを始める。
+`zellij-send-answer-question' から sentinel を抜けた後に呼ばれる。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (let ((q (zellij-send--askq-parse screen)))
+        (cond
+         ((null screen) (message "画面を取得できませんでした"))
+         ((null q) (message "画面に選択肢プロンプトが見つかりません"))
+         (zellij-send--askq-answering nil)
+         (t
+          (setq zellij-send--askq-signature (zellij-send--askq-signature q)
+                zellij-send--askq-repeat 0
+                zellij-send--askq-rounds 0)
+          (zellij-send--askq-answer buf q)))))))
 
 (defun zellij-send--askq-auto-open (buf)
   "BUF に質問が出たので回答 UI を開く。
@@ -3660,7 +3730,9 @@ FROM-TEXT が non-nil なら、カーソルは自由入力の欄にある。
              (not (active-minibuffer-window)))
     (with-current-buffer buf
       (unless zellij-send--askq-answering
-        (when (zellij-send--askq-parse (buffer-string))
+        ;; `--update-buffer' から 1 拍置いて来るので、その間に下書きが
+        ;; 入っていることがある。バッファではなく受け取った画面で確かめる
+        (when (zellij-send--askq-parse (zellij-send--last-screen))
           ;; 表示はするがウィンドウは選ばない（別バッファでの作業を邪魔しない）
           (display-buffer buf)
           (pcase (zellij-send--askq-auto-method)

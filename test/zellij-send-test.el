@@ -13,6 +13,7 @@
 
 (require 'ert)
 (require 'zellij-send)
+(require 'zellij-send-dashboard)
 
 ;;; zellij-send--strip-ansi
 
@@ -1460,6 +1461,101 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
     (should (equal (car table) '("PANE_ID" "TYPE" "TITLE")))
     (should (equal (cdr table) '(("terminal_1" "terminal" "claude")))))
   (should (equal (zellij-send--pane-table "") '(nil))))
+
+;;; 画面を読む対象（黒板の中身ではなく受け取った画面）
+
+(defmacro zellij-send-test--with-draft-board (screen &rest body)
+  "下書き入りの黒板で BODY を実行する。最後に受け取った画面は SCREEN。"
+  (declare (indent 1))
+  `(with-temp-buffer
+     (setq-local zellij-send--session "test00")
+     (setq-local zellij-send--command "claude")
+     (setq-local zellij-send--last-content ,screen)
+     (insert "書きかけの下書き\n> 1. 引用の箇条書き")
+     (set-buffer-modified-p t)
+     ,@body))
+
+(ert-deftest zellij-send-test-last-screen ()
+  "画面の代わりに下書きを返さない。"
+  (with-temp-buffer
+    (insert "画面")
+    (set-buffer-modified-p nil)
+    ;; subscribe を受けていなくても、画面を映している黒板ならその中身
+    (should (equal (zellij-send--last-screen) "画面"))
+    (set-buffer-modified-p t)
+    (should-not (zellij-send--last-screen))
+    (setq-local zellij-send--last-content "受け取った画面")
+    (should (equal (zellij-send--last-screen) "受け取った画面"))))
+
+(ert-deftest zellij-send-test-answer-question-reads-pane ()
+  "下書きがある黒板でも C-c C-q はペインの画面の質問に答える。"
+  (let (asked dumped)
+    (zellij-send-test--with-draft-board nil
+      (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &optional _full)
+                   (setq dumped t)
+                   (funcall cb zellij-send-test--askq-single)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args)))
+                ((symbol-function 'zellij-send--askq-answer)
+                 (lambda (_buf q) (setq asked q))))
+        (zellij-send-answer-question)
+        (should dumped)
+        (should (equal (plist-get asked :question) "好きな色はどれですか？"))
+        ;; 下書きはそのまま
+        (should (string-prefix-p "書きかけの下書き" (buffer-string)))))))
+
+(ert-deftest zellij-send-test-askq-continue-reads-pane ()
+  "回答の続きもペインから取り直す。下書きを画面と読んで終わったと思わない。"
+  (let (asked)
+    (zellij-send-test--with-draft-board nil
+      (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &optional _full)
+                   (funcall cb zellij-send-test--askq-review)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args)))
+                ((symbol-function 'zellij-send--askq-answer)
+                 (lambda (_buf q) (setq asked q))))
+        (zellij-send--askq-continue (current-buffer))
+        (should (eq (plist-get asked :kind) 'review))))))
+
+(ert-deftest zellij-send-test-askq-focus-reads-pane ()
+  "カーソル合わせはペインの画面で現在位置を読む。"
+  (let (keys result)
+    (zellij-send-test--with-draft-board nil
+      (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &optional _full)
+                   ;; 1 回目は 1 番、送った後は 4 番にカーソルがある画面
+                   (funcall cb (if keys
+                                   (replace-regexp-in-string
+                                    "❯ 1\\." "  1."
+                                    (replace-regexp-in-string
+                                     "  4\\. Type" "❯ 4. Type"
+                                     zellij-send-test--askq-single))
+                                 zellij-send-test--askq-single))))
+                ((symbol-function 'zellij-send--askq-send-keys)
+                 (lambda (_buf seq cb) (push seq keys) (funcall cb t)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args) (apply fn args))))
+        (zellij-send--askq-focus (current-buffer) 4
+                                 (lambda (ok) (setq result ok)))
+        (should (eq result t))
+        ;; 下へ 1 回送ってから、画面で 4 番に着いたことを確かめた
+        (should (equal keys '(((27 91 66)))))))))
+
+(ert-deftest zellij-send-test-dashboard-reads-last-screen ()
+  "ダッシュボードの状態と状況列は、下書きではなく受け取った画面に追随する。"
+  (let ((screen "⏺ 作業しています\n✳ Frobnicating… (12s · esc to interrupt)\n❯ "))
+    (zellij-send-test--with-draft-board screen
+      (let ((buf (current-buffer)))
+        (should (zellij-send-dashboard--spinner-p buf))
+        ;; 下書きの `> 1.' は選択肢に見えるが、画面には選択肢が無い
+        (should-not (zellij-send-dashboard--prompt-p buf))
+        (should (string-prefix-p "✳ Frobnicating"
+                                 (zellij-send-dashboard--tail-line buf)))
+        ;; 画面が選択肢待ちに変われば、下書きがあってもそれに追随する
+        (setq-local zellij-send--last-content zellij-send-test--askq-single)
+        (should (zellij-send-dashboard--prompt-p buf))))))
 
 (provide 'zellij-send-test)
 

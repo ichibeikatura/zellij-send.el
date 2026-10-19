@@ -21,7 +21,9 @@ description: >-
 - **依存は一方向**: dashboard → 本体。本体は `zellij-send-dashboard` を require せず、
   メニューの `d`（`zellij-send-open-dashboard`）が `fboundp` / `require ... noerror` で
   遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
-- **状態は本体に持たせない**: 各セッションバッファの内容から毎回算出する
+- **状態は本体に持たせない**: 各セッションが最後に受け取った画面
+  （`zellij-send--last-screen`）から毎回算出する。黒板の中身（`buffer-string`）は
+  下書き・クリア・transcript 表示で画面と食い違うので読まない
   （本体の状態フラグはモードライン撤去時に削除済み）
   - 作業中: スピナー行（`zellij-send-dashboard-working-regexp`、既定
     `esc to interrupt`）がある **か**、画面が
@@ -32,7 +34,7 @@ description: >-
   - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
     ウィンドウに表示された時点で解除
   - 選択待ち: `zellij-send--detect-prompt`
-- **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（バッファ内容と
+- **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（受け取った画面と
   `zellij-send--last-change-time`）を読むだけ
   （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）
 
