@@ -1869,22 +1869,63 @@ GEMINI.md を置いた使い捨てディレクトリで agy を起動し、そ�
   :type 'string
   :group 'zellij-send)
 
+(defcustom zellij-send-progress-log-file ".zellij-send/worklog-%Y-%m-%d.md"
+  "`zellij-send-save-progress' に `\\[universal-argument]' を付けたときに
+作業ログを書かせるファイル（セッション作業ディレクトリからの相対）。
+`format-time-string' の書式で、依頼を送った時点の日付が入る。
+
+作業ログを CLAUDE.md 等（`zellij-send-progress-file-alist'）に書かせない
+ための受け皿。あちらはエージェントが毎回読み込むので、その場の経過を
+積むほどコンテキストを食う。日付で分けたファイルなら、要らなくなった
+日の分をまとめて捨てられる。"
+  :type 'string
+  :group 'zellij-send)
+
 (defun zellij-send--progress-file ()
   "このバッファのエージェントに作業内容を書かせるファイル名を返す。"
   (or (alist-get (zellij-send--buffer-command)
                  zellij-send-progress-file-alist nil nil #'equal)
       zellij-send-progress-file-default))
 
-(defun zellij-send-save-progress ()
-  "現在の作業内容を記録するよう依頼する。
-書かせる先はエージェントごとに変える（`zellij-send-progress-file-alist'）。"
-  (interactive)
+(defun zellij-send--progress-request (file &optional log-file)
+  "`zellij-send-save-progress' がエージェントに送る依頼文を返す。
+FILE は恒久的な決定事項を置くファイル（CLAUDE.md など）。LOG-FILE が
+非 nil なら、作業ログをそちらに書かせる依頼にする。
+
+FILE には**追記させない**。追記だと回を重ねるごとに単調に伸び、
+エージェントが毎回読み込むコンテキストを食い潰す（この機能を使うほど
+CLAUDE.md が肥大する構造だった）。更新として、重複は書き直させ、
+古い記述は消させ、その場の作業ログは書かせない。"
+  (if log-file
+      (format (concat "ここまでの作業ログ（やったこと・途中の判断・未解決の点）を "
+                      "%s に書いて。ファイルが無ければ作り、あれば末尾に足す。"
+                      "%s には書かないで。")
+              log-file file)
+    (format (concat "ここまでの作業で決まった恒久的なこと（動かせない制約・"
+                    "設計判断とその理由・禁止事項）だけを %s に反映して。"
+                    "追記ではなく更新として扱うこと: 既存の記述と重なる内容は"
+                    "その箇所を書き直してまとめ、古くなった記述は消す。"
+                    "作業の経過・やったことの時系列・TODO の消化記録は書かない。")
+            file)))
+
+(defun zellij-send-save-progress (&optional log)
+  "決定事項を記録するよう依頼する。
+書かせる先はエージェントごとに変える（`zellij-send-progress-file-alist'）。
+依頼は**追記ではなく更新**——恒久的な決定事項だけを反映させ、重複は
+まとめ、古い記述は消させる（`zellij-send--progress-request'）。
+
+LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
+`zellij-send-progress-log-file'（日付付き）に書かせる。CLAUDE.md 等には
+書かせない。"
+  (interactive "P")
   (zellij-send--assert-session)
-  (let ((file (zellij-send--progress-file)))
+  (let* ((file (zellij-send--progress-file))
+         (log-file (and log (format-time-string zellij-send-progress-log-file)))
+         (target (or log-file file)))
     (zellij-send--send zellij-send--session
-                       (format "ここまでの作業内容と決定事項を %s に追記して" file)
+                       (zellij-send--progress-request file log-file)
                        (lambda (ok)
-                         (when ok (message "%s への記録を依頼しました" file))))))
+                         (when ok (message "%s への記録を依頼しました" target))))))
 
 ;;; スラッシュコマンド（Claude Code の /コマンド全部）
 

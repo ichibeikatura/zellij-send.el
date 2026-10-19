@@ -713,6 +713,20 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
       (should (equal (zellij-send--progress-file)
                      zellij-send-progress-file-default)))))
 
+(ert-deftest zellij-send-test-progress-request ()
+  "記録の依頼は追記ではなく更新。作業ログは別ファイルへ逃がす。"
+  (let ((req (zellij-send--progress-request "CLAUDE.md")))
+    (should (string-match-p "CLAUDE\\.md" req))
+    (should (string-match-p "追記ではなく更新" req))
+    (should (string-match-p "古くなった記述は消す" req))
+    (should (string-match-p "時系列" req))
+    ;; 「CLAUDE.md に追記して」という旧依頼文に戻っていないこと
+    (should-not (string-match-p "CLAUDE\\.md に追記" req)))
+  (let ((req (zellij-send--progress-request
+              "CLAUDE.md" ".zellij-send/worklog-2026-10-19.md")))
+    (should (string-match-p "worklog-2026-10-19\\.md に書いて" req))
+    (should (string-match-p "CLAUDE\\.md には書かないで" req))))
+
 (ert-deftest zellij-send-test-claude-p ()
   "Claude Code のときだけ画面解析・transcript の経路に入る。
 判定はバッファローカルの `zellij-send--command' が優先で、
