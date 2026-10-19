@@ -60,7 +60,7 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 - **日付入りの実測コメントを消さない・書き換えない。** 変えるときは新しい実測を日付付きで追記する
 - **画面の形に新しい仮定を置かない。** 置くなら実機で確かめ、日付と版をコメントに残し、
   画面は `test/fixtures/capture.sh` で fixture にしてテストに足す
-- 本体（`zellij-send.el`）からダッシュボードを require しない・シンボルを参照しない。
+- 本体（`zellij-send*.el`）からダッシュボードを require しない・シンボルを参照しない。
   依存は dashboard → 本体の一方向（メニュー `d` は `require ... noerror` で遅延ロード）。
   ダッシュボードは本体の公開 API（「セッションの状態と操作（公開 API）」節）だけを使い、
   2 ハイフンの名前を参照しない
@@ -80,7 +80,7 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 `zellij subscribe` は `--pane-id` 必須、viewport は毎回フル、行末はペイン幅ぶん空白で
 パディングされる。**存在しないセッションでも終了コード 0 で何も流さない**、
 **セッションが消えても終了しない**——成否は初回イベントの有無で見て、後始末は
-`kill-buffer-hook` で行う。詳細は `zellij-send.el` の「自動受信（zellij subscribe）」節。
+`kill-buffer-hook` で行う。詳細は `zellij-send-core.el` の「自動受信（zellij subscribe）」節。
 
 ### 行末の空白の削り方
 受信した行を `string-trim` / `[ \t]+$` で削らない（2 乗時間で Emacs が止まる）。
@@ -101,6 +101,13 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 長文の送信は `[Pasted text #1 +N lines]` に畳まれる。過去の会話は transcript（JSONL）から読む。
 
 ## 設計判断（理由つき）
+
+- **ファイルは 5 つに分け、依存は上から下の一方向**（`zellij-send.el` → `-ui` → `-claude` →
+  `-core` → `-parse`）。逆向きの require・自分自身への `declare-function`・値の無い
+  `defvar` を置かない。下の層が上の層を呼ぶ必要があるときは差し込み口を作る
+  （受信した画面の描画は `zellij-send--display-function`、ペインに繋がった時の処理は
+  `zellij-send--pane-connected-hook`）。`-parse` は文字列を受けて構造を返す関数だけ。
+  公開 API は `-ui` にあるので、ダッシュボードは `zellij-send` を require する
 
 - **エージェント 1 体 = zellij セッション 1 つ。** 名前はディレクトリ名 + 2 桁連番
   （`myproj00`）。バッファ・履歴・subscribe・終了がセッション単位のまま効く
@@ -132,8 +139,8 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 
 | 話題 | 場所 |
 |---|---|
-| AskUserQuestion の画面と操作 | `zellij-send.el`「AskUserQuestion（選択肢プロンプト）への回答」節の冒頭 |
-| スラッシュコマンドの補完メニュー・引数 | `zellij-send.el`「スラッシュコマンド」節の冒頭と「引数を読む」 |
+| AskUserQuestion の画面と操作 | `zellij-send-claude.el`「AskUserQuestion（選択肢プロンプト）への回答」節の冒頭 |
+| スラッシュコマンドの補完メニュー・引数 | `zellij-send-claude.el`「スラッシュコマンド」節の冒頭と「引数を読む」 |
 | 黒板の桁揃え・記号の字形 | `zellij-send-grid-align` ほか `--grid-*` の docstring |
 | 末尾を追う・選択中の保留 | `zellij-send--update-buffer` の前のコメント |
 | CLI ごとの差（記号・数字キー・`/compact`・指示ファイル） | `zellij-send-agents` の定義の前のコメント |

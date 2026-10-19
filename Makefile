@@ -3,7 +3,8 @@
 
 EMACS ?= emacs
 BATCH  = $(EMACS) -Q --batch -L .
-SRCS   = zellij-send.el zellij-send-dashboard.el
+SRCS   = zellij-send-parse.el zellij-send-core.el zellij-send-claude.el \
+         zellij-send-ui.el zellij-send.el zellij-send-dashboard.el
 TESTS  = test/zellij-send-test.el test/zellij-send-parse-test.el
 
 .PHONY: check test bench compile checkdoc clean

@@ -318,7 +318,7 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 | `zellij-send-dashboard-scan-interval`   | セッション検出の間隔・秒（既定 15。0 で自動検出なし） |
 | `zellij-send-dashboard-prune-gone`      | 消えたセッションの行を消す（既定 `t`）                |
 
-`zellij-send.el` 本体はダッシュボードに依存しません。
+`zellij-send.el` 本体（とそれが読み込む `zellij-send-*.el`）はダッシュボードに依存しません。
 
 ### 使用状況（`/usage`）を表示する
 

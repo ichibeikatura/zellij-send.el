@@ -317,7 +317,7 @@ The dashboard does not connect sessions to [Remote Control](https://claude.ai/co
 | `zellij-send-dashboard-scan-interval`   | Seconds between session scans (default 15; 0 disables)      |
 | `zellij-send-dashboard-prune-gone`      | Drop rows for sessions that ended (default `t`)             |
 
-`zellij-send.el` itself does not depend on the dashboard.
+`zellij-send.el` (and the `zellij-send-*.el` files it loads) does not depend on the dashboard.
 
 ### Usage limits (`/usage`) in the dashboard
 

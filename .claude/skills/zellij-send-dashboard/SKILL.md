@@ -22,7 +22,7 @@ description: >-
   遅延ロードする。本体からダッシュボードのシンボルを参照しないこと
 - **本体の内部には触らない**: ダッシュボードが使うのは本体の公開 API
   （`zellij-send-sessions` / `zellij-send-session-state` / `zellij-send-session-screen` /
-  `zellij-send-choice-to-session` など。本体の「セッションの状態と操作（公開 API）」節）
+  `zellij-send-choice-to-session` など。`zellij-send-ui.el` の「セッションの状態と操作（公開 API）」節）
   だけ。2 ハイフンの名前を参照しない
 - **作業中・選択待ち・待機は本体が導く**（`zellij-send-session-state` の `:status`）。
   各セッションが最後に受け取った画面（`zellij-send-session-screen`）から毎回算出する。
