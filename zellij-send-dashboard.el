@@ -302,17 +302,30 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
   (cl-some (lambda (re) (string-match-p re line))
            zellij-send-dashboard-noise-regexps))
 
+(defun zellij-send-dashboard--line-start (string end)
+  "STRING の位置 END より前で最後の改行の次の位置を返す。改行が無ければ 0。"
+  (let ((i (1- end)))
+    (while (and (>= i 0) (/= (aref string i) ?\n))
+      (setq i (1- i)))
+    (1+ i)))
+
 (defun zellij-send-dashboard--tail-line (buf)
   "BUF の画面末尾から、意味のありそうな行を 1 行拾う。
 読むのは黒板の中身ではなく受け取った画面（`zellij-send-dashboard--screen'）。"
-  ;; 画面は末尾の改行を落として入るので、最終行から読む。下から 40 行まで
-  (let ((lines (last (split-string (zellij-send-dashboard--screen buf) "\n") 40))
-        (line nil))
-    (dolist (l (nreverse lines))
-      (unless line
-        (let ((s (string-trim l)))
-          (unless (zellij-send-dashboard--noise-p s)
-            (setq line s)))))
+  ;; 画面は末尾の改行を落として入るので、最終行から読む。下から 40 行まで。
+  ;; 3 秒ごとにセッションの数だけ走るので、500 行の画面を毎回全部
+  ;; `split-string' せず、後ろから 1 行ずつ切り出す
+  (let* ((screen (zellij-send-dashboard--screen buf))
+         (end (length screen))
+         (count 0)
+         (line nil))
+    (while (and (null line) (< count 40) (>= end 0))
+      (let* ((start (zellij-send-dashboard--line-start screen end))
+             (s (string-trim (substring screen start end))))
+        (unless (zellij-send-dashboard--noise-p s)
+          (setq line s))
+        (setq end (1- start)
+              count (1+ count))))
     (truncate-string-to-width (or line "")
                               zellij-send-dashboard-tail-width nil nil "…")))
 
@@ -377,20 +390,29 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
   ["" "▏" "▎" "▍" "▌" "▋" "▊" "▉"]
   "バー末尾に使う 1/8 刻みの部分ブロック。")
 
+(defvar zellij-send-dashboard--usage-cache nil
+  "最後に読んだ使用状況 JSON。(FILE MTIME DATA) の形。")
+
 (defun zellij-send-dashboard--read-usage ()
-  "使用状況 JSON を読み、(DATA . MTIME) を返す。読めなければ nil。"
+  "使用状況 JSON を読み、(DATA . MTIME) を返す。読めなければ nil。
+再描画（3 秒ごと）のたびに parse しないよう、mtime が変わったときだけ読み直す。"
   (let ((file zellij-send-dashboard-usage-file))
     (when (and file (file-readable-p file))
       (with-demoted-errors "zellij-send-dashboard: usage 読み込み失敗 %S"
         (let ((mtime (file-attribute-modification-time
-                      (file-attributes file))))
-          (with-temp-buffer
-            (insert-file-contents file)
-            (goto-char (point-min))
-            (cons (json-parse-buffer :object-type 'alist
-                                     :null-object nil
-                                     :false-object nil)
-                  mtime)))))))
+                      (file-attributes file)))
+              (cache zellij-send-dashboard--usage-cache))
+          (unless (and (equal (nth 0 cache) file)
+                       (equal (nth 1 cache) mtime))
+            (setq zellij-send-dashboard--usage-cache
+                  (list file mtime
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (goto-char (point-min))
+                          (json-parse-buffer :object-type 'alist
+                                             :null-object nil
+                                             :false-object nil)))))
+          (cons (nth 2 zellij-send-dashboard--usage-cache) mtime))))))
 
 (defun zellij-send-dashboard--usage-face (pct)
   "PCT に応じたバーの face を返す。"
@@ -840,6 +862,8 @@ COMMAND はキーマップとの食い違いを検査するために持つ
               (message "セッション %s は終了していますが、編集中なのでバッファを残します"
                        session)
             (kill-buffer buf)
+            ;; 同じ名前で作り直したセッションに前の送信履歴を引き継がない
+            (zellij-send-forget-session session)
             (setq killed (1+ killed))))))
     killed))
 

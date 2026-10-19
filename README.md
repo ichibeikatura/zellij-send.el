@@ -162,7 +162,7 @@ To keep a log of the session itself, use `C-u s`: it goes to `zellij-send-progre
 
 ### Adding agents (`+`)
 
-Starts another agent in the **same directory, with the same command** as the current buffer, under the lowest free counter (`myproj00` → `myproj01`). `C-u C-c C-a +` lets you pick a different command. One zellij session per agent, so sending, live updates and quitting work per buffer, and the dashboard lists each on its own row.
+Starts another agent in the **same directory, with the same command** as the current buffer, under the lowest free counter (`myproj00` → `myproj01`). `C-c C-a C-u +` (press `C-u` after opening the menu) lets you pick a different command. One zellij session per agent, so sending, live updates and quitting work per buffer, and the dashboard lists each on its own row.
 
 ### Multiple CLIs (Claude Code / Codex / …)
 

@@ -340,10 +340,12 @@ nil の場合は focused pane に送る（attach クライアントが必要）�
 (defvar-local zellij-send--reply-window-config nil
   "返信バッファを開く前のウィンドウ構成。")
 
-(defmacro zellij-send--assert-session ()
-  "カレントバッファが zellij-send セッションに紐付いていなければエラーを発する。"
-  '(unless zellij-send--session
-     (user-error "zellij-send バッファ外では使えません")))
+(defun zellij-send--assert-session ()
+  "カレントバッファが zellij-send セッションに紐付いていなければ `user-error' を投げる。
+マクロにしないのは、文面を直したときに呼び出し元すべての再コンパイルが要らない
+ようにするため（elpaca の古いビルドが残ると古い文面が出続ける）。"
+  (unless zellij-send--session
+    (user-error "zellij-send バッファ外では使えません")))
 
 ;;; セッションのコマンド（多 CLI 対応）
 
@@ -1448,6 +1450,14 @@ pane-id が取れれば attach クライアント無しでも送信できる。
 (defun zellij-send-history (session)
   "SESSION の送信履歴（新しい順）を返す。"
   (gethash session zellij-send--history-table))
+
+(defun zellij-send-forget-session (session)
+  "zellij から消えた SESSION の送信履歴を捨てる。
+セッション名は空いている最小の連番を使い回す（`zellij-send--numbered-session-name'）
+ので、残しておくと同じ名前で作り直したセッションが前の履歴を引き継ぐ。
+スラッシュコマンドの一覧のキャッシュはディレクトリ単位でセッションの生死とは
+関係ないので、ここでは消さない。"
+  (remhash session zellij-send--history-table))
 
 (defun zellij-send--history-add (session text)
   "SESSION の履歴に TEXT を追加する。直前と同じ内容なら追加しない。"
@@ -3301,6 +3311,7 @@ REASON はユーザーに理由を伝えるための文字列。
          (progn
            (when (buffer-live-p main-buf)
              (kill-buffer main-buf))
+           (zellij-send-forget-session session)
            (message "セッション [%s] を削除しました（%s）" session reason))
        (message "セッション [%s] の削除に失敗しました (exit: %d)" session exit)))))
 
@@ -4394,6 +4405,22 @@ claude 以外を動かしているセッションを見分けるためだけの�
   (add-hook 'window-selection-change-functions
             #'zellij-send--pending-schedule nil t))
 
+(defvar zellij-send--markdown-late-warned nil
+  "markdown-mode が後から読み込まれた旨をもう知らせたなら non-nil。")
+
+(defun zellij-send--markdown-fallback-check ()
+  "`text-mode' で定義した黒板に、markdown-mode が後から使えるようになったことを示す。
+`zellij-send-mode' の親はこのファイルを読み込んだ時点で決まる。elpaca などで
+非同期に入れていると、markdown-mode が入っているのに `text-mode' 派生になることが
+あり、再起動すると直るので原因が分からない。モードラインの名前に印を付け、
+最初の 1 回だけ理由を知らせる。"
+  (when (and (not (derived-mode-p 'markdown-mode))
+             (fboundp 'markdown-mode))
+    (setq mode-name "ZellijSend[text]")
+    (unless zellij-send--markdown-late-warned
+      (setq zellij-send--markdown-late-warned t)
+      (message "zellij-send は markdown-mode より先に読み込まれたため text-mode で動いています（Emacs を再起動するか、markdown-mode を先に読み込んでください）"))))
+
 (if (require 'markdown-mode nil t)
     (define-derived-mode zellij-send-mode markdown-mode "ZellijSend"
       "zellij セッションにテキストを送るためのモード。
@@ -4401,8 +4428,11 @@ claude 以外を動かしているセッションを見分けるためだけの�
       (zellij-send--mode-setup))
   (define-derived-mode zellij-send-mode text-mode "ZellijSend"
     "zellij セッションにテキストを送るためのモード。
+markdown-mode を読めなかったときの代わり。後から読めるようになったら
+`zellij-send--markdown-fallback-check' が印を出す。
 \\{zellij-send-mode-map}"
-    (zellij-send--mode-setup)))
+    (zellij-send--mode-setup)
+    (zellij-send--markdown-fallback-check)))
 
 ;;; Stop フックハンドラ
 

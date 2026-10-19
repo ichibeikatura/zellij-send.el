@@ -1921,6 +1921,84 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                                :status)
                     'prompt))))))
 
+;;; 単独の小さい修正（2026-10-19）
+
+(ert-deftest zellij-send-test-assert-session ()
+  "黒板でなければ user-error。黒板なら何もしない。"
+  (with-temp-buffer
+    (should-error (zellij-send--assert-session) :type 'user-error)
+    (setq-local zellij-send--session "proj00")
+    (should-not (zellij-send--assert-session))))
+
+(ert-deftest zellij-send-test-forget-session ()
+  "消したセッションの送信履歴を捨て、同じ名前で作り直しても引き継がない。"
+  (let ((zellij-send--history-table (make-hash-table :test #'equal)))
+    (zellij-send--history-add "proj00" "前のセッションの送信")
+    (zellij-send--history-add "proj01" "別のセッション")
+    (cl-letf (((symbol-function 'zellij-send--zellij-async)
+               (lambda (_args cb) (funcall cb 0))))
+      (zellij-send--force-delete-session "proj00" nil "テスト"))
+    (should-not (zellij-send-history "proj00"))
+    (should (equal (zellij-send-history "proj01") '("別のセッション")))
+    ;; 削除に失敗したら残す
+    (zellij-send--history-add "proj01" "もう一つ")
+    (cl-letf (((symbol-function 'zellij-send--zellij-async)
+               (lambda (_args cb) (funcall cb 1))))
+      (zellij-send--force-delete-session "proj01" nil "テスト"))
+    (should (zellij-send-history "proj01"))))
+
+(ert-deftest zellij-send-test-dashboard-tail-line ()
+  "後ろから読んでも、split-string で全行を見ていた頃と同じ行を拾う。"
+  (let ((zellij-send-dashboard-tail-width 40))
+    (dolist (case `(("" . "")
+                    ("一行だけ" . "一行だけ")
+                    ("本文\n" . "本文")
+                    ("⏺ 本文\n✳ Concocting… (7s · ↓ 92 tokens)\n\n────\n❯ \n────\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+                     . "✳ Concocting… (7s · ↓ 92 tokens)")
+                    ;; 下から 40 行を超えた所は読まない
+                    (,(concat "遠すぎる行\n" (make-string 40 ?\n)) . "")))
+      (with-temp-buffer
+        (setq-local zellij-send--last-content (car case))
+        (should (equal (zellij-send-dashboard--tail-line (current-buffer))
+                       (cdr case)))))))
+
+(ert-deftest zellij-send-test-dashboard-usage-cache ()
+  "使用状況 JSON は mtime が変わったときだけ読み直す。"
+  (let* ((file (make-temp-file "zjs-usage" nil ".json"))
+         (zellij-send-dashboard-usage-file file)
+         (zellij-send-dashboard--usage-cache nil)
+         (parsed 0)
+         (orig (symbol-function 'json-parse-buffer)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'json-parse-buffer)
+                   (lambda (&rest args) (setq parsed (1+ parsed)) (apply orig args))))
+          (with-temp-file file (insert "{\"a\": 1}"))
+          (set-file-times file (seconds-to-time 1000000))
+          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 1))))
+          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 1))))
+          (should (= parsed 1))
+          (with-temp-file file (insert "{\"a\": 2}"))
+          (set-file-times file (seconds-to-time 2000000))
+          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 2))))
+          (should (= parsed 2)))
+      (delete-file file))))
+
+(ert-deftest zellij-send-test-markdown-fallback-check ()
+  "text-mode 派生の黒板で markdown-mode が後から使えるなら、印を付けて 1 回だけ知らせる。"
+  (let ((zellij-send--markdown-late-warned nil)
+        (messages 0))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) (setq messages (1+ messages)))))
+      (with-temp-buffer
+        (text-mode)
+        (if (fboundp 'markdown-mode)
+            (progn (zellij-send--markdown-fallback-check)
+                   (should (equal mode-name "ZellijSend[text]")))
+          (cl-letf (((symbol-function 'markdown-mode) #'ignore))
+            (zellij-send--markdown-fallback-check)
+            (should (equal mode-name "ZellijSend[text]"))
+            (zellij-send--markdown-fallback-check))))
+      (should (= messages 1)))))
+
 ;;; スピナーの照合
 
 (ert-deftest zellij-send-test-dashboard-spinner-case ()
