@@ -2042,6 +2042,9 @@ DONE-MESSAGE は送信に成功したときのメッセージ。
 （\\[zellij-send-keys-mode]）で直接操作する。"
   (interactive)
   (zellij-send--assert-session)
+  ;; 中断では Stop フックが来ないので、フックの「作業中」を捨てて
+  ;; 画面解析に戻す（`zellij-send--on-claude-hook' の前の注記）
+  (zellij-send--hook-clear)
   (let ((session zellij-send--session))
     (zellij-send--send-keys
      session '(27)
@@ -4335,6 +4338,84 @@ claude 以外を動かしているセッションを見分けるためだけの�
                         (not zellij-send--user-cleared)
                         (not (buffer-modified-p)))
                (zellij-send--update-buffer content)))))))))
+
+;;; 状態フック（Claude Code の hooks から状態を受け取る）
+
+;; 画面の形に頼らずに「作業中」「選択待ち」を知るための経路。README の
+;; state-zellij-send.sh が、Claude Code の hooks の JSON を受けて
+;; `zellij-send--on-claude-hook' を emacsclient で呼ぶ。フックは任意で、
+;; 未設定なら `zellij-send--hook-state' は nil のままでダッシュボードは
+;; 画面解析だけで動く。
+;;
+;; 黒板の特定には、フックのプロセスが zellij のペインから継承する
+;; ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID を使う（2026-10-19、zellij 0.45.1 の
+;; ペインで動く Claude Code の環境に両方あることを確認。ZELLIJ_PANE_ID は
+;; 数字だけで、`terminal_N' の N に当たる）。cwd では同じディレクトリの
+;; エージェントを見分けられない。
+;;
+;; フックのイベント（2026-10-19 に公式の hooks リファレンスで確認）:
+;; - UserPromptSubmit                       → 作業中
+;; - PreToolUse（AskUserQuestion）・PermissionRequest・
+;;   Notification（permission_prompt / elicitation_dialog）→ 選択待ち
+;; - PostToolUse / PostToolUseFailure       → 作業中（選択が済んだ）
+;; - Stop / StopFailure・Notification（idle_prompt）→ 待機
+;; **Stop はユーザーが Esc で中断したときには来ない**（リファレンスに明記）。
+;; 作業中のまま残りうるので、使う側（ダッシュボード）は画面が止まって
+;; しばらく経ったら信用しない。こちらの `zellij-send-interrupt' は消す。
+
+(defvar-local zellij-send--hook-state nil
+  "フックから受け取ったこのセッションの状態。nil なら受け取っていない。
+`working'（作業中）・`waiting'（選択・許可待ち）・`idle'（ターン終了）のどれか。")
+
+(defvar-local zellij-send--hook-state-time nil
+  "`zellij-send--hook-state' を受け取った時刻（`float-time'）。")
+
+(defun zellij-send--hook-event-state (event detail)
+  "フックの EVENT（hook_event_name）と DETAIL から状態を返す。対象外なら nil。
+DETAIL は PreToolUse などでは tool_name、Notification では notification_type。"
+  (pcase event
+    ("UserPromptSubmit" 'working)
+    ("PreToolUse" (and (equal detail "AskUserQuestion") 'waiting))
+    ("PermissionRequest" 'waiting)
+    ((or "PostToolUse" "PostToolUseFailure") 'working)
+    ((or "Stop" "StopFailure") 'idle)
+    ("Notification"
+     (pcase detail
+       ((or "permission_prompt" "elicitation_dialog") 'waiting)
+       ("idle_prompt" 'idle)))))
+
+(defun zellij-send--hook-buffer (session pane)
+  "SESSION（とペイン番号 PANE）に対応する黒板バッファを返す。無ければ nil。
+黒板の pane-id が分かっていて PANE と食い違うなら、同じセッションの
+別のペイン（シェルなど）からのフックなので対象にしない。"
+  (seq-find
+   (lambda (buf)
+     (and (eq (buffer-local-value 'major-mode buf) 'zellij-send-mode)
+          (equal (buffer-local-value 'zellij-send--session buf) session)
+          (let ((id (buffer-local-value 'zellij-send--pane-id buf)))
+            (or (null id) (null pane) (string-empty-p pane)
+                (equal id (concat "terminal_" pane))))))
+   (buffer-list)))
+
+(defun zellij-send--hook-clear ()
+  "カレントの黒板のフック状態を捨てる（画面解析に戻す）。"
+  (setq zellij-send--hook-state nil
+        zellij-send--hook-state-time nil))
+
+;;;###autoload
+(defun zellij-send--on-claude-hook (session pane event &optional detail)
+  "Claude Code のフックから状態を受け取る（state-zellij-send.sh が呼ぶ）。
+SESSION と PANE はフックが継承した ZELLIJ_SESSION_NAME / ZELLIJ_PANE_ID、
+EVENT は hook_event_name、DETAIL は tool_name か notification_type。
+対応する黒板の `zellij-send--hook-state' を立てるだけで、zellij は呼ばない。
+emacsclient から呼ばれるので、すぐに返る。"
+  (let ((state (zellij-send--hook-event-state event detail))
+        (buf (zellij-send--hook-buffer session pane)))
+    (when (and state buf)
+      (with-current-buffer buf
+        (setq zellij-send--hook-state state
+              zellij-send--hook-state-time (float-time))))
+    nil))
 
 ;;; エントリポイント
 

@@ -275,7 +275,7 @@ While on, the arrow keys, `RET`, `SPC`, `TAB`, `ESC`, `DEL` and ordinary charact
 
 Opening the dashboard connects, without asking, to every running zellij session that has no buffer yet (`zellij-send-dashboard-auto-connect`). It rescans every `zellij-send-dashboard-scan-interval` seconds (default 15), picking up sessions started from a terminal and removing the blackboards of sessions that ended (buffers you are editing are kept).
 
-A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6). When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
+A session counts as **working** when a spinner line is present **or** the screen changed within the last `zellij-send-dashboard-active-window` seconds (default 6); with the [state hook](#3-state-hook-optional-makes-the-dashboards-state-reliable) installed, what Claude Code reports takes precedence. When that stops it becomes **done**, which clears once you look at that buffer. Working out the state never calls `zellij`.
 
 `Q` asks for confirmation, sends `/exit`, waits for the agent to exit and deletes the zellij session; it force-deletes if the agent has not exited within `zellij-send-quit-timeout` seconds (default 10).
 
@@ -514,6 +514,68 @@ exit 0
   }
 }
 ```
+
+### 3. State hook (optional; makes the dashboard's state reliable)
+
+Without hooks the dashboard infers **working** and **waiting** from the screen. With the hook below it prefers what Claude Code reports — a prompt was submitted, a question or permission is pending, the turn ended — so a session streaming plain prose stays **working**, and a change in the screen's layout cannot break the state. The blackboard is identified by `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID`, which the hook inherits from zellij.
+
+`~/.claude/hooks/state-zellij-send.sh` (requires `python3`):
+
+```sh
+#!/bin/sh
+# Do nothing for a Claude Code that is not running in a zellij pane
+[ -n "$ZELLIJ_SESSION_NAME" ] || exit 0
+
+# The hook JSON is passed via an env var because the heredoc occupies stdin
+ZJS_HOOK_INPUT=$(cat)
+export ZJS_HOOK_INPUT
+
+FORM=$(/usr/bin/python3 - <<'PY' 2>/dev/null
+import json, os, re
+
+d = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
+def word(s):
+    return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))
+detail = d.get("tool_name") or d.get("notification_type") or ""
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s")' % (
+    word(os.environ.get("ZELLIJ_SESSION_NAME")),
+    word(os.environ.get("ZELLIJ_PANE_ID")),
+    word(d.get("hook_event_name")), word(detail)))
+PY
+)
+[ -n "$FORM" ] || exit 0
+
+# Run emacsclient in the background with a 10s watchdog so a busy/frozen
+# Emacs never blocks the hook
+(
+  emacsclient -e "$FORM" >/dev/null 2>&1 &
+  EC_PID=$!
+  sleep 10
+  kill "$EC_PID" 2>/dev/null
+) >/dev/null 2>&1 &
+exit 0
+```
+
+`chmod +x ~/.claude/hooks/state-zellij-send.sh`, then register it under `hooks` in `~/.claude/settings.json` (next to stop-zellij-send.sh for Stop):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit":   [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PreToolUse":         [ { "matcher": "AskUserQuestion",
+                              "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PermissionRequest":  [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PostToolUse":        [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PostToolUseFailure": [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "Notification":       [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "Stop":               [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/stop-zellij-send.sh" },
+                                         { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "StopFailure":        [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ]
+  }
+}
+```
+
+An interrupt with Esc fires no Stop hook, so once the screen has been still for `zellij-send-dashboard-hook-stale` seconds (default 30) the dashboard goes back to reading the screen. Set `zellij-send-dashboard-use-hooks` to `nil` to ignore the hook.
 
 ## Troubleshooting
 

@@ -276,7 +276,7 @@ Claude Code が枠付きの質問（`❯ 1.` の選択肢・上部のタブ・�
 
 ダッシュボードを開くと、まだバッファの無い起動中の zellij セッションに何も尋ねずに接続します（`zellij-send-dashboard-auto-connect`）。以後も `zellij-send-dashboard-scan-interval` 秒ごと（既定 15 秒）にセッション一覧を見て、ターミナルで立ち上げたセッションを取り込み、終了したセッションの黒板を消します（編集中の黒板は残します）。
 
-「作業中」は、スピナー行がある**か**、画面が `zellij-send-dashboard-active-window` 秒以内（既定 6 秒）に変化した場合です。終わると「完了」になり、そのバッファを表示すると解除されます。状態の判定で zellij を追加で呼ぶことはありません。
+「作業中」は、スピナー行がある**か**、画面が `zellij-send-dashboard-active-window` 秒以内（既定 6 秒）に変化した場合です。[状態フック](#3-状態フック任意ダッシュボードの判定を確かにする)を入れていれば、Claude Code が知らせる状態を優先します。終わると「完了」になり、そのバッファを表示すると解除されます。状態の判定で zellij を追加で呼ぶことはありません。
 
 `Q` は確認のうえ `/exit` を送り、エージェントの終了を待ってから zellij セッションを削除します。`zellij-send-quit-timeout`（既定 10 秒）以内に終了しなければ強制削除します。
 
@@ -513,6 +513,68 @@ exit 0
   }
 }
 ```
+
+### 3. 状態フック（任意。ダッシュボードの判定を確かにする）
+
+ダッシュボードの「作業中」「選択待ち」は、フックが無ければ画面から推します。下のフックを入れると、Claude Code が知らせる状態（入力を受けた・質問や許可を待っている・ターンが終わった）を画面より優先します。本文を流している間も「作業中」のままになり、画面の形が変わっても判定が崩れません。黒板は、フックが zellij から受け継ぐ `ZELLIJ_SESSION_NAME` / `ZELLIJ_PANE_ID` で見分けます。
+
+`~/.claude/hooks/state-zellij-send.sh`（`python3` が必要）:
+
+```sh
+#!/bin/sh
+# zellij のペインの外で動いている Claude Code からは何もしない
+[ -n "$ZELLIJ_SESSION_NAME" ] || exit 0
+
+# ヒアドキュメントが stdin を占有するため、フックの JSON は環境変数で渡す
+ZJS_HOOK_INPUT=$(cat)
+export ZJS_HOOK_INPUT
+
+FORM=$(/usr/bin/python3 - <<'PY' 2>/dev/null
+import json, os, re
+
+d = json.loads(os.environ.get("ZJS_HOOK_INPUT") or "{}")
+def word(s):
+    return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))
+detail = d.get("tool_name") or d.get("notification_type") or ""
+print('(zellij-send--on-claude-hook "%s" "%s" "%s" "%s")' % (
+    word(os.environ.get("ZELLIJ_SESSION_NAME")),
+    word(os.environ.get("ZELLIJ_PANE_ID")),
+    word(d.get("hook_event_name")), word(detail)))
+PY
+)
+[ -n "$FORM" ] || exit 0
+
+# Emacs がビジー/フリーズしていてもフックをブロックしないよう、
+# emacsclient はバックグラウンド起動して 10 秒で打ち切る
+(
+  emacsclient -e "$FORM" >/dev/null 2>&1 &
+  EC_PID=$!
+  sleep 10
+  kill "$EC_PID" 2>/dev/null
+) >/dev/null 2>&1 &
+exit 0
+```
+
+`chmod +x ~/.claude/hooks/state-zellij-send.sh` のうえ、`~/.claude/settings.json` の `hooks` に登録します（Stop は上の stop-zellij-send.sh と並べる）:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit":   [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PreToolUse":         [ { "matcher": "AskUserQuestion",
+                              "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PermissionRequest":  [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PostToolUse":        [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "PostToolUseFailure": [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "Notification":       [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "Stop":               [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/stop-zellij-send.sh" },
+                                         { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ],
+    "StopFailure":        [ { "hooks": [ { "type": "command", "command": "~/.claude/hooks/state-zellij-send.sh" } ] } ]
+  }
+}
+```
+
+Esc で中断したときは Stop フックが来ないので、画面が `zellij-send-dashboard-hook-stale` 秒（既定 30）止まったら画面の判定に戻します。フックを使わないなら `zellij-send-dashboard-use-hooks` を `nil` に。
 
 ## トラブルシューティング
 

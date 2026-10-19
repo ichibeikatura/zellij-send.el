@@ -34,6 +34,11 @@ description: >-
   - 完了: 作業中だったセッションからスピナーが消えた瞬間。そのバッファが
     ウィンドウに表示された時点で解除
   - 選択待ち: `zellij-send--detect-prompt`
+  - **フック（README の state-zellij-send.sh）が知らせた状態があれば画面より優先**
+    （`zellij-send--hook-state` → `zellij-send-dashboard--hook-status`）。
+    Esc の中断では Stop フックが来ないので、作業中は画面が
+    `zellij-send-dashboard-hook-stale` 秒止まったら、選択待ちはダイアログを描いた後に
+    画面が変わったら捨てて画面解析に戻す。フック未設定なら画面解析だけ
 - **zellij を追加で呼ばない**: 表示は本体が subscribe で受けた結果（受け取った画面と
   `zellij-send--last-change-time`）を読むだけ
   （例外は 15 秒ごとのセッション検出。「セッションの検出」節を参照）

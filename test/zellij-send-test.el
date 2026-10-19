@@ -1743,6 +1743,90 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
           (should (equal (car (zellij-send--log-choose cur nil)) old)))
       (delete-directory dir t))))
 
+;;; フックから受け取る状態
+
+(ert-deftest zellij-send-test-hook-event-state ()
+  "フックのイベントを状態に読み替える。知らないものは nil。"
+  (should (eq (zellij-send--hook-event-state "UserPromptSubmit" "") 'working))
+  (should (eq (zellij-send--hook-event-state "PreToolUse" "AskUserQuestion") 'waiting))
+  (should-not (zellij-send--hook-event-state "PreToolUse" "Bash"))
+  (should (eq (zellij-send--hook-event-state "PermissionRequest" "Bash") 'waiting))
+  (should (eq (zellij-send--hook-event-state "PostToolUse" "Bash") 'working))
+  (should (eq (zellij-send--hook-event-state "Stop" "") 'idle))
+  (should (eq (zellij-send--hook-event-state "Notification" "permission_prompt") 'waiting))
+  (should (eq (zellij-send--hook-event-state "Notification" "idle_prompt") 'idle))
+  (should-not (zellij-send--hook-event-state "Notification" "auth_success"))
+  (should-not (zellij-send--hook-event-state "SessionStart" "")))
+
+(ert-deftest zellij-send-test-on-claude-hook ()
+  "セッション名とペイン番号で黒板を選ぶ。別のペインからのフックは無視する。"
+  (let ((a (generate-new-buffer " *zjs-hook-a*"))
+        (b (generate-new-buffer " *zjs-hook-b*")))
+    (unwind-protect
+        (progn
+          (dolist (spec `((,a "proj00") (,b "proj01")))
+            (with-current-buffer (car spec)
+              (setq major-mode 'zellij-send-mode)
+              (setq-local zellij-send--session (cadr spec))
+              (setq-local zellij-send--pane-id "terminal_1")))
+          (zellij-send--on-claude-hook "proj01" "1" "UserPromptSubmit" "")
+          (should-not (buffer-local-value 'zellij-send--hook-state a))
+          (should (eq (buffer-local-value 'zellij-send--hook-state b) 'working))
+          ;; 同じセッションのシェルのペインから来たものは無視
+          (zellij-send--on-claude-hook "proj01" "0" "Stop" "")
+          (should (eq (buffer-local-value 'zellij-send--hook-state b) 'working))
+          (zellij-send--on-claude-hook "proj01" "1" "Stop" "")
+          (should (eq (buffer-local-value 'zellij-send--hook-state b) 'idle))
+          ;; 知らないセッション・イベントでもエラーにしない
+          (should-not (zellij-send--on-claude-hook "nosuch" "1" "Stop" ""))
+          ;; Emacs から中断したら捨てる（中断では Stop が来ない）
+          (with-current-buffer b
+            (setq-local zellij-send--hook-state 'working)
+            (cl-letf (((symbol-function 'zellij-send--send-keys) #'ignore))
+              (zellij-send-interrupt))
+            (should-not zellij-send--hook-state)))
+      (kill-buffer a)
+      (kill-buffer b))))
+
+(ert-deftest zellij-send-test-dashboard-hook-status ()
+  "フックがあれば本文を流している間も作業中。無ければ従来どおり画面で判定する。"
+  (let ((zellij-send-dashboard--state (make-hash-table :test #'equal))
+        (zellij-send-dashboard-active-window 6.0)
+        (zellij-send-dashboard-hook-stale 30.0)
+        (now (float-time)))
+    (with-temp-buffer
+      (setq-local zellij-send--session "proj00")
+      ;; スピナーの無い本文だけの画面が 10 秒前に変わったきり
+      (setq-local zellij-send--last-content "⏺ 長い本文を流している途中")
+      (setq-local zellij-send--last-change-time (- now 10))
+      (let ((buf (current-buffer)))
+        ;; フック未設定: 従来どおり待機
+        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+                               :status)
+                    'idle))
+        ;; フックが作業中と言っている: 作業中
+        (setq-local zellij-send--hook-state 'working)
+        (setq-local zellij-send--hook-state-time (- now 12))
+        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+                               :status)
+                    'working))
+        ;; 使わない設定なら画面だけ
+        (let ((zellij-send-dashboard-use-hooks nil))
+          (should-not (zellij-send-dashboard--hook-status buf now (- now 10))))
+        ;; 中断で Stop が来ず、画面も 40 秒止まっている: 信用しない
+        (setq-local zellij-send--hook-state-time (- now 40))
+        (should-not (zellij-send-dashboard--hook-status buf now (- now 40)))
+        ;; 選択待ちは、描き終えた後に画面が変わったら捨てる
+        (setq-local zellij-send--hook-state 'waiting)
+        (setq-local zellij-send--hook-state-time (- now 20))
+        (should (eq (zellij-send-dashboard--hook-status buf now (- now 19)) 'prompt))
+        (should-not (zellij-send-dashboard--hook-status buf now (- now 5)))
+        ;; 画面の最終変化（10 秒前）がダイアログを描いた分なら選択待ち
+        (setq-local zellij-send--hook-state-time (- now 11))
+        (should (eq (plist-get (zellij-send-dashboard--update-state buf "proj00")
+                               :status)
+                    'prompt))))))
+
 (provide 'zellij-send-test)
 
 ;;; zellij-send-test.el ends here

@@ -102,6 +102,21 @@ Claude Code は本文を流している間スピナー行を出さないので�
   :type 'number
   :group 'zellij-send-dashboard)
 
+(defcustom zellij-send-dashboard-use-hooks t
+  "non-nil なら、Claude Code のフックが知らせた状態を画面解析より優先する。
+フック（README の state-zellij-send.sh）が未設定のセッションは状態を
+受け取らないので、これまでどおり画面だけで判定する（`zellij-send--hook-state'）。"
+  :type 'boolean
+  :group 'zellij-send-dashboard)
+
+(defcustom zellij-send-dashboard-hook-stale 30.0
+  "フックの「作業中」を、画面が何秒動かなければ信用しなくなるか。
+ユーザーが Esc で中断したときは Stop フックが来ない（hooks リファレンスに明記）
+ので、作業中のまま残ることがある。作業中の Claude Code はスピナーの秒数を
+毎秒描き直すので、画面がこれだけ止まっていれば作業は終わっている。"
+  :type 'number
+  :group 'zellij-send-dashboard)
+
 (defcustom zellij-send-dashboard-noise-regexps
   '("\\`[[:space:]]*\\'"
     "\\`[─│╭╮╰╯━┃┏┓┗┛[:space:]]*\\'"
@@ -296,13 +311,41 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
   (with-current-buffer buf
     (zellij-send--detect-prompt (zellij-send-dashboard--screen buf))))
 
+(defconst zellij-send-dashboard--hook-settle 3.0
+  "フックの「選択待ち」の後、ダイアログを描き終えるまでに見込む秒数。")
+
+(defun zellij-send-dashboard--hook-status (buf now changed-at)
+  "BUF のフックが知らせた状態を、ダッシュボードの状態にして返す。
+`prompt'・`working'・`idle' のどれか。使えなければ nil（画面で判定する）。
+NOW は現在時刻、CHANGED-AT は画面が最後に変化した時刻。
+
+「作業中」は、受け取った時刻と画面の最終変化のどちらからも
+`zellij-send-dashboard-hook-stale' 秒以上経っていたら捨てる（中断では
+Stop フックが来ないため）。"
+  (when zellij-send-dashboard-use-hooks
+    (let ((state (buffer-local-value 'zellij-send--hook-state buf))
+          (time (or (buffer-local-value 'zellij-send--hook-state-time buf) 0)))
+      (pcase state
+        ;; 選択待ちは、知らせの後に画面が描き変わったら捨てる（Esc で閉じた
+        ;; ダイアログにも Stop は来ない）。質問や許可の画面が描かれる分だけ
+        ;; `zellij-send-dashboard--hook-settle' 秒は待つ。選択肢が画面に
+        ;; 見えていれば、捨てても画面解析が選択待ちにする
+        ('waiting (and (<= (or changed-at 0)
+                           (+ time zellij-send-dashboard--hook-settle))
+                       'prompt))
+        ('working (and (< (- now (max time (or changed-at 0)))
+                          zellij-send-dashboard-hook-stale)
+                       'working))
+        ('idle 'idle)))))
+
 (defun zellij-send-dashboard--update-state (buf session)
   "BUF（SESSION）の状態を判定して記録し、その plist を返す。
-判定は画面内容から毎回行う（本体は状態フラグを持たない）:
+フックが状態を知らせていればそれを優先する（`zellij-send-dashboard--hook-status'）。
+無ければ画面内容から毎回判定する（本体は画面から推した状態フラグを持たない）:
 - 処理中: スピナー行がある、または画面が
   `zellij-send-dashboard-active-window' 秒以内に変化した
 - 完了: 処理中でなくなった瞬間に立て、バッファを表示した時点で下ろす
-- 選択待ち: 選択肢プロンプトがある"
+- 選択待ち: 選択肢プロンプトがある（フックが選択待ちと知らせた場合も）"
   (let* ((now (float-time))
          (st (gethash session zellij-send-dashboard--state))
          (tick (buffer-chars-modified-tick buf))
@@ -319,14 +362,21 @@ claude.ai への接続に 10 秒以上かかることがあるため、固定待
                            (t (- now zellij-send-dashboard-active-window 1))))
          (prev-status (plist-get st :status))
          (visible (get-buffer-window buf t))
-         (working (or (zellij-send-dashboard--spinner-p buf)
-                      (and (> zellij-send-dashboard-active-window 0)
-                           (< (- now changed-at)
-                              zellij-send-dashboard-active-window))))
+         (hook (zellij-send-dashboard--hook-status buf now changed-at))
+         (working (if hook
+                      ;; フックの知らせは画面より確か（本文を流している間も
+                      ;; ターンが終わるまで作業中のまま）
+                      (eq hook 'working)
+                    (or (zellij-send-dashboard--spinner-p buf)
+                        (and (> zellij-send-dashboard-active-window 0)
+                             (< (- now changed-at)
+                                zellij-send-dashboard-active-window)))))
          (done (and (not working)
                     (not visible)
                     (or (eq prev-status 'working) (plist-get st :done))))
-         (status (cond ((zellij-send-dashboard--prompt-p buf) 'prompt)
+         (status (cond ((or (eq hook 'prompt)
+                            (zellij-send-dashboard--prompt-p buf))
+                        'prompt)
                        (working 'working)
                        (done 'done)
                        (t 'idle)))
