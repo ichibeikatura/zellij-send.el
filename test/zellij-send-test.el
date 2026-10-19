@@ -2151,6 +2151,46 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (should-not (zellij-send--screen-prompt-p
                    (concat "❯ 1. 古い選択肢\n  2. もう一つ\n" filler "\n❯ "))))))
 
+;;; ペインの特定のやり直し
+
+(ert-deftest zellij-send-test-detect-pane-retry ()
+  "pane-id が取れなければやり直す。上限まで取れなければ nil を渡す。"
+  (let ((table (concat "TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS\n"
+                       "0  0  Tab #1  terminal_1  terminal  agy  agy  /tmp  true  false  false  0  1  498  320\n"))
+        (calls 0) result)
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args) (apply fn args))))
+      ;; 1 回目だけ失敗して 2 回目に取れる
+      (cl-letf (((symbol-function 'zellij-send--zellij-output-async)
+                 (lambda (_s _args cb) (setq calls (1+ calls))
+                   (funcall cb (and (> calls 1) table)))))
+        (zellij-send--detect-pane-async "s00" (lambda (id cmd) (setq result (list id cmd))))
+        (should (equal result '("terminal_1" "agy")))
+        (should (= calls 2)))
+      ;; ずっと失敗するなら上限で諦める（1 回目 + やり直し）
+      (setq calls 0 result 'unset)
+      (cl-letf (((symbol-function 'zellij-send--zellij-output-async)
+                 (lambda (_s _args cb) (setq calls (1+ calls)) (funcall cb nil))))
+        (zellij-send--detect-pane-async "s00" (lambda (id cmd) (setq result (list id cmd))))
+        (should (equal result '(nil nil)))
+        (should (= calls (1+ zellij-send--detect-pane-retries)))))))
+
+(ert-deftest zellij-send-test-attach-reports-failure ()
+  "ペインを特定できなかったら、黙らずに知らせる。"
+  (let (shown)
+    (cl-letf (((symbol-function 'zellij-send--session-cwd-async)
+               (lambda (_s cb) (funcall cb nil)))
+              ((symbol-function 'zellij-send--detect-pane-async)
+               (lambda (_s cb &optional _tries) (funcall cb nil nil)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+      (unwind-protect
+          (progn
+            (zellij-send-attach-session-async "zjs-test99")
+            (should (string-match-p "zjs-test99.*特定できませんでした" shown)))
+        (when (get-buffer "*ai-zjs-test99*")
+          (kill-buffer "*ai-zjs-test99*"))))))
+
 ;;; スピナーの照合
 
 (ert-deftest zellij-send-test-dashboard-spinner-case ()

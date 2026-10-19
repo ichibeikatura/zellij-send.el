@@ -81,6 +81,11 @@ pane-id が取れれば attach クライアント無しでも送信できる。
               ;; claude だと思い込む（astra のレビューで指摘）
               (setq-local zellij-send--command command)
               (zellij-send--subscribe-ensure)))
+          ;; やり直しても取れなかった。黙っていると黒板が空のまま残るだけで
+          ;; 理由が分からない（ダッシュボードの自動接続で踏んだ）
+          (unless pane-id
+            (message "[%s] のペインを特定できませんでした。黒板を閉じて（C-x k）ダッシュボードの G か M-x zellij-send で繋ぎ直してください"
+                     session))
           (when callback (funcall callback buf))))))))
 
 ;;; エントリポイント

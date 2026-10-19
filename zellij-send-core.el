@@ -709,20 +709,32 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
     (or (funcall rank (seq-remove (lambda (p) (nth 2 p)) panes))
         (funcall rank panes))))
 
-(defun zellij-send--detect-pane-async (session callback)
+(defconst zellij-send--detect-pane-retries 3
+  "pane-id を特定できなかったときにやり直す回数（1 秒おき）。
+2026-10-19、Emacs の起動時にダッシュボードが 3 つのセッションへまとめて
+自動接続したとき、1 つだけ特定に失敗して黒板が空のまま残った（直後に
+同じ処理をやり直すと取れた）。一度きりの失敗で黒板を死なせないため。")
+
+(defun zellij-send--detect-pane-async (session callback &optional tries)
   "SESSION の送信先 pane-id と、そこで動いているコマンドを CALLBACK に渡す。
 CALLBACK は 2 引数 (PANE-ID COMMAND) で呼ばれる。不明なものは nil。
+取れなければ `zellij-send--detect-pane-retries' 回まで 1 秒おきにやり直す
+（TRIES は何回目か）。読むだけでペインには打たないので、op の外で待つ。
 
 `list-panes --all' を **1 回だけ**叩いて両方を得る。pane-id と
 コマンドを別々に取りに行くと、その間にペインが入れ替わったときに
 食い違う。"
-  (zellij-send--zellij-output-async
-   session '("action" "list-panes" "--all")
-   (lambda (out)
-     (let* ((panes (and out (zellij-send--parse-terminal-panes out)))
-            (id (and panes (zellij-send--pick-pane panes)))
-            (cmd (and id (nth 1 (assoc id panes)))))
-       (funcall callback id cmd)))))
+  (let ((tries (or tries 0)))
+    (zellij-send--zellij-output-async
+     session '("action" "list-panes" "--all")
+     (lambda (out)
+       (let* ((panes (and out (zellij-send--parse-terminal-panes out)))
+              (id (and panes (zellij-send--pick-pane panes)))
+              (cmd (and id (nth 1 (assoc id panes)))))
+         (if (and (null id) (< tries zellij-send--detect-pane-retries))
+             (run-at-time 1.0 nil #'zellij-send--detect-pane-async
+                          session callback (1+ tries))
+           (funcall callback id cmd)))))))
 
 (defun zellij-send--session-cwd-async (session callback)
   "SESSION の作業ディレクトリを CALLBACK に渡す（不明なら nil）。"
