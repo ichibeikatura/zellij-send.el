@@ -193,10 +193,6 @@ nil なら環境変数 TZ、それも無ければ `%Z'（例: JST）を使う。
 ;; クリア・transcript 表示の間は画面ではない文章を持っているので、それを読むと
 ;; 状態が画面に追随しない。どちらも zellij を呼ばない。
 
-(defun zellij-send-dashboard--screen (buf)
-  "BUF が最後に受け取ったペインの画面を返す。分からなければ空文字。"
-  (or (zellij-send-session-screen buf) ""))
-
 (defun zellij-send-dashboard--update-state (buf info)
   "BUF の状態を記録し、その plist を返す。
 INFO は `zellij-send-session-state' が返した plist。作業中・選択待ち・待機は
@@ -206,7 +202,9 @@ INFO は `zellij-send-session-state' が返した plist。作業中・選択待�
 記録する plist は (:tick :changed-at :status :status-at :done)。
 :changed-at は「無変化」列のための時刻で、本体が記録した最終変化時刻
 （INFO の `:changed-at'）を優先する。取れないときだけバッファの tick の
-変化で代用する。"
+変化で代用する。INFO が `:changed-at' を持つようになったので、:tick とその
+変化は subscribe のイベントをまだ 1 件も受けていない黒板のためだけの退避路。
+セッション名の無い INFO は記録しない（nil をキーにしない）。"
   (let* ((now (float-time))
          (session (plist-get info :session))
          (st (gethash session zellij-send-dashboard--state))
@@ -232,11 +230,11 @@ INFO は `zellij-send-session-state' が返した plist。作業中・選択待�
          (status-at (if (and st (eq status prev-status))
                         (or (plist-get st :status-at) now)
                       now)))
-    (puthash session
-             (list :tick tick :changed-at changed-at
-                   :status status :status-at status-at :done done)
-             zellij-send-dashboard--state)
-    (gethash session zellij-send-dashboard--state)))
+    (let ((rec (list :tick tick :changed-at changed-at
+                     :status status :status-at status-at :done done)))
+      (when session
+        (puthash session rec zellij-send-dashboard--state))
+      rec)))
 
 (defun zellij-send-dashboard--flag (info)
   "表示が更新停止中かどうかを表す印を返す。
@@ -281,9 +279,10 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
       (setq i (1- i)))
     (1+ i)))
 
-(defun zellij-send-dashboard--tail-line (buf)
-  "BUF の画面末尾から、意味のありそうな行を 1 行拾う。
-読むのは黒板の中身ではなく受け取った画面（`zellij-send-dashboard--screen'）。"
+(defun zellij-send-dashboard--tail-line (screen)
+  "SCREEN の末尾から、意味のありそうな行を 1 行拾う。
+SCREEN は黒板の中身ではなく受け取った画面（`zellij-send-session-state' の
+`:screen'。正規形）。nil なら空として扱う。"
   ;; 画面は末尾の改行を落として入るので、最終行から読む。下から 40 行まで。
   ;; 3 秒ごとにセッションの数だけ走るので、500 行の画面を毎回全部
   ;; `split-string' せず、後ろから 1 行ずつ切り出す。
@@ -292,7 +291,7 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
   ;; （`zellij-send--trim-end' の docstring）。削るのは左だけで、こちらは
   ;; 先頭に錨があるので線形。行末の空白は `zellij-send-session-screen' が
   ;; 落としてある（正規形）
-  (let* ((screen (zellij-send-dashboard--screen buf))
+  (let* ((screen (or screen ""))
          (end (length screen))
          (count 0)
          (line nil))
@@ -337,7 +336,9 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
                              (- now (plist-get st :status-at)))
                             (zellij-send-dashboard--fmt-elapsed
                              (- now (plist-get st :changed-at)))
-                            (zellij-send-dashboard--tail-line buf)))
+                            ;; 状態の判定に読んだ画面を使い回す（取り直さない）
+                            (zellij-send-dashboard--tail-line
+                             (plist-get info :screen))))
               entries)))
     (zellij-send-dashboard--gc-state sessions)
     ;; 状態は算出済み（1 行あたり 1 回だけ判定する）。ソートは
@@ -368,28 +369,46 @@ INFO は `zellij-send-session-state' が返した plist。zellij-send の自動�
   "バー末尾に使う 1/8 刻みの部分ブロック。")
 
 (defvar zellij-send-dashboard--usage-cache nil
-  "最後に読んだ使用状況 JSON。(FILE MTIME DATA) の形。")
+  "最後に読めた使用状況 JSON。(FILE MTIME DATA) の形。")
+
+(defvar zellij-send-dashboard--usage-failed nil
+  "最後に読み取りに失敗した使用状況 JSON。(FILE MTIME) の形。
+壊れたままのファイルを再描画のたびに読み直さない（エラーを毎回出さない）。")
 
 (defun zellij-send-dashboard--read-usage ()
-  "使用状況 JSON を読み、(DATA . MTIME) を返す。読めなければ nil。
-再描画（3 秒ごと）のたびに parse しないよう、mtime が変わったときだけ読み直す。"
+  "使用状況 JSON を読み、plist (:data DATA :mtime MTIME :failed FAILED) を返す。
+ファイルが無ければ nil。再描画（3 秒ごと）のたびに parse しないよう、
+mtime が変わったときだけ読み直す。
+
+読めたのに JSON として解釈できなかったときは FAILED を non-nil にし、
+前に読めた値があれば DATA・MTIME にそれを入れる（無ければ入れない）。
+ファイルが無いのと区別するため（2026-10-20 までは同じ nil を返し、
+フックが書きかけの JSON でも「README の設定を参照」と案内していた）。"
   (let ((file zellij-send-dashboard-usage-file))
     (when (and file (file-readable-p file))
-      (with-demoted-errors "zellij-send-dashboard: usage 読み込み失敗 %S"
-        (let ((mtime (file-attribute-modification-time
-                      (file-attributes file)))
-              (cache zellij-send-dashboard--usage-cache))
-          (unless (and (equal (nth 0 cache) file)
-                       (equal (nth 1 cache) mtime))
-            (setq zellij-send-dashboard--usage-cache
-                  (list file mtime
-                        (with-temp-buffer
-                          (insert-file-contents file)
-                          (goto-char (point-min))
-                          (json-parse-buffer :object-type 'alist
-                                             :null-object nil
-                                             :false-object nil)))))
-          (cons (nth 2 zellij-send-dashboard--usage-cache) mtime))))))
+      (let* ((mtime (file-attribute-modification-time (file-attributes file)))
+             (key (list file mtime))
+             (cache zellij-send-dashboard--usage-cache))
+        (unless (or (equal (list (nth 0 cache) (nth 1 cache)) key)
+                    (equal zellij-send-dashboard--usage-failed key))
+          (condition-case err
+              (setq zellij-send-dashboard--usage-cache
+                    (list file mtime
+                          (with-temp-buffer
+                            (insert-file-contents file)
+                            (goto-char (point-min))
+                            (json-parse-buffer :object-type 'alist
+                                               :null-object nil
+                                               :false-object nil)))
+                    zellij-send-dashboard--usage-failed nil)
+            (error
+             (setq zellij-send-dashboard--usage-failed key)
+             (message "zellij-send-dashboard: usage 読み込み失敗 %S" err))))
+        (let ((cache zellij-send-dashboard--usage-cache)
+              (failed (equal zellij-send-dashboard--usage-failed key)))
+          (if (equal (nth 0 cache) file)
+              (list :data (nth 2 cache) :mtime (nth 1 cache) :failed failed)
+            (list :failed failed)))))))
 
 (defun zellij-send-dashboard--usage-face (pct)
   "PCT に応じたバーの face を返す。"
@@ -541,22 +560,32 @@ am/pm と月名はロケールに依存しないよう自前で組み立てる�
       (insert "\n"))))
 
 (defun zellij-send-dashboard--insert-usage ()
-  "使用状況をバッファ末尾に挿入する。"
-  (let* ((cache (zellij-send-dashboard--read-usage))
-         (data (car cache))
+  "使用状況をバッファ末尾に挿入する。
+JSON を解釈できなかったときは、前に読めた値があればそれを出して失敗を
+添え、無ければ「読み取りに失敗」と出す（ファイルが無いときの案内と分ける）。"
+  (let* ((usage (zellij-send-dashboard--read-usage))
+         (data (plist-get usage :data))
+         (failed (plist-get usage :failed))
          (limits (and data (alist-get 'rate_limits data))))
     (if (null limits)
         (insert (propertize
-                 (if data
-                     "Claude 使用状況: レート制限の情報がありません（Claude サブスク以外、または API 応答前）\n"
-                   (format "Claude 使用状況: %s がありません（README の statusLine フック設定を参照）\n"
+                 (cond
+                  (failed
+                   (format "Claude 使用状況: %s の読み取りに失敗しました（JSON を解釈できません）\n"
                            (abbreviate-file-name
                             zellij-send-dashboard-usage-file)))
+                  (data
+                   "Claude 使用状況: レート制限の情報がありません（Claude サブスク以外、または API 応答前）\n")
+                  (t
+                   (format "Claude 使用状況: %s がありません（README の statusLine フック設定を参照）\n"
+                           (abbreviate-file-name
+                            zellij-send-dashboard-usage-file))))
                  'face 'shadow))
       (insert (propertize
-               (format "── Claude 使用状況 ─ %s前の記録 %s\n"
+               (format "── Claude 使用状況 ─ %s前の記録%s %s\n"
                        (zellij-send-dashboard--fmt-elapsed
-                        (float-time (time-since (cdr cache))))
+                        (float-time (time-since (plist-get usage :mtime))))
+                       (if failed "（最新の読み取りに失敗）" "")
                        (make-string 13 ?─))
                'face 'shadow))
       (let ((width (apply #'max (mapcar (lambda (c) (string-width (cdr c)))

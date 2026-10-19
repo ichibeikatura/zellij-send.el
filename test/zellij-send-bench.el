@@ -99,10 +99,12 @@
                     (mapconcat #'identity (make-list 78 (nth 1 case)) "\n"))
         (let* ((buf (current-buffer))
                (ms (zellij-send-bench--ms
-                    (lambda () (zellij-send-dashboard--tail-line buf)))))
+                    (lambda () (zellij-send-dashboard--tail-line
+                                (zellij-send-session-screen buf))))))
           (message "dashboard-tail-line (%s): %.2f ms" (nth 0 case) ms)
           (should (string-prefix-p (nth 2 case)
-                                   (zellij-send-dashboard--tail-line buf)))
+                                   (zellij-send-dashboard--tail-line
+                                    (zellij-send-session-screen buf))))
           (should (< ms zellij-send-bench--limit-ms)))))))
 
 (provide 'zellij-send-bench)

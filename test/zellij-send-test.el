@@ -1803,7 +1803,9 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
                     'working))
         (should (plist-get (zellij-send-session-state buf) :editing))
         (should (string-prefix-p "✳ Frobnicating"
-                                 (zellij-send-dashboard--tail-line buf)))
+                                 (zellij-send-dashboard--tail-line
+                                  (plist-get (zellij-send-session-state buf)
+                                             :screen))))
         ;; 画面が選択肢待ちに変われば、下書きがあってもそれに追随する
         (setq-local zellij-send--last-content zellij-send-test--askq-single)
         (should (eq (plist-get (zellij-send-session-state buf) :status)
@@ -2273,7 +2275,8 @@ C-u で捨てたものは戻らない。"
                     (,(concat "遠すぎる行\n" (make-string 40 ?\n)) . "")))
       (with-temp-buffer
         (setq-local zellij-send--last-content (car case))
-        (should (equal (zellij-send-dashboard--tail-line (current-buffer))
+        (should (equal (zellij-send-dashboard--tail-line
+                        (zellij-send-session-screen (current-buffer)))
                        (cdr case)))))))
 
 (ert-deftest zellij-send-test-dashboard-line-start ()
@@ -2303,6 +2306,7 @@ C-u で捨てたものは戻らない。"
   (let* ((file (make-temp-file "zjs-usage" nil ".json"))
          (zellij-send-dashboard-usage-file file)
          (zellij-send-dashboard--usage-cache nil)
+         (zellij-send-dashboard--usage-failed nil)
          (parsed 0)
          (orig (symbol-function 'json-parse-buffer)))
     (unwind-protect
@@ -2310,14 +2314,83 @@ C-u で捨てたものは戻らない。"
                    (lambda (&rest args) (setq parsed (1+ parsed)) (apply orig args))))
           (with-temp-file file (insert "{\"a\": 1}"))
           (set-file-times file (seconds-to-time 1000000))
-          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 1))))
-          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 1))))
+          (should (equal (plist-get (zellij-send-dashboard--read-usage) :data) '((a . 1))))
+          (should (equal (plist-get (zellij-send-dashboard--read-usage) :data) '((a . 1))))
           (should (= parsed 1))
           (with-temp-file file (insert "{\"a\": 2}"))
           (set-file-times file (seconds-to-time 2000000))
-          (should (equal (car (zellij-send-dashboard--read-usage)) '((a . 2))))
+          (should (equal (plist-get (zellij-send-dashboard--read-usage) :data) '((a . 2))))
           (should (= parsed 2)))
       (delete-file file))))
+
+(ert-deftest zellij-send-test-dashboard-usage-broken ()
+  "JSON を解釈できないときは、ファイルが無いときと別の文面を出す。前の値があれば使う。"
+  (let* ((file (make-temp-file "zjs-usage" nil ".json"))
+         (zellij-send-dashboard-usage-file file)
+         (zellij-send-dashboard--usage-cache nil)
+         (zellij-send-dashboard--usage-failed nil)
+         (text (lambda ()
+                 (with-temp-buffer
+                   (zellij-send-dashboard--insert-usage)
+                   (buffer-string)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message) #'ignore))
+          ;; 前の値が無いまま壊れている
+          (with-temp-file file (insert "{\"rate_limits\": "))
+          (set-file-times file (seconds-to-time 1000000))
+          (should (plist-get (zellij-send-dashboard--read-usage) :failed))
+          (should-not (plist-get (zellij-send-dashboard--read-usage) :data))
+          (should (string-match-p "読み取りに失敗" (funcall text)))
+          (should-not (string-match-p "README" (funcall text)))
+          ;; 読めた後に壊れたら、前の値を出して失敗を添える
+          (with-temp-file file
+            (insert "{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12}}}"))
+          (set-file-times file (seconds-to-time 2000000))
+          (should-not (plist-get (zellij-send-dashboard--read-usage) :failed))
+          (with-temp-file file (insert "{"))
+          (set-file-times file (seconds-to-time 3000000))
+          (let ((usage (zellij-send-dashboard--read-usage)))
+            (should (plist-get usage :failed))
+            (should (plist-get usage :data)))
+          (should (string-match-p "12% used" (funcall text)))
+          (should (string-match-p "最新の読み取りに失敗" (funcall text)))
+          ;; ファイルが無いときは設定の案内
+          (delete-file file)
+          (should (string-match-p "README" (funcall text))))
+      (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest zellij-send-test-spawn-failure-kills-board ()
+  "セッションを作れなかったら、空の黒板を残さない。"
+  (let ((name (zellij-send--buffer-name "zjs-fail00")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'zellij-send--zellij-async)
+                   (lambda (_args cb) (funcall cb 1)))
+                  ((symbol-function 'message) #'ignore))
+          (zellij-send-spawn-session "zjs-fail00" temporary-file-directory "claude")
+          (should-not (get-buffer name)))
+      (when (get-buffer name) (kill-buffer name)))))
+
+(ert-deftest zellij-send-test-dashboard-state-without-session ()
+  "セッション名の無い状態は記録しない。"
+  (let ((zellij-send-dashboard--state (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (should (eq (plist-get (zellij-send-dashboard--update-state
+                              (current-buffer) '(:status idle))
+                             :status)
+                  'idle))
+      (should (= (hash-table-count zellij-send-dashboard--state) 0)))))
+
+(ert-deftest zellij-send-test-session-state-screen ()
+  "状態の plist は判定に読んだ画面を正規形で持つ。"
+  (with-temp-buffer
+    (setq-local zellij-send--session "proj00")
+    (insert "本文   \n")
+    (set-buffer-modified-p nil)
+    (should (equal (plist-get (zellij-send-session-state (current-buffer)) :screen)
+                   "本文"))
+    (setq-local zellij-send--last-content "受けた画面")
+    (should (equal (plist-get (zellij-send-session-state (current-buffer)) :screen)
+                   "受けた画面"))))
 
 (ert-deftest zellij-send-test-markdown-fallback-check ()
   "text-mode 派生の黒板で markdown-mode が後から使えるなら、印を付けて 1 回だけ知らせる。"

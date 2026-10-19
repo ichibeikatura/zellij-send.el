@@ -1037,8 +1037,9 @@ Stop フックが来ないため）。"
                        'working))
         ('idle 'idle)))))
 
-(defun zellij-send--session-status (now)
+(defun zellij-send--session-status (now &optional screen)
   "カレントの黒板の状態を `prompt'・`working'・`idle' で返す。NOW は現在時刻。
+SCREEN は `zellij-send--last-screen' を読んであればその値（読み直さない）。
 フックが状態を知らせていればそれを優先する（`zellij-send--hook-status'）。
 無ければ受け取った画面（`zellij-send--last-screen'）から毎回判定する:
 - 処理中: スピナー行がある、または画面が
@@ -1046,7 +1047,7 @@ Stop フックが来ないため）。"
 - 選択待ち: 選択肢プロンプトがある（`zellij-send--screen-prompt-p'。
   フックが選択待ちと知らせた場合も）。処理中より優先する"
   (let* ((changed-at zellij-send--last-change-time)
-         (screen (or (zellij-send--last-screen) ""))
+         (screen (or screen (zellij-send--last-screen) ""))
          (hook (zellij-send--hook-status now changed-at))
          (working (if hook
                       ;; フックの知らせは画面より確か（本文を流している間も
@@ -1086,9 +1087,15 @@ Stop フックが来ないため）。"
 呼び出し側が行末を `string-trim-right' で削らずに済むようにするため
 （列の間が大きく空いた画面で 2 乗になる。`zellij-send--trim-end'）。"
   (with-current-buffer buf
-    (or zellij-send--last-content
-        (let ((screen (zellij-send--last-screen)))
-          (and screen (zellij-send--normalize-screen screen))))))
+    (zellij-send--session-normal-screen (zellij-send--last-screen))))
+
+(defun zellij-send--session-normal-screen (screen)
+  "カレントの黒板の `zellij-send--last-screen' の値 SCREEN を正規形にして返す。
+受け取った画面ならそのまま、黒板の中身で代用したものなら整える
+（`zellij-send-session-screen'）。"
+  (if (or (null screen) zellij-send--last-content)
+      screen
+    (zellij-send--normalize-screen screen)))
 
 (defun zellij-send-session-state (buf)
   "黒板 BUF の状態を plist で返す。zellij は呼ばない。
@@ -1100,14 +1107,19 @@ Stop フックが来ないため）。"
                （`zellij-send--session-status'）
   :changed-at  画面が最後に変化した時刻（`float-time'）。まだ無ければ nil
   :editing     未送信の下書きがある（黒板の自動更新は止まっている）
-  :cleared     ユーザーがクリアした（同上）"
+  :cleared     ユーザーがクリアした（同上）
+  :screen      受け取った画面（`zellij-send-session-screen' と同じ正規形）。
+               状態の判定に読んだものを返すので、一覧を作る側が画面を
+               もう一度取りに行かずに済む。分からなければ nil"
   (with-current-buffer buf
-    (list :session zellij-send--session
-          :agent (zellij-send--agent-name)
-          :status (zellij-send--session-status (float-time))
-          :changed-at zellij-send--last-change-time
-          :editing (buffer-modified-p)
-          :cleared zellij-send--user-cleared)))
+    (let ((screen (zellij-send--last-screen)))
+      (list :session zellij-send--session
+            :agent (zellij-send--agent-name)
+            :status (zellij-send--session-status (float-time) screen)
+            :changed-at zellij-send--last-change-time
+            :editing (buffer-modified-p)
+            :cleared zellij-send--user-cleared
+            :screen (zellij-send--session-normal-screen screen)))))
 
 (defun zellij-send-to-session (buf text &optional callback)
   "黒板 BUF のペインに TEXT を送り、Enter を押す（`zellij-send--send'）。
@@ -1280,7 +1292,13 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
      (list "attach" "--create-background" session)
      (lambda (exit)
        (if (not (zerop exit))
-           (message "zellij セッション作成に失敗しました (exit: %d)" exit)
+           (progn
+             ;; 空の黒板を残さない。残すと `zellij-send-sessions' に乗り、
+             ;; 次の監視で消える（「空のバッファが出て、しばらくして勝手に
+             ;; 消える」と見える）。打ち始めていたら入力を失わないよう残す
+             (when (and (buffer-live-p buf) (not (buffer-modified-p buf)))
+               (kill-buffer buf))
+             (message "zellij セッション作成に失敗しました (exit: %d)" exit))
          ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
          ;; あとから作るペインは拡幅後のサイズを継承する
          (zellij-send--resize-session
