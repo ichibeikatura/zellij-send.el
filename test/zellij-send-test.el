@@ -2385,6 +2385,26 @@ C-u で捨てたものは戻らない。"
       (when (get-buffer name) (kill-buffer name))
       (delete-directory (file-name-directory dir)))))
 
+(ert-deftest zellij-send-test-process-directory ()
+  "黒板のディレクトリが消えていても、zellij はホームから起動する。"
+  (let ((gone (make-temp-file "zjs" t)) dirs)
+    (delete-directory gone)
+    (with-temp-buffer
+      (setq default-directory (file-name-as-directory gone))
+      (should (equal (zellij-send--process-directory) (expand-file-name "~/")))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _) (push default-directory dirs) nil))
+                ((symbol-function 'run-with-timer) #'ignore))
+        (zellij-send--zellij-async '("list-sessions"))
+        (zellij-send-list-sessions #'ignore))
+      (should (= (length dirs) 2))
+      (should (cl-every #'file-directory-p dirs))
+      ;; 起動の後はバッファのディレクトリを元に戻す
+      (should (equal default-directory (file-name-as-directory gone))))
+    (with-temp-buffer
+      (setq default-directory temporary-file-directory)
+      (should (equal (zellij-send--process-directory) temporary-file-directory)))))
+
 (ert-deftest zellij-send-test-dashboard-state-without-session ()
   "セッション名の無い状態は記録しない。"
   (let ((zellij-send-dashboard--state (make-hash-table :test #'equal)))

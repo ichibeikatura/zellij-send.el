@@ -509,6 +509,7 @@ stderr 側のパイプが読み終わる前に sentinel が走ることがあり
 `zellij-send--list-sessions-async' の別名だったので、取得の経路が 2 つに
 見えていた。"
   (let* ((out-buf (generate-new-buffer " *zellij-list-sessions*"))
+         (default-directory (zellij-send--process-directory))
          (done nil)
          timer proc)
     (setq proc
@@ -555,6 +556,20 @@ zellij サーバ・ペインに継承されるのを防ぐ）。
 「背景セッションの大きさ」を参照。"
   (cons (concat "TERM=" zellij-send-term) process-environment))
 
+(defun zellij-send--process-directory ()
+  "zellij を起動するときの `default-directory' を返す。
+カレントバッファのディレクトリが無ければホームにする。`make-process' は
+`default-directory' に移れないと起動の前に失敗する（file-missing）。
+zellij の呼び出しは作業ディレクトリに依らない（ペインの cwd は `run --cwd'
+で渡す）が、タイマーや sentinel はたまたまカレントだったバッファで動くので、
+ディレクトリの消えた黒板が 1 つあるだけで監視も送信も失敗した
+（2026-10-20 手元確認）。リモートのディレクトリはそのまま返す（調べると
+接続が走る）。"
+  (if (or (file-remote-p default-directory)
+          (file-accessible-directory-p default-directory))
+      default-directory
+    (expand-file-name "~/")))
+
 (defun zellij-send--zellij-async (args &optional callback)
   "zellij を ARGS で非同期実行する。
 終了したら CALLBACK に exit code を渡して呼ぶ（CALLBACK は省略可）。
@@ -562,7 +577,8 @@ zellij サーバ・ペインに継承されるのを防ぐ）。
 zellij サーバ側の都合で応答が遅れた場合にフリーズするため。
 TERM を上書きして起動する（サーバを起動する `attach
 --create-background' が TERM=dumb をペインに伝播させないため）。"
-  (let ((process-environment (zellij-send--process-environment)))
+  (let ((process-environment (zellij-send--process-environment))
+        (default-directory (zellij-send--process-directory)))
     (make-process
      :name "zellij-async"
      :buffer nil
@@ -640,7 +656,8 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
 `zellij-send-log-file'（Stop フックが追記）で読む。"
   (let ((req-buffer (current-buffer))
         (out-buf (generate-new-buffer " *zellij-dump*"))
-        (err-buf (generate-new-buffer " *zellij-dump-err*")))
+        (err-buf (generate-new-buffer " *zellij-dump-err*"))
+        (default-directory (zellij-send--process-directory)))
     (make-process
      :name "zellij-dump"
      :buffer out-buf
@@ -671,7 +688,8 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
   "SESSION に対して zellij を ARGS で実行し、STDOUT を CALLBACK に渡す。
 失敗時は nil を渡す。"
   (let ((out-buf (generate-new-buffer " *zellij-out*"))
-        (err-buf (generate-new-buffer " *zellij-out-err*")))
+        (err-buf (generate-new-buffer " *zellij-out-err*"))
+        (default-directory (zellij-send--process-directory)))
     (make-process
      :name "zellij-output"
      :buffer out-buf
@@ -933,7 +951,8 @@ subscribe が記録した `zellij-send--last-content' を優先する（更新�
   (when (and zellij-send--session zellij-send--pane-id)
     (let* ((buf (current-buffer))
            (session zellij-send--session)
-           (process-environment (zellij-send--process-environment)))
+           (process-environment (zellij-send--process-environment))
+           (default-directory (zellij-send--process-directory)))
       (setq zellij-send--subscribe-pane-id zellij-send--pane-id
             zellij-send--last-event-time nil)
       (setq zellij-send--subscribe-process
@@ -1280,7 +1299,8 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
 失敗したら nil を CALLBACK に渡す。attach クライアントは不要（zellij 0.44+）。"
   (let ((out-buf (generate-new-buffer " *zellij-run*"))
         (err-buf (generate-new-buffer " *zellij-run-err*"))
-        (process-environment (zellij-send--process-environment)))
+        (process-environment (zellij-send--process-environment))
+        (default-directory (zellij-send--process-directory)))
     (make-process
      :name "zellij-run"
      :buffer out-buf
@@ -1331,6 +1351,7 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
               (append (list (format "COLUMNS=%d" cols)
                             (format "LINES=%d" rows))
                       (zellij-send--process-environment)))
+             (default-directory (zellij-send--process-directory))
              (finished nil)
              detach-timer watchdog proc)
         (setq proc
