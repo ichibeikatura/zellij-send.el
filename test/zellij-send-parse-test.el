@@ -30,11 +30,12 @@
                     (file-name-directory (or load-file-name buffer-file-name)))
   "fixture の置き場所。")
 
-(defun zellij-send-parse-test--raw (name)
-  "fixture NAME（拡張子なし）の中身を、先頭の注記行を落として返す。"
+(defun zellij-send-parse-test--raw (name &optional ext)
+  "fixture NAME（拡張子なし）の中身を、先頭の注記行を落として返す。
+EXT は拡張子（既定は \".txt\"。`--ansi' で採ったものは \".ansi\"）。"
   (with-temp-buffer
     (insert-file-contents
-     (expand-file-name (concat name ".txt") zellij-send-parse-test--dir))
+     (expand-file-name (concat name (or ext ".txt")) zellij-send-parse-test--dir))
     (goto-char (point-min))
     (while (looking-at "#fixture: ")
       (forward-line 1))
@@ -198,6 +199,31 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
   ;; 質問が出ている間は矢印がそちらに効くので、空でも受け付けない
   (should-not (zellij-send--slash-idle-p (zellij-send-parse-test--screen "askq-single"))))
 
+(ert-deftest zellij-send-parse-test-slash-input-suggestion ()
+  "ターン後の提案文（薄い字）は、`--ansi' で取って消せば空の入力欄と読む。"
+  (let ((raw (zellij-send-parse-test--raw "idle-suggestion" ".ansi")))
+    ;; 平文では本物の入力と見分けられない（これで常に「空ではない」になった）
+    (should (equal (zellij-send--slash-input-text (zellij-send--normalize-screen raw))
+                   "誤字直してPDF作り直して"))
+    (should-not (zellij-send--slash-idle-p (zellij-send--normalize-screen raw)))
+    (let ((screen (zellij-send--normalize-screen (zellij-send--blank-faint-input raw))))
+      (should (equal (zellij-send--slash-input-text screen) ""))
+      (should (zellij-send--slash-idle-p screen))
+      ;; 入力欄より上の行は変えない
+      (should (string-match-p "/clear to start fresh" screen))))
+  ;; 薄くない文字が 1 つでもあれば本物の入力。薄いヒントが続いても消さない
+  (dolist (line '("\e[m❯\u00a0\e[22m/effort\e[2m  [low|medium]"
+                  ;; 拡張色の 2 は薄い字ではない
+                  "\e[m❯\u00a0\e[38;5;2m本物の入力"
+                  "\e[m❯\u00a0\e[2m提案\e[22mと本物"))
+    (let ((raw (concat "本文\n" line "\n")))
+      (should (equal (zellij-send--blank-faint-input raw) raw))))
+  ;; 薄い字が 0 で戻っても、その後の文字が無ければ提案だけ
+  (should (equal (zellij-send--blank-faint-input "上\n\e[m❯\u00a0\e[2m提案\e[0m\n下")
+                 "上\n❯\n下"))
+  ;; 入力欄が無い画面はそのまま
+  (should (equal (zellij-send--blank-faint-input "\e[2m本文") "\e[2m本文")))
+
 ;;; 4. 引数の候補メニューとヒント
 
 (ert-deftest zellij-send-parse-test-slash-arg-entries ()
@@ -246,7 +272,7 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
                   zellij-send--pane-id "terminal_1"
                   zellij-send--command "claude")
       (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
-                 (lambda (_session cb &optional _full)
+                 (lambda (_session cb &rest _)
                    (funcall cb (zellij-send-parse-test--screen
                                 (if (cdr queue) (pop queue) (car queue))))))
                 ((symbol-function 'zellij-send--slash-write-chars)

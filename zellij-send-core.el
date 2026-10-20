@@ -641,7 +641,7 @@ pane-id 不明なら nil（focused pane への送信になる）。"
 
 ;;; スクリーンダンプ
 
-(defun zellij-send--dump-screen-async (session callback &optional full)
+(defun zellij-send--dump-screen-async (session callback &optional full drop-faint)
   "SESSION のスクリーン内容を非同期で取得する（STDOUT 直読み・zellij 0.44+）。
 カレントバッファに `zellij-send--pane-id' があればそのペインをダンプする。
 取得できたら画面の正規形（`zellij-send--normalize-screen'）を、失敗時は nil を
@@ -653,7 +653,11 @@ FULL が非 nil なら `--full' を付けてスクロールバックまで取る
 無いため、`--full' でも viewport と同じ内容しか返らない（2026-07-28 実測）。
 alt-screen でないコマンド（`zellij-send--command' 参照）を動かしている
 セッションのためだけに付けている。流れて消えた Claude の出力は
-`zellij-send-log-file'（Stop フックが追記）で読む。"
+`zellij-send-log-file'（Stop フックが追記）で読む。
+
+DROP-FAINT が非 nil なら `--ansi' で取り、入力欄の薄い字（ターン後の提案文）
+を消した画面を渡す（`zellij-send--blank-faint-input'）。入力欄が空かを
+確かめるときだけ使う。"
   (let ((req-buffer (current-buffer))
         (out-buf (generate-new-buffer " *zellij-dump*"))
         (err-buf (generate-new-buffer " *zellij-dump-err*"))
@@ -667,6 +671,7 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
                             "--session" session
                             "action" "dump-screen")
                       (when full (list "--full"))
+                      (when drop-faint (list "--ansi"))
                       (when zellij-send--pane-id
                         (list "--pane-id" zellij-send--pane-id)))
      :sentinel
@@ -674,8 +679,9 @@ alt-screen でないコマンド（`zellij-send--command' 参照）を動かし�
        (when (memq (process-status proc) '(exit signal))
          (let ((content
                 (when (zerop (process-exit-status proc))
-                  (zellij-send--normalize-screen
-                   (with-current-buffer out-buf (buffer-string))))))
+                  (let ((raw (with-current-buffer out-buf (buffer-string))))
+                    (zellij-send--normalize-screen
+                     (if drop-faint (zellij-send--blank-faint-input raw) raw))))))
            (ignore-errors (kill-buffer out-buf))
            (ignore-errors (kill-buffer err-buf))
            (when (buffer-live-p req-buffer)
@@ -1145,13 +1151,15 @@ FN は OP の黒板をカレントにして呼ぶ。"
       (with-current-buffer (zellij-send-op-buffer op)
         (apply fn args)))))
 
-(defun zellij-send--op-dump (op callback)
+(defun zellij-send--op-dump (op callback &optional drop-faint)
   "OP の黒板のペインの画面を取り、CALLBACK に渡す（失敗なら nil）。
-OP が生きていなければ取らず、取り終えた時点で死んでいれば呼ばない。"
+OP が生きていなければ取らず、取り終えた時点で死んでいれば呼ばない。
+DROP-FAINT は `zellij-send--dump-screen-async' と同じ。"
   (when (zellij-send--op-live-p op)
     (with-current-buffer (zellij-send-op-buffer op)
       (zellij-send--dump-screen-async
-       zellij-send--session (zellij-send--op-callback op callback)))))
+       zellij-send--session (zellij-send--op-callback op callback)
+       nil drop-faint))))
 
 (defun zellij-send--op-keys (op bytes callback)
   "OP の黒板のペインに BYTES を送り、CALLBACK に終了コードを渡す。

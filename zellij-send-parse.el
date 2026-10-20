@@ -533,9 +533,72 @@ v2.1.303。`  ❯ /ndl   国立国会図書館…'）。それが無かった頃
         (string-match zellij-send--slash-input-regexp line)
         (string-trim-right (match-string 1 line))))))
 
+(defun zellij-send--sgr-faint (params faint)
+  "SGR の引数文字列 PARAMS を当てた後の「薄い字」の状態を返す。
+FAINT は当てる前の状態。拡張色（38;5;N / 38;2;R;G;B）の数値は属性と
+読まない（`38;5;2' の 2 を薄い字と取り違えないため）。"
+  (let ((ps (mapcar (lambda (p) (if (string-empty-p p) 0 (string-to-number p)))
+                    (split-string params "[;:]"))))
+    (while ps
+      (let ((p (pop ps)))
+        (cond
+         ((memq p '(38 48 58))
+          (pcase (pop ps)
+            (5 (pop ps))
+            (2 (setq ps (nthcdr 3 ps)))))
+         ((memq p '(0 22)) (setq faint nil))
+         ((= p 2) (setq faint t)))))
+    faint))
+
+(defun zellij-send--blank-faint-input (raw)
+  "`dump-screen --ansi' の生テキスト RAW の入力欄から、薄い字だけの中身を消して返す。
+Claude Code はターンを終えると、次に打ちそうな文を入力欄に薄い字（SGR 2）で
+提案する。平文の `dump-screen' では本物の入力と見分けられず、入力欄が空でない
+と読んでスラッシュコマンドを打てなかった（2026-10-21 実測、Claude Code
+2.1.304・zellij 0.45.1。`❯' の後ろが SGR 2 の提案文で、空の入力欄は `❯' だけ）。
+薄くない文字が 1 つでもあれば本物の入力なので、そのまま返す。
+TODO(要・手元確認): 打ちかけの本物の入力が薄い字で描かれないこと（未採取）。"
+  (let* ((lines (split-string raw "\n"))
+         (i (zellij-send--askq-last-index
+             (mapcar #'zellij-send--strip-ansi lines)
+             zellij-send--slash-input-regexp)))
+    (if (null i)
+        raw
+      (let ((line (nth i lines))
+            (pos 0) (faint nil) (after-prompt nil) (dim nil) (real nil))
+        ;; 見える文字の区切りごとに、その時点の薄い字の状態で数える
+        (cl-flet ((visible (seg)
+                    (let ((seg (zellij-send--strip-ansi seg)))
+                      (unless after-prompt
+                        (let ((k (string-search "❯" seg)))
+                          (when k
+                            (setq after-prompt t
+                                  seg (substring seg (1+ k))))))
+                      (when (and after-prompt
+                                 (string-match-p "[^[:space:] ]" seg))
+                        (if faint (setq dim t) (setq real t))))))
+          (while (string-match "\e\\[\\([0-9;:?]*\\)\\([@-~]\\)" line pos)
+            ;; `visible' の中の `zellij-send--strip-ansi' が一致を上書きするので先に控える
+            (let ((beg (match-beginning 0))
+                  (end (match-end 0))
+                  (sgr (and (equal (match-string 2 line) "m")
+                            (match-string 1 line))))
+              (visible (substring line pos beg))
+              (when sgr
+                (setq faint (zellij-send--sgr-faint sgr faint)))
+              (setq pos end)))
+          (visible (substring line pos)))
+        (if (and dim (not real))
+            (string-join (append (seq-take lines i) (list "❯")
+                                 (nthcdr (1+ i) lines))
+                         "\n")
+          raw)))))
+
 (defun zellij-send--slash-idle-p (screen)
   "SCREEN の入力欄が空（入力を受け付けられる状態）なら non-nil。
-プレースホルダ（`Try \"...\"'）は空とみなす。選択肢プロンプトが出ている間は
+プレースホルダ（`Try \"...\"'）は空とみなす。ターン後の提案文は平文では
+見分けられないので、画面を `--ansi' で取って `zellij-send--blank-faint-input'
+で消してから渡す（`zellij-send--slash-wait-idle'）。選択肢プロンプトが出ている間は
 矢印キーがそちらに効いてしまうので `zellij-send--askq-parse' で弾く。"
   (let ((text (zellij-send--slash-input-text screen)))
     (and text

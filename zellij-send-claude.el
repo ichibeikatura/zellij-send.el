@@ -938,10 +938,11 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
                           (zellij-send--op-put op :typed nil)
                           (funcall callback (zerop exit)))))
 
-(defun zellij-send--slash-wait (op pred callback &optional tries)
+(defun zellij-send--slash-wait (op pred callback &optional tries drop-faint)
   "OP のペインの画面が PRED を満たすまで待ち、その画面を CALLBACK に渡す。
 待てなかったら nil を渡す。画面は毎回 `dump-screen' で取る——黒板バッファは
-ユーザーが編集中だと更新が止まる（`buffer-modified-p'）ので当てにできない。"
+ユーザーが編集中だと更新が止まる（`buffer-modified-p'）ので当てにできない。
+DROP-FAINT は `zellij-send--op-dump' に渡す。"
   (let ((tries (or tries 0)))
     (zellij-send--op-dump
      op
@@ -951,7 +952,13 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
         ((>= tries 12) (funcall callback nil))
         (t (zellij-send--op-later op zellij-send-slash-settle-delay
                                   #'zellij-send--slash-wait
-                                  op pred callback (1+ tries))))))))
+                                  op pred callback (1+ tries) drop-faint))))
+     drop-faint)))
+
+(defun zellij-send--slash-wait-idle (op callback)
+  "OP のペインの入力欄が空になるまで待ち、その画面を CALLBACK に渡す。
+ターン後の提案文（薄い字）は空とみなす（`zellij-send--slash-idle-p'）。"
+  (zellij-send--slash-wait op #'zellij-send--slash-idle-p callback nil t))
 
 ;;;; メニューの取得（↓ で送りながら読む）
 
@@ -1007,8 +1014,8 @@ SILENT が non-nil なら進捗を知らせない（先読み）。
 
 (defun zellij-send--slash-collect-1 (op done)
   "`zellij-send--slash-collect' の本体。結果を DONE に渡す。"
-  (zellij-send--slash-wait
-   op #'zellij-send--slash-idle-p
+  (zellij-send--slash-wait-idle
+   op
    (lambda (screen)
      (if (null screen)
          (progn (zellij-send--slash-msg
@@ -1226,8 +1233,8 @@ CALLBACK に渡す結果は次のどれか:
             ;; 打つ前に入力欄が空であることを確かめる。ユーザーがターミナル側で
             ;; 書きかけたテキストの後ろに打ち足すと、その入力を壊したうえに
             ;; 画面も読み違える（実機で踏んだ）
-            (zellij-send--slash-wait
-             op #'zellij-send--slash-idle-p
+            (zellij-send--slash-wait-idle
+             op
              (lambda (idle)
                (if (null idle)
                    (progn

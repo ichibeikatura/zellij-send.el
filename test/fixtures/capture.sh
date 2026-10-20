@@ -8,6 +8,7 @@
 # 使い方（S = セッション名、P = pane-id。例: zjsfx00 terminal_1）:
 #   capture.sh panes S                   ペイン一覧を表示する（P を調べる）
 #   capture.sh dump  S P NAME [メモ]      画面を NAME.txt に保存
+#   capture.sh dump-ansi S P NAME [メモ]  色付きのまま（--ansi）NAME.ansi に保存
 #   capture.sh burst S P NAME [回数]      0.5 秒ごとに NAME-01.txt … を保存（既定 10 回）
 #   capture.sh type  S P 文字列           入力欄に打つ（write-chars。補完メニューが開く）
 #   capture.sh send  S P 文字列           本文として送って Enter（paste + CR。黒板の送信と同じ）
@@ -51,10 +52,10 @@ header() {
   return 0
 }
 
-# dump_to FILE NAME S P NOTE
+# dump_to FILE NAME S P NOTE [dump-screen に足す引数]
 dump_to() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/zjsfx.XXXXXX") || die "mktemp に失敗"
-  if ! $ZELLIJ_BIN --session "$3" action dump-screen --pane-id "$4" > "$tmp"; then
+  if ! $ZELLIJ_BIN --session "$3" action dump-screen --pane-id "$4" ${6:-} > "$tmp"; then
     rm -f "$tmp"; die "dump-screen に失敗（$3 $4）"
   fi
   { header "$2" "$3" "$4" "$5"; cat "$tmp"; } > "$1"
@@ -82,6 +83,9 @@ case "$cmd" in
   dump)
     [ $# -ge 3 ] || die "dump S P NAME [メモ]"
     dump_to "$DIR/$3.txt" "$3" "$1" "$2" "${4:-}" ;;
+  dump-ansi)
+    [ $# -ge 3 ] || die "dump-ansi S P NAME [メモ]"
+    dump_to "$DIR/$3.ansi" "$3" "$1" "$2" "${4:-}" --ansi ;;
   burst)
     [ $# -ge 3 ] || die "burst S P NAME [回数]"
     n=${4:-10}; i=1

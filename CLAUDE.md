@@ -99,6 +99,8 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 ### 画面から取れないもの
 alt-screen の TUI にはスクロールバックが無く（`dump-screen --full` も効かない）、
 長文の送信は `[Pasted text #1 +N lines]` に畳まれる。過去の会話は transcript（JSONL）から読む。
+ターン後に入力欄へ出る提案文は薄い字（SGR 2）で、平文の `dump-screen` では本物の入力と
+見分けられない。入力欄が空かは `--ansi` で取って見る（`zellij-send--blank-faint-input`）。
 
 ## 設計判断（理由つき）
 

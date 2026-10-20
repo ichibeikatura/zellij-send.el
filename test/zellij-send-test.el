@@ -1487,7 +1487,7 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
       (cl-letf (((symbol-function 'zellij-send--send-keys)
                  (lambda (_session bytes &optional _cb) (push bytes keys)))
                 ((symbol-function 'zellij-send--dump-screen-async)
-                 (lambda (_session cb &optional _full) (setq dump-cb cb))))
+                 (lambda (_session cb &rest _) (setq dump-cb cb))))
         ;; 打っていない操作を止めても Ctrl+U は送らない
         (let ((op (zellij-send--op-begin buf 'slash-arg)))
           (zellij-send--op-later op 60 (lambda () (setq fired t)))
@@ -1591,7 +1591,7 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
   (let (asked dumped)
     (zellij-send-test--with-draft-board nil
       (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
-                 (lambda (_session cb &optional _full)
+                 (lambda (_session cb &rest _)
                    (setq dumped t)
                    (funcall cb zellij-send-test--askq-single)))
                 ((symbol-function 'run-at-time)
@@ -1609,7 +1609,7 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
   (let (asked)
     (zellij-send-test--with-draft-board nil
       (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
-                 (lambda (_session cb &optional _full)
+                 (lambda (_session cb &rest _)
                    (funcall cb zellij-send-test--askq-review)))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args) (apply fn args)))
@@ -1625,7 +1625,7 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
   (let (keys result)
     (zellij-send-test--with-draft-board nil
       (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
-                 (lambda (_session cb &optional _full)
+                 (lambda (_session cb &rest _)
                    ;; 1 回目は 1 番、送った後は 4 番にカーソルがある画面
                    (funcall cb (if keys
                                    (replace-regexp-in-string
@@ -2405,6 +2405,18 @@ C-u で捨てたものは戻らない。"
       (setq default-directory temporary-file-directory)
       (should (equal (zellij-send--process-directory) temporary-file-directory)))))
 
+(ert-deftest zellij-send-test-dump-drop-faint ()
+  "入力欄が空かを確かめるときだけ `--ansi' で画面を取る。"
+  (let (commands)
+    (with-temp-buffer
+      (setq-local zellij-send--pane-id "terminal_1")
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args) (push (plist-get args :command) commands) nil)))
+        (zellij-send--dump-screen-async "proj00" #'ignore)
+        (zellij-send--dump-screen-async "proj00" #'ignore nil t)))
+    (should-not (member "--ansi" (nth 1 commands)))
+    (should (member "--ansi" (nth 0 commands)))))
+
 (ert-deftest zellij-send-test-dashboard-state-without-session ()
   "セッション名の無い状態は記録しない。"
   (let ((zellij-send-dashboard--state (make-hash-table :test #'equal)))
@@ -2539,7 +2551,7 @@ v2.1.303 の claude は esc to interrupt を出さないので、秒数付きの
         dumped)
     (unwind-protect
         (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
-                   (lambda (session _cb &optional _full) (push session dumped))))
+                   (lambda (session _cb &rest _) (push session dumped))))
           (dolist (spec `((,a "proj00") (,b "proj01")))
             (with-current-buffer (car spec)
               (setq major-mode 'zellij-send-mode)
