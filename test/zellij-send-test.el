@@ -2385,6 +2385,15 @@ C-u で捨てたものは戻らない。"
       (when (get-buffer name) (kill-buffer name))
       (delete-directory (file-name-directory dir)))))
 
+(ert-deftest zellij-send-test-spawn-and-show-missing-dir ()
+  "作れなかった理由はタイマーのエラーに包まずメッセージで出す。"
+  (let (shown)
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+      (zellij-send--spawn-and-show "zjs-nodir00" "/zjs-no-such-dir" "claude"))
+    (should (string-match-p "ディレクトリがありません" shown))
+    (should-not (get-buffer (zellij-send--buffer-name "zjs-nodir00")))))
+
 (ert-deftest zellij-send-test-process-directory ()
   "黒板のディレクトリが消えていても、zellij はホームから起動する。"
   (let ((gone (make-temp-file "zjs" t)) dirs)

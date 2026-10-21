@@ -31,10 +31,11 @@
 ;; （`zellij-send-spawn-session' / `zellij-send-attach-session'）にある。
 
 (defun zellij-send--prompt-session-dir ()
-  "作業ディレクトリをユーザーに選択させ、末尾スラッシュなしの絶対パスを返す。"
+  "作業ディレクトリをユーザーに選択させ、末尾スラッシュなしの絶対パスを返す。
+無いディレクトリは受け付けない（打ち間違いのまま作らせない）。"
   (directory-file-name
    (expand-file-name
-    (read-directory-name "作業ディレクトリ: " default-directory))))
+    (read-directory-name "作業ディレクトリ: " default-directory nil t))))
 
 (defun zellij-send--prompt-command (&optional default)
   "起動するコマンドを尋ねる。DEFAULT（既定は `zellij-send-default-command'）が初期値。
@@ -76,9 +77,14 @@ SESSIONS（zellij から取った一覧）に加え、黒板バッファが握�
            (mapcar #'zellij-send-session-name (zellij-send-sessions)))))
 
 (defun zellij-send--spawn-and-show (session dir command)
-  "SESSION を DIR に COMMAND で作り（`zellij-send-spawn-session'）、黒板を表示する。"
-  (switch-to-buffer (zellij-send-spawn-session session dir command))
-  (goto-char (point-max)))
+  "SESSION を DIR に COMMAND で作り（`zellij-send-spawn-session'）、黒板を表示する。
+タイマーから呼ばれるので、作れなかった理由（`user-error'）はメッセージで出す
+（そのままだと「Error running timer ...」に包まれて出る）。"
+  (condition-case err
+      (progn
+        (switch-to-buffer (zellij-send-spawn-session session dir command))
+        (goto-char (point-max)))
+    (user-error (message "%s" (error-message-string err)))))
 
 (defun zellij-send--create-new-session (known-sessions)
   "作業ディレクトリと起動するコマンドを尋ね、新しい zellij セッションを作る。
