@@ -413,11 +413,12 @@ Rate limits are only present for Claude subscription accounts, and only after a 
 
 ### Session size
 
-A background session created by `[New]` is only 50 columns by 48 lines by default, and Claude Code hard-wraps its output to the pane width, so paragraphs arrive shredded. zellij-send widens new sessions by attaching for a moment; `M-x zellij-send-resize-session` widens an existing one. Attaching from a terminal shrinks the session to that client's size — that is how zellij works.
+A background session created by `[New]` is only 50 columns by 48 lines by default, and Claude Code hard-wraps its output to the pane width, so paragraphs arrive shredded. zellij-send widens new sessions by attaching for a moment; `M-x zellij-send-resize-session` widens an existing one. Attaching from a terminal shrinks the session to that client's size — that is how zellij works — and it stays shrunk after you detach, so the blackboard shows fewer lines. The session watch widens it again once no client is attached.
 
 | Option | Meaning |
 |---|---|
 | `zellij-send-session-size` | (COLUMNS . LINES) for new sessions (default `(320 . 80)`; `nil` disables) |
+| `zellij-send-restore-session-size` | Widen a session left shrunk by a terminal once no client is attached (default `t`) |
 | `zellij-send-resize-detach-delay` | Seconds before the resize client detaches (default 2.0) |
 | `zellij-send-resize-timeout` | Seconds before the resize client is killed no matter what (default 8.0) |
 | `zellij-send-max-blank-lines` | Squeeze runs of blank lines down to this many (default 2; `nil` keeps them) |

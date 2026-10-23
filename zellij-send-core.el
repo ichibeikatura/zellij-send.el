@@ -260,6 +260,15 @@ detach が効かなくてもこの時間で必ずプロセスを殺す。"
   :type 'number
   :group 'zellij-send)
 
+(defcustom zellij-send-restore-session-size t
+  "non-nil なら、ターミナルが切れて縮んだままのセッションを広げ直す。
+セッションの監視（`zellij-send-start-session-watch'）のたびに見て、
+`zellij-send-session-size' より小さく、attach しているクライアントが
+居なければ `zellij-send--resize-session' で戻す
+（`zellij-send--restore-session-size'）。"
+  :type 'boolean
+  :group 'zellij-send)
+
 (defcustom zellij-send-subscribe-initial-timeout 15.0
   "subscribe 接続後、最初のイベントを待つ上限（秒）。
 これを過ぎても何も来なければ接続失敗とみなして再接続する。
@@ -1343,6 +1352,67 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
 ;;    （旧デッドロックの原因はこれ）
 ;; 3. detach に失敗しても必ずプロセスを殺す。キーバインドを変更している環境では
 ;;    Ctrl+o d が効かない
+;;
+;; ターミナルから attach すると、セッションはその端末の大きさに縮み、
+;; **detach しても縮んだまま残る**（2026-10-23 実測、zellij 0.45.1。200×80 に
+;; 広げたセッションに 100×30 の端末で attach → detach すると、ペインは
+;; 28 行 × 100 桁のまま）。黒板には zellij が描いている行しか届かないので、
+;; 遡れる量がその端末の行数に減る。端末が繋がっている間は、zellij が
+;; いちばん小さいクライアントに合わせるので広げられない。切れた後に監視が
+;; 広げ直す（`zellij-send--restore-session-size'）。
+
+(defvar zellij-send--resizing-sessions nil
+  "拡幅の attach が走っているセッション名のリスト。二重に attach しないため。")
+
+(defvar-local zellij-send--resize-tried nil
+  "この黒板のセッションを最後に広げ直そうとしたときの大きさ (COLS . ROWS)。
+広げても変わらなかったセッションに、監視のたびに attach し続けないため。")
+
+(defconst zellij-send--session-chrome-rows 2
+  "既定のレイアウトでセッションの行数のうち端末ペインに使われない行数。
+タブバーとステータスバーの 1 行ずつ（2026-10-23 実測、zellij 0.45.1）。")
+
+(defun zellij-send--session-shrunk-p (extent size tried)
+  "端末ペインの範囲 EXTENT (COLS . ROWS) のセッションを SIZE に広げ直すべきなら non-nil。
+EXTENT は `zellij-send--parse-terminal-extent' の値で、バーの行
+（`zellij-send--session-chrome-rows'）を含まない。どちらかの向きで SIZE より
+小さく、かつ TRIED（前回広げようとしたときの EXTENT）と違うとき。TRIED と
+同じなら広げても変わらなかったので繰り返さない。バーの少ないレイアウトでは
+数行縮んでも気付かないが、余計に attach するよりよい。"
+  (and extent size
+       (or (< (car extent) (car size))
+           (< (+ (cdr extent) zellij-send--session-chrome-rows) (cdr size)))
+       (not (equal extent tried))))
+
+(defun zellij-send--restore-session-size (session)
+  "縮んだままの SESSION を `zellij-send-session-size' に広げ直す。
+カレントバッファ（SESSION の黒板）から呼ぶ。`list-panes --all' で大きさを見て
+（`zellij-send--parse-terminal-extent'）、小さければ `list-clients' で
+attach しているクライアントが居ないことを確かめてから広げる。
+読めなかったとき・ペインの操作（`zellij-send-op'）中・拡幅中は何もしない。"
+  (let ((size zellij-send-session-size)
+        (buf (current-buffer)))
+    (when (and zellij-send-restore-session-size size zellij-send--pane-id
+               (not (zellij-send--op-current))
+               (not (member session zellij-send--resizing-sessions)))
+      (zellij-send--zellij-output-async
+       session '("action" "list-panes" "--all")
+       (lambda (out)
+         (let ((extent (and out (zellij-send--parse-terminal-extent out))))
+           (when (and (buffer-live-p buf)
+                      (zellij-send--session-shrunk-p
+                       extent size (buffer-local-value 'zellij-send--resize-tried buf)))
+             (zellij-send--zellij-output-async
+              session '("action" "list-clients")
+              (lambda (out)
+                ;; 失敗（nil）を 0 件と読まない。端末が繋がっていれば広げられない
+                (when (and (buffer-live-p buf)
+                           (eql (and out (zellij-send--parse-client-count out)) 0)
+                           (not (zellij-send--op-current buf))
+                           (not (member session zellij-send--resizing-sessions)))
+                  (with-current-buffer buf
+                    (setq zellij-send--resize-tried extent))
+                  (zellij-send--resize-session session)))))))))))
 
 (defun zellij-send--resize-session (session &optional callback)
   "SESSION を `zellij-send-session-size' の大きさに広げる。
@@ -1376,9 +1446,13 @@ DIR はペインの作業ディレクトリ。成功したら pane-id（例: \"t
                  (when (and (not finished)
                             (memq (process-status p) '(exit signal)))
                    (setq finished t)
+                   (setq zellij-send--resizing-sessions
+                         (delete session zellij-send--resizing-sessions))
                    (when (timerp detach-timer) (cancel-timer detach-timer))
                    (when (timerp watchdog) (cancel-timer watchdog))
                    (when callback (funcall callback t))))))
+        ;; 起動できてから印を付ける（sentinel は終了時に外す）
+        (push session zellij-send--resizing-sessions)
         ;; pty の大きさを与える。zellij は接続時にこれを読み、
         ;; 後から変わっても SIGWINCH で拾う
         (ignore-errors (set-process-window-size proc rows cols))

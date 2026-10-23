@@ -441,6 +441,35 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
                       (cons "" "terminal_1")))
     (should (eq (zellij-send--parse-pane-exited (car case) (cdr case)) :unknown))))
 
+;;; 縮んだセッションの広げ直し（大きさとクライアント数）
+
+(ert-deftest zellij-send-parse-test-terminal-extent ()
+  "端末ペインの右端と下端の最大。見えない zellij:link プラグインのはみ出しを数えない。"
+  (should (equal (zellij-send--parse-terminal-extent
+                  (zellij-send-parse-test--raw "list-panes"))
+                 '(320 . 499)))
+  ;; 100 桁 × 30 行の端末で attach → detach した後の背景セッション
+  (should (equal (zellij-send--parse-terminal-extent
+                  (zellij-send-parse-test--raw "list-panes-shrunk"))
+                 '(100 . 29)))
+  (dolist (raw (list (zellij-send-parse-test--raw "list-sessions")
+                     (zellij-send-parse-test--raw "list-clients")
+                     "" nil))
+    (should-not (zellij-send--parse-terminal-extent raw))))
+
+(ert-deftest zellij-send-parse-test-client-count ()
+  "クライアントが居なくても見出し行は出る。見出しが無いものは 0 件と読まない。"
+  (should (eql (zellij-send--parse-client-count
+                (zellij-send-parse-test--raw "list-clients"))
+               1))
+  (should (eql (zellij-send--parse-client-count
+                (zellij-send-parse-test--raw "list-clients-empty"))
+               0))
+  (dolist (raw (list (zellij-send-parse-test--raw "list-panes")
+                     "Session 'nosuch' not found. The following sessions are active:\nt2\n"
+                     "" nil))
+    (should-not (zellij-send--parse-client-count raw))))
+
 ;;; 10. 編集の差分
 
 (ert-deftest zellij-send-parse-test-diff-hunk ()

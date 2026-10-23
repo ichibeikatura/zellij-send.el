@@ -413,11 +413,12 @@ exit 0
 
 ### セッションの大きさ
 
-`[New]` で作る背景セッションは zellij の既定では 50 桁 × 48 行と狭く、Claude Code はペイン幅で改行を入れて出力するので本文が細切れになります。zellij-send は作成時に一瞬だけ attach して広げます。既存のセッションは `M-x zellij-send-resize-session` で後から広げられます。ターミナルから `zellij attach` すると、zellij の仕様でそのクライアントの大きさまで縮みます。
+`[New]` で作る背景セッションは zellij の既定では 50 桁 × 48 行と狭く、Claude Code はペイン幅で改行を入れて出力するので本文が細切れになります。zellij-send は作成時に一瞬だけ attach して広げます。既存のセッションは `M-x zellij-send-resize-session` で後から広げられます。ターミナルから `zellij attach` すると、zellij の仕様でそのクライアントの大きさまで縮み、detach しても縮んだまま残るので黒板に届く行が減ります。クライアントが居なくなればセッションの監視が広げ直します。
 
 | 変数 | 意味 |
 |---|---|
 | `zellij-send-session-size` | 新しく作るセッションの (桁 . 行)（既定 `(320 . 80)`。`nil` で広げない） |
+| `zellij-send-restore-session-size` | ターミナルで縮んだセッションを、クライアントが居なくなったら広げ直す（既定 `t`） |
 | `zellij-send-resize-detach-delay` | 拡幅用クライアントを detach するまでの秒数（既定 2.0） |
 | `zellij-send-resize-timeout` | 拡幅用クライアントを必ず殺すまでの秒数（既定 8.0） |
 | `zellij-send-max-blank-lines` | 画面の空行の連なりを何行まで詰めるか（既定 2。`nil` で詰めない） |

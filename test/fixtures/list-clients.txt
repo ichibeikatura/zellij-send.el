@@ -1,0 +1,7 @@
+#fixture: name=list-clients
+#fixture: captured=2026-10-23T22:54:50+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=なし（zsh だけの背景セッション）
+#fixture: note=zellij --session t2 action list-clients（100×30 の端末で attach している間）
+CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND
+1         terminal_0     N/A            

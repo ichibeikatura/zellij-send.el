@@ -1,0 +1,10 @@
+#fixture: name=list-panes-shrunk
+#fixture: captured=2026-10-23T22:54:54+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=なし（zsh だけの背景セッション）
+#fixture: note=zellij --session t2 action list-panes --all（320×80 に広げた背景セッションに 100×30 の端末で attach → detach した後。CWD は伏せた）
+TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+0  0  Tab #1  plugin_0  plugin  (.) - zellij:link  zellij:link  -  false  false  false  13  13  24  25
+0  0  Tab #1  plugin_1  plugin  tab-bar  tab-bar  -  false  false  false  0  0  1  100
+0  0  Tab #1  plugin_2  plugin  status-bar  status-bar  -  false  false  false  0  29  1  100
+0  0  Tab #1  terminal_0  terminal  Pane #1  /bin/zsh  /Users/mck/zjs-fixture  true  false  false  0  1  28  100

@@ -75,6 +75,8 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 一瞬 attach → detach すること（`zellij-send--resize-session`。ペインを作る前に行う）。
 この attach は全面非同期・出力を捨てる `:filter` 必須・watchdog で必ず殺す
 （Emacs が pty を読まないと zellij サーバが書き込みでブロックし、セッション全体が固まる）。
+ターミナルの attach で縮むと detach 後も縮んだまま残る。監視が `list-clients` 0 件を
+確かめてから広げ直す（`zellij-send--restore-session-size`。実測はその前のコメント）。
 
 ### subscribe
 `zellij subscribe` は `--pane-id` 必須、viewport は毎回フル、行末はペイン幅ぶん空白で

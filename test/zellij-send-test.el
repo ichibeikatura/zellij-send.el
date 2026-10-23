@@ -163,6 +163,22 @@
                "PANE_ID  TYPE  TITLE\nterminal_1  terminal  claude\n" "terminal_1")
               :unknown)))
 
+;;; zellij-send--session-shrunk-p
+
+(ert-deftest zellij-send-test-session-shrunk-p ()
+  "どちらかの向きで小さければ広げ直す。前回広げても変わらなかった大きさなら繰り返さない。"
+  ;; 320×80 に広げた直後の端末ペインは 1 行目から 78 行（バーが 2 行）
+  (should-not (zellij-send--session-shrunk-p '(320 . 79) '(320 . 80) nil))
+  (should-not (zellij-send--session-shrunk-p '(320 . 499) '(320 . 80) nil))
+  (should (zellij-send--session-shrunk-p '(100 . 29) '(320 . 80) nil))
+  (should (zellij-send--session-shrunk-p '(320 . 29) '(320 . 80) nil))
+  (should (zellij-send--session-shrunk-p '(400 . 49) '(320 . 80) nil))
+  (should-not (zellij-send--session-shrunk-p '(100 . 29) '(320 . 80) '(100 . 29)))
+  ;; 別の大きさに縮んだら、もう一度広げる
+  (should (zellij-send--session-shrunk-p '(120 . 39) '(320 . 80) '(100 . 29)))
+  (should-not (zellij-send--session-shrunk-p nil '(320 . 80) nil))
+  (should-not (zellij-send--session-shrunk-p '(100 . 29) nil nil)))
+
 ;;; zellij-send--askq-parse
 ;;
 ;; 素材は 2026-07-29 に実機（Claude Code v2.1.220 / zellij 0.44.3、320 桁の

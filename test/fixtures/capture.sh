@@ -15,6 +15,7 @@
 #   capture.sh key   S P キー [回数]      up down left right enter esc tab space ctrl-u 1〜9
 #   capture.sh list-panes S NAME          `list-panes --all' の出力を NAME.txt に保存
 #   capture.sh sessions                   list-sessions.txt と list-sessions-empty.txt を保存
+#   capture.sh list-clients S NAME        `list-clients' の出力を NAME.txt に保存
 #   capture.sh list-sessions NAME         `list-sessions' の出力を NAME.txt に保存
 #   capture.sh subscribe S P NAME         subscribe の最初の 1 イベントを NAME.jsonl に保存
 #
@@ -114,6 +115,12 @@ case "$cmd" in
     f="$DIR/$2.txt"
     { header "$2" "" "" "zellij --session $1 action list-panes --all"
       $ZELLIJ_BIN --session "$1" action list-panes --all; } > "$f"
+    echo "保存: $f" ;;
+  list-clients)
+    [ $# -ge 2 ] || die "list-clients S NAME"
+    f="$DIR/$2.txt"
+    { header "$2" "" "" "zellij --session $1 action list-clients"
+      $ZELLIJ_BIN --session "$1" action list-clients; } > "$f"
     echo "保存: $f" ;;
   list-sessions)
     [ $# -ge 1 ] || die "list-sessions NAME"

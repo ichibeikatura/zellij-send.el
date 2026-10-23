@@ -1458,6 +1458,12 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
                   (killed (if zellij-send-prune-gone
                               (zellij-send--prune-gone sessions)
                             0)))
+             ;; ターミナルが切れて縮んだままのセッションを広げ直す
+             (dolist (buf (zellij-send-sessions))
+               (let ((session (zellij-send-session-name buf)))
+                 (when (member session sessions)
+                   (with-current-buffer buf
+                     (zellij-send--restore-session-size session)))))
              (when new
                (message "セッションに接続中: %s" (string-join new ", "))
                (dolist (session new)

@@ -452,6 +452,45 @@ COLUMN はヘッダの列名（\"EXITED\"・\"COMMAND\" など）。取れなけ
                            (reverse (cdr table)))))
         (and row (nth col row))))))
 
+(defun zellij-send--parse-terminal-extent (raw)
+  "`action list-panes --all' の出力 RAW から端末ペインが占める範囲 (COLS . ROWS) を返す。
+浮いていない端末ペインの右端（X + COLS）と下端（Y + ROWS）の最大。既定の
+レイアウトでは、セッションの大きさからタブバーとステータスバーの 2 行を
+引いた値になる（2026-10-23 実測、zellij 0.45.1。100 桁 × 30 行の端末で
+attach すると、端末ペインは 1 行目から 28 行・幅 100）。
+
+plugin ペインは数えない。`zellij:link' のプラグインは見えないまま
+13,13 に 25 桁 × 24 行で居続け、30 行のセッションでは下端が 37 行目まで
+はみ出す（同日実測）。取れなければ nil。表の読み方は `zellij-send--pane-table'。"
+  (let* ((table (zellij-send--pane-table raw))
+         (header (car table))
+         (cols (mapcar (lambda (name) (seq-position header name))
+                       '("X" "Y" "ROWS" "COLS")))
+         (type-col (seq-position header "TYPE"))
+         (float-col (seq-position header "FLOATING"))
+         (width 0)
+         (height 0))
+    (when (and type-col float-col (not (memq nil cols)))
+      (dolist (fields (cdr table))
+        (let ((nums (mapcar (lambda (c) (nth c fields)) cols)))
+          (when (and (equal (nth type-col fields) "terminal")
+                     (not (equal (nth float-col fields) "true"))
+                     (seq-every-p (lambda (s) (string-match-p "\\`[0-9]+\\'" s))
+                                  nums))
+            (pcase-let ((`(,x ,y ,rows ,w) (mapcar #'string-to-number nums)))
+              (setq width (max width (+ x w))
+                    height (max height (+ y rows)))))))
+      (and (> width 0) (> height 0) (cons width height)))))
+
+(defun zellij-send--parse-client-count (raw)
+  "`action list-clients' の出力 RAW から attach しているクライアントの数を返す。
+見出し行（CLIENT_ID …）で始まっていなければ nil（失敗を 0 件と読まない）。
+クライアントが居なくても見出し行だけは出る。`zellij subscribe' は
+クライアントに数えられない（2026-10-23 実測、zellij 0.45.1）。"
+  (let ((lines (split-string (or raw "") "\n")))
+    (when (string-prefix-p "CLIENT_ID" (car lines))
+      (seq-count (lambda (line) (string-match-p "[^ \t]" line)) (cdr lines)))))
+
 (defun zellij-send--parse-terminal-panes (raw)
   "`action list-panes --all' の出力 RAW から端末ペインを順に返す。
 各要素は (PANE-ID COMMAND EXITED-P)。plugin ペインは除外する。
