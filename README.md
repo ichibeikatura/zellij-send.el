@@ -435,6 +435,8 @@ The blackboard mirrors a 320-column screen. Emacs in a Japanese environment coun
 
 Drafts and transcripts always wrap.
 
+Claude Code inserts its own line breaks into lines wider than the pane (320 columns): long paragraphs and long diff lines. When the screen wraps, the blackboard joins those breaks back before display and lets Emacs wrap at the window width. Japanese rows are joined when they fill the pane; English rows when the next word would not have fit on them. Tables, frames and menus are left alone.
+
 ### Answering questions
 
 | Option | Meaning |

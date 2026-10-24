@@ -1,0 +1,27 @@
+#fixture: name=diff-wrapped
+#fixture: captured=2026-10-24T09:50:00+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.310 (Claude Code)
+#fixture: note=320 桁 × 498 行のペインの dump-screen から、Edit の差分 2 つと入力欄の罫線だけを切り出した（間の行は省いた）。上は日本語の行（全角が入らず 312 桁で切れる）、下は英文の行を 2 文字延ばしたもの（単語の途中 `fro' / `m' で切れる）
+      82  `zellij subscribe` は `--pane-id` 必須、viewport は毎回フル、行末はペイン幅ぶん空白で
+  ⎿  Updated README.ja.md (+2 -1)
+      413
+      414  ### セッションの大きさ
+      415
+      416 -`[New]` で作る背景セッションは zellij の既定では 50 桁 × 48 行と狭く、Claude Code はペイン幅で改行を入れて出力するので本文が細切れになります。zellij-send は作成時に一瞬だけ attach して広げます。既存のセッションは `M-x zellij-send-resize-session` で後から広げられます。ターミナルから `zellij attach` す
+          -ると、zellij の仕様でそのクライアントの大きさまで縮みます。
+      416 +`[New]` で作る背景セッションは zellij の既定では 50 桁 × 48 行と狭く、Claude Code はペイン幅で改行を入れて出力するので本文が細切れになります。zellij-send は作成時に一瞬だけ attach して広げます。既存のセッションは `M-x zellij-send-resize-session` で後から広げられます。ターミナルから `zellij attach` す
+          +ると、zellij の仕様でそのクライアントの大きさまで縮み、detach しても縮んだまま残るので黒板に届く行が減ります。クライアントが居なくなればセッションの監視が広げ直します。
+      417
+⏺ Update(README.md)
+  ⎿  Added 1 line, removed 1 line
+      413
+      414  ### Session size
+      415
+      416 -A background session created by `[New]` is only 50 columns by 48 lines by default, and Claude Code hard-wraps its output to the pane width, so paragraphs arrive shredded. zellij-send widens new sessions by attaching for a moment; `M-x zellij-send-resize-session` widens an existing one. Attaching from
+          -a terminal shrinks the session to that client's size — that is how zellij works — and it stays shrunk after you detach, so the blackboard shows fewer lines. The session watch widens it again once no client is attached.
+      416 +A background session created by `[New]` is only 50 columns by 48 lines by defaultXY, and Claude Code hard-wraps its output to the pane width, so paragraphs arrive shredded. zellij-send widens new sessions by attaching for a moment; `M-x zellij-send-resize-session` widens an existing one. Attaching fro
+          +m a terminal shrinks the session to that client's size — that is how zellij works — and it stays shrunk after you detach, so the blackboard shows fewer lines. The session watch widens it again once no client is attached.
+      417
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

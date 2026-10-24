@@ -74,17 +74,128 @@ STIX Two Math で `⏺' `⎿' が、Apple Symbols で残りの一部が収まっ
 
 ;;; スクリーンダンプ
 
-(defun zellij-send--screen-for-display (screen)
+;; Claude Code は、ペインの幅に収まらない行に自分で改行を入れ、続きの行を
+;; 字下げして描く（2026-10-24 実測、Claude Code v2.1.310 / zellij 0.45.1、
+;; 320 桁のペイン）:
+;;
+;;   本文  `⏺ ' や空白 2 つで始まる段落は 320 桁で切れ、続きの行は同じ桁まで
+;;         字下げして始まる。日本語は桁いっぱい（全角が入らなければ 319 桁）
+;;         まで詰めて切る（test/fixtures/askq-multi.txt）。英文は単語の切れ目で
+;;         切り、切れ目の空白は消える。英文の本文が 320 桁を超える画面は採れて
+;;         いないので、同じ描き方のスラッシュコマンドの説明文で確かめた
+;;         （slash-menu-wrapped.txt の `colliding agent' / `definitions,'）
+;;   差分  行番号の欄（`      416 '）と記号（`-' `+'）のあとが、ペイン幅 − 7 桁
+;;         （320 桁で 313 桁）で**単語に関係なく**切れる。続きの行は行番号の欄を
+;;         空白にして記号を付け直す。切れ目の空白は前の行の末尾に残るので、
+;;         行末の空白を削った画面からは消えて見える（diff-wrapped.txt）
+;;
+;; そのまま映すと、窓の幅での折り返しと混ざって文の途中で行が変わる。
+;; `zellij-send--join-wrapped-lines' がつなぎ直し、窓の幅での折り返しは Emacs に
+;; 任せる。つなぐのは黒板に映す形だけで、画面を解析する処理は正規形を読む。
+
+(defconst zellij-send--diff-wrap-margin 7
+  "差分の行が切れる桁の、ペイン幅からの差（320 桁のペインで 313 桁）。
+2026-10-24 実測。320 桁以外のペインでは確かめていない。")
+
+(defconst zellij-send--wrap-stop-regexp "[─━│┃┌┐└┘├┤┬┴┼╭╮╯╰⎿❯⏵✻✶✽✳✢✔☐☒]"
+  "これを含む行は本文の段落とみなさず、つながない（表・枠・ツール出力・入力欄）。")
+
+(defun zellij-send--screen-pane-width (lines)
+  "画面の行 LINES からペインの幅を返す。判らなければ nil。
+Claude Code は入力欄の上下にペイン幅いっぱいの `─' を引くので、`─' だけの
+行で一番長いものの幅を使う。幅は zellij の数え方（Unicode 本来の幅）で、
+呼び出し側が `char-width-table' を束縛しておくこと。"
+  (let ((width nil))
+    (dolist (line lines)
+      (when (string-match-p "\\`─+\\'" line)
+        (setq width (max (or width 0) (string-width line)))))
+    width))
+
+(defun zellij-send--wrap-kind (line)
+  "LINE が折り返しの続きを持ちうる行なら、その形を返す。
+差分の行なら (diff 行番号の欄の桁数 記号)、本文の段落なら (prose 字下げの桁数)、
+どちらでもなければ nil。"
+  (cond
+   ((string-match "\\`\\( +[0-9]+ \\)\\([-+ ]\\)" line)
+    (list 'diff (length (match-string 1 line)) (aref line (match-beginning 2))))
+   ((string-match-p zellij-send--wrap-stop-regexp
+                    (if (string-prefix-p "⏺ " line) (substring line 2) line))
+    nil)
+   ((string-prefix-p "⏺ " line) (list 'prose 2))
+   ((string-match "\\` +[^ ]" line) (list 'prose (1- (match-end 0))))))
+
+(defun zellij-send--wrap-continuation (kind prev prev-width line pane)
+  "LINE が、形 KIND の行の折り返しの続きなら、前の行につなぐ文字列を返す。
+PREV は直前の行（幅 PREV-WIDTH）、PANE はペインの幅。続きでなければ nil。
+返すのは、切れ目で消えた空白と LINE の字下げを除いた中身。"
+  (pcase kind
+    (`(diff ,gutter ,marker)
+     (let ((wrap (- pane zellij-send--diff-wrap-margin)))
+       (when (and (>= prev-width (1- wrap))
+                  (> (length line) (1+ gutter))
+                  (string-match-p (format "\\` \\{%d\\}%s" gutter
+                                          (regexp-quote (string marker)))
+                                  line))
+         (let* ((content (substring line (1+ gutter)))
+                ;; 足りない桁は、行末の空白を削って消えた切れ目の空白。
+                ;; 全角が入らずに 1 桁余った分は空白ではない
+                (gap (- wrap prev-width
+                        (if (= (char-width (aref content 0)) 2) 1 0))))
+           (concat (make-string (max gap 0) ?\s) content)))))
+    (`(prose ,col)
+     (when (and (string-match "\\` +" line)
+                (= (match-end 0) col)
+                (not (string-match-p zellij-send--wrap-stop-regexp line)))
+       (let* ((content (substring line col))
+              (wide (or (= (char-width (aref prev (1- (length prev)))) 2)
+                        (= (char-width (aref content 0)) 2))))
+         (if wide
+             ;; 日本語は桁いっぱいまで詰めて切る
+             (and (>= prev-width (1- pane)) content)
+           ;; 英文は単語の切れ目で切る。次の単語が前の行に入りきらなかったなら
+           ;; 折り返し。桁いっぱいなら長い単語を途中で切ったもの
+           (let ((word (car (split-string content " "))))
+             (and (> (+ prev-width 1 (string-width word)) pane)
+                  (concat (if (>= prev-width pane) "" " ") content)))))))))
+
+(defun zellij-send--join-wrapped-lines (screen)
+  "正規形の SCREEN で、Claude Code がペインの幅で入れた改行をつなぎ直して返す。
+描き方はこの関数の前のコメント。ペインの幅が判らなければ SCREEN をそのまま返す。"
+  (let* ((char-width-table (zellij-send--root-char-width-table))
+         (lines (split-string screen "\n"))
+         (pane (zellij-send--screen-pane-width lines)))
+    (if (not pane)
+        screen
+      (let (out row kind prev prev-width)
+        (dolist (line lines)
+          (let ((cont (and row kind (> (length line) 0)
+                           (zellij-send--wrap-continuation
+                            kind prev prev-width line pane))))
+            (if cont
+                (push cont row)
+              (when row (push (apply #'concat (nreverse row)) out))
+              (setq row (list line)
+                    kind (and (> (length line) 0) (zellij-send--wrap-kind line))))
+            (setq prev line
+                  prev-width (string-width line))))
+        (when row (push (apply #'concat (nreverse row)) out))
+        (mapconcat #'identity (nreverse out) "\n")))))
+
+(defun zellij-send--screen-for-display (screen &optional join)
   "正規形の SCREEN（`zellij-send--normalize-screen'）を、黒板に映す形にして返す。
-行頭の `─' の連なりを削り、長い空行の連なりを `zellij-send-max-blank-lines'
-まで詰める。呼ぶのは `zellij-send--update-buffer' だけ。
+JOIN が non-nil なら、ペインの幅で入った改行をつなぎ直す
+（`zellij-send--join-wrapped-lines'）。行頭の `─' の連なりを削り、長い空行の
+連なりを `zellij-send-max-blank-lines' まで詰める。呼ぶのは
+`zellij-send--update-buffer' だけ。
 
 2026-10-19 までは、この 2 つも受信時に行っていた（`zellij-send--process-dump'）。
 その結果をパーサが読んでいたので、罫線の残骸を相手にする処理
 （`zellij-send--slash-border-p'）が要り、空行を詰める設定で解析の結果が
 変わりえた。表示の整形を解析から切り離すために分けた。"
   (let ((text (zellij-send--trim-end
-               (replace-regexp-in-string "^─+" "" screen) '(?\n))))
+               (replace-regexp-in-string
+                "^─+" "" (if join (zellij-send--join-wrapped-lines screen) screen))
+               '(?\n))))
     ;; 本文と最下段の入力欄の間に挟まった空行を詰める。照合は改行の位置から
     ;; だけ始まり、連なりを 1 回読むだけなので線形時間
     (if (natnump zellij-send-max-blank-lines)
@@ -352,7 +463,9 @@ SCREEN が非 nil ならペインの画面（CONTENT）を映しているので�
   "この黒板で、画面を折り返すかどうかを切り替える。
 既定は `zellij-send-wrap-screen'。切り替えは受信しても戻らない。
 表を見たいときに折り返しを切り、読み終えたら戻す、という使い方を想定する。
-押した時点の表示にもすぐ効かせる（下書きの途中でも切れる）。"
+押した時点の表示にもすぐ効かせる（下書きの途中でも切れる）。
+ペインの幅で入った改行のつなぎ直し（`zellij-send--join-wrapped-lines'）も
+折り返すときだけ行うので、そちらは次に画面を受け取ったときに変わる。"
   (interactive)
   (unless zellij-send--session
     (user-error "zellij-send バッファ外では使えません"))
@@ -427,7 +540,8 @@ IF-CHANGED が non-nil なら、黒板に同じ表示形がもう映っていて
 「同じか」は表示形どうしで比べる。正規形と黒板の中身を比べると、罫線や
 空行の扱いが違うので必ず食い違う。`--last-content' の前回値と比べる形に
 しないのは、送信後に空にした黒板などを、画面が変わるまで空のまま残すため。"
-  (let ((text (zellij-send--screen-for-display content)))
+  (let ((text (zellij-send--screen-for-display
+               content (and zellij-send--wrap (zellij-send--capable-p 'join-wrapped)))))
     (cond
      ((zellij-send--defer-update-p)
       ;; 画面と同じ内容に戻ったなら、保留するものは無い

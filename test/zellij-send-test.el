@@ -96,6 +96,70 @@
     (should (equal (zellij-send--screen-for-display (zellij-send--normalize-screen raw))
                    "本文\n\n❯ 入力欄\n ↯ ─\n  ⏵⏵ auto"))))
 
+;; ペインの幅で入った改行のつなぎ直し。実機の画面は zellij-send-parse-test.el で
+;; 確かめるので、ここでは境目の場合を幅 40 桁の画面で確かめる
+(defconst zellij-send-test--rule-40 (make-string 40 ?─)
+  "幅 40 桁のペインの入力欄の罫線。")
+
+(defun zellij-send-test--join (&rest lines)
+  "LINES と 40 桁の罫線を並べた画面をつなぎ直し、罫線より前の行を返す。"
+  (butlast (split-string (zellij-send--join-wrapped-lines
+                          (string-join (append lines (list zellij-send-test--rule-40)) "\n"))
+                         "\n")))
+
+(ert-deftest zellij-send-test-join-wrapped-english ()
+  "英文は、次の単語が前の行に入りきらなかったときだけ空白を挟んでつなぐ。"
+  ;; 38 桁 + 空白 + `jumps'（5 桁）は 40 桁に入らない → 折り返し
+  (should (equal (zellij-send-test--join
+                  "⏺ The quick brown fox and the lazy dog"
+                  "  jumps over the fence.")
+                 '("⏺ The quick brown fox and the lazy dog jumps over the fence.")))
+  ;; 入りきる単語で始まる行は、別の行（書き手が改行した）
+  (should (equal (zellij-send-test--join "  Short line." "  Next line.")
+                 '("  Short line." "  Next line.")))
+  ;; 桁いっぱいの行は長い単語を途中で切ったもの → 詰める
+  (should (equal (zellij-send-test--join
+                  "  https://example.com/aaaaaaaaaaaaaaaaaaaaa"
+                  "  bbbb/cc")
+                 '("  https://example.com/aaaaaaaaaaaaaaaaaaaaabbbb/cc")))
+  ;; 字下げが違う行（箇条書きの続きなど）はつながない
+  (should (equal (zellij-send-test--join
+                  "  The quick brown fox and the lazy dogs"
+                  "    jumps over the fence.")
+                 '("  The quick brown fox and the lazy dogs"
+                   "    jumps over the fence."))))
+
+(ert-deftest zellij-send-test-join-wrapped-japanese ()
+  "日本語は桁いっぱい（全角が入らなければ 1 桁少ない）で切れた行だけ、空白なしでつなぐ。"
+  (let ((full (concat "  " (make-string 19 ?あ)))      ; 40 桁
+        (short (concat "  " (make-string 18 ?あ) "a"))) ; 39 桁
+    (should (equal (zellij-send-test--join full "  いう") (list (concat full "いう"))))
+    (should (equal (zellij-send-test--join short "  いう") (list (concat short "いう"))))
+    (should (equal (zellij-send-test--join (concat "  " (make-string 10 ?あ)) "  いう")
+                   (list (concat "  " (make-string 10 ?あ)) "  いう")))))
+
+(ert-deftest zellij-send-test-join-wrapped-leaves-others ()
+  "罫線・枠・ツール出力・入力欄の行はつながない。ペインの幅が判らない画面は触らない。"
+  (let ((full (concat "  " (make-string 19 ?あ))))
+    (dolist (next '("  │ いう │" "  ⎿  いう" "  ❯ いう"))
+      (should (equal (zellij-send-test--join full next) (list full next))))
+    (should (equal (zellij-send-test--join (concat "  │" (make-string 18 ?あ) "│") "  いう")
+                   (list (concat "  │" (make-string 18 ?あ) "│") "  いう")))
+    ;; 罫線が無い（Claude Code の画面でない）なら、そのまま返す
+    (let ((screen (concat full "\n  いう")))
+      (should (equal (zellij-send--join-wrapped-lines screen) screen)))))
+
+(ert-deftest zellij-send-test-screen-for-display-join ()
+  "つなぎ直すのは JOIN を渡したときだけ。正規形は変えない。"
+  (let ((raw (string-join (list (concat "  " (make-string 19 ?あ)) "  いう"
+                                zellij-send-test--rule-40)
+                          "\n"))
+        (zellij-send-max-blank-lines 2))
+    (should (equal (zellij-send--screen-for-display raw)
+                   (concat "  " (make-string 19 ?あ) "\n  いう")))
+    (should (equal (zellij-send--screen-for-display raw t)
+                   (concat "  " (make-string 19 ?あ) "いう")))))
+
 (ert-deftest zellij-send-test-trim-end ()
   "末尾の指定文字だけを落とし、途中と先頭は残す。"
   (should (equal (zellij-send--trim-end "  A   B \t " '(?\s ?\t)) "  A   B"))

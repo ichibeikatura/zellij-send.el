@@ -470,6 +470,48 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
                      "" nil))
     (should-not (zellij-send--parse-client-count raw))))
 
+;;; ペインの幅で入った改行のつなぎ直し
+
+(defun zellij-send-parse-test--joined (name)
+  "fixture NAME をつなぎ直した行のリストを返す。"
+  (split-string (zellij-send--join-wrapped-lines (zellij-send-parse-test--raw name))
+                "\n"))
+
+(ert-deftest zellij-send-parse-test-join-wrapped-diff ()
+  "差分の続きの行を、行番号の欄と付け直した記号を除いてつなぐ。
+英文は単語の途中で切れ、切れ目の空白は前の行の末尾で削られている。"
+  (let ((lines (zellij-send-parse-test--joined "diff-wrapped")))
+    ;; 日本語: 全角が入らず 1 桁余った分は空白にしない
+    (should (member (concat "      416 -`[New]` で作る背景セッションは zellij の既定では 50 桁 × 48 行と狭く、"
+                            "Claude Code はペイン幅で改行を入れて出力するので本文が細切れになります。"
+                            "zellij-send は作成時に一瞬だけ attach して広げます。既存のセッションは "
+                            "`M-x zellij-send-resize-session` で後から広げられます。ターミナルから "
+                            "`zellij attach` すると、zellij の仕様でそのクライアントの大きさまで縮みます。")
+                    lines))
+    ;; 英文: 313 桁目の空白が削られて消えた行は空白を戻し、単語の途中で切れた行は詰める
+    (should (seq-find (lambda (l) (string-match-p "\\`      416 -A .* Attaching from a terminal shrinks" l))
+                      lines))
+    (should (seq-find (lambda (l) (string-match-p "\\`      416 \\+A .* Attaching from a terminal shrinks" l))
+                      lines))
+    ;; 続きの行は残らない。行番号のある行と罫線はそのまま
+    (should-not (seq-find (lambda (l) (string-match-p "\\`          [-+]" l)) lines))
+    (should (member "      417" lines))
+    (should (member "  ⎿ \u00a0Added 1 line, removed 1 line" lines))))
+
+(ert-deftest zellij-send-parse-test-join-wrapped-prose ()
+  "日本語の段落は 320 桁いっぱいで切れた行だけつなぎ、選択肢や罫線には触れない。"
+  (let* ((raw (zellij-send-parse-test--raw "askq-multi"))
+         (lines (zellij-send-parse-test--joined "askq-multi")))
+    ;; 2 行に分かれていた段落が 1 行になる
+    (should (seq-find (lambda (l) (string-match-p "からなのか、人の気配が少ないからなのか" l)) lines))
+    (should-not (member "  か、人の気配が少ないからなのか、理由はよく知らない。ただ、夏の朝よりも世界が一枚薄く、遠くまで透けて見えるような気がする。" lines))
+    ;; 桁いっぱいでない行（300 桁）は次の段落とつながない
+    (should (= (length (split-string raw "\n"))
+               (+ (length lines) 12)))
+    ;; 選択肢の解析に使う部分は変わらない
+    (should (equal (zellij-send--askq-parse (string-join lines "\n"))
+                   (zellij-send--askq-parse raw)))))
+
 ;;; 10. 編集の差分
 
 (ert-deftest zellij-send-parse-test-diff-hunk ()
