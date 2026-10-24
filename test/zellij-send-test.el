@@ -160,6 +160,35 @@
     (should (equal (zellij-send--screen-for-display raw t)
                    (concat "  " (make-string 19 ?あ) "いう")))))
 
+(ert-deftest zellij-send-test-screen-for-display-strip-margin ()
+  "STRIP-MARGIN なら空白 2 つで始まる行を 2 桁左へ寄せる。相対的な字下げと ⏺ の行は保つ。"
+  (let ((raw (string-join '("⏺ 直しました。"
+                            ""
+                            "  変更したファイル"
+                            "  - 本体: ui"
+                            "    - 入れ子"
+                            "  ⎿  Updated README.md"
+                            "      416 -A"
+                            " 1 桁だけの字下げ"
+                            "────────"
+                            "  ⏵⏵ auto")
+                          "\n"))
+        (zellij-send-max-blank-lines 2))
+    (should (equal (zellij-send--screen-for-display raw nil t)
+                   (string-join '("⏺ 直しました。"
+                                  ""
+                                  "変更したファイル"
+                                  "- 本体: ui"
+                                  "  - 入れ子"
+                                  "⎿  Updated README.md"
+                                  "    416 -A"
+                                  " 1 桁だけの字下げ"
+                                  ""
+                                  "⏵⏵ auto")
+                                "\n")))
+    ;; 渡さなければ今まで通り
+    (should (string-match-p "^  変更したファイル$" (zellij-send--screen-for-display raw)))))
+
 (ert-deftest zellij-send-test-trim-end ()
   "末尾の指定文字だけを落とし、途中と先頭は残す。"
   (should (equal (zellij-send--trim-end "  A   B \t " '(?\s ?\t)) "  A   B"))

@@ -119,13 +119,15 @@
     (transcript       . "会話履歴（JSONL）を読める（Claude Code の transcript）")
     (output-log       . "Stop フックが書く出力ログを読める（Claude Code の hooks）")
     (remote-control   . "起動時に --remote-control SESSION を付けられる（Claude Code）")
-    (join-wrapped     . "ペイン幅で入った改行を黒板でつなぎ直せる（Claude Code の画面）"))
+    (join-wrapped     . "ペイン幅で入った改行を黒板でつなぎ直せる（Claude Code の画面）")
+    (strip-margin     . "画面の左 2 桁の余白を黒板で詰められる（Claude Code の画面）"))
   "`zellij-send-agents' の `:capabilities' に書ける能力と、その意味。")
 
 (defcustom zellij-send-agents
   '(("claude" :progress-file "CLAUDE.md"
      :capabilities (number-reply compact clear slash-completion askq
-                    transcript output-log remote-control join-wrapped))
+                    transcript output-log remote-control join-wrapped
+                    strip-margin))
     ("codex"  :progress-file "AGENTS.md"
      :capabilities (compact clear))
     ("agy"    :prompt-marker "[❯›>]" :progress-file "GEMINI.md"

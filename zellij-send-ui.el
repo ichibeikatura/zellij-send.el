@@ -181,21 +181,25 @@ PREV は直前の行（幅 PREV-WIDTH）、PANE はペインの幅。続きで�
         (when row (push (apply #'concat (nreverse row)) out))
         (mapconcat #'identity (nreverse out) "\n")))))
 
-(defun zellij-send--screen-for-display (screen &optional join)
+(defun zellij-send--screen-for-display (screen &optional join strip-margin)
   "正規形の SCREEN（`zellij-send--normalize-screen'）を、黒板に映す形にして返す。
 JOIN が non-nil なら、ペインの幅で入った改行をつなぎ直す
-（`zellij-send--join-wrapped-lines'）。行頭の `─' の連なりを削り、長い空行の
-連なりを `zellij-send-max-blank-lines' まで詰める。呼ぶのは
-`zellij-send--update-buffer' だけ。
+（`zellij-send--join-wrapped-lines'）。STRIP-MARGIN が non-nil なら、空白 2 つで
+始まる行から先頭の空白 2 つを削る。Claude Code は `⏺' だけを 0 桁目に置き、
+本文・ツール出力・差分・状態表示を 2 桁目から描くので、左の余白が詰まり、
+コピーした文章に余計な空白が付かない。一律に削るので、入れ子の箇条書きや
+差分の桁揃えは崩れない（字下げの判定が要るつなぎ直しより後に行う）。
+行頭の `─' の連なりを削り、長い空行の連なりを `zellij-send-max-blank-lines'
+まで詰める。呼ぶのは `zellij-send--update-buffer' だけ。
 
 2026-10-19 までは、この 2 つも受信時に行っていた（`zellij-send--process-dump'）。
 その結果をパーサが読んでいたので、罫線の残骸を相手にする処理
 （`zellij-send--slash-border-p'）が要り、空行を詰める設定で解析の結果が
 変わりえた。表示の整形を解析から切り離すために分けた。"
-  (let ((text (zellij-send--trim-end
-               (replace-regexp-in-string
-                "^─+" "" (if join (zellij-send--join-wrapped-lines screen) screen))
-               '(?\n))))
+  (let* ((text (if join (zellij-send--join-wrapped-lines screen) screen))
+         (text (if strip-margin (replace-regexp-in-string "^  " "" text t t) text))
+         (text (zellij-send--trim-end (replace-regexp-in-string "^─+" "" text)
+                                      '(?\n))))
     ;; 本文と最下段の入力欄の間に挟まった空行を詰める。照合は改行の位置から
     ;; だけ始まり、連なりを 1 回読むだけなので線形時間
     (if (natnump zellij-send-max-blank-lines)
@@ -464,8 +468,9 @@ SCREEN が非 nil ならペインの画面（CONTENT）を映しているので�
 既定は `zellij-send-wrap-screen'。切り替えは受信しても戻らない。
 表を見たいときに折り返しを切り、読み終えたら戻す、という使い方を想定する。
 押した時点の表示にもすぐ効かせる（下書きの途中でも切れる）。
-ペインの幅で入った改行のつなぎ直し（`zellij-send--join-wrapped-lines'）も
-折り返すときだけ行うので、そちらは次に画面を受け取ったときに変わる。"
+ペインの幅で入った改行のつなぎ直し（`zellij-send--join-wrapped-lines'）と
+左の余白を詰めるのも折り返すときだけ行うので、そちらは次に画面を受け取った
+ときに変わる。"
   (interactive)
   (unless zellij-send--session
     (user-error "zellij-send バッファ外では使えません"))
@@ -541,7 +546,9 @@ IF-CHANGED が non-nil なら、黒板に同じ表示形がもう映っていて
 空行の扱いが違うので必ず食い違う。`--last-content' の前回値と比べる形に
 しないのは、送信後に空にした黒板などを、画面が変わるまで空のまま残すため。"
   (let ((text (zellij-send--screen-for-display
-               content (and zellij-send--wrap (zellij-send--capable-p 'join-wrapped)))))
+               content
+               (and zellij-send--wrap (zellij-send--capable-p 'join-wrapped))
+               (and zellij-send--wrap (zellij-send--capable-p 'strip-margin)))))
     (cond
      ((zellij-send--defer-update-p)
       ;; 画面と同じ内容に戻ったなら、保留するものは無い
