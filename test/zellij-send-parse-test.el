@@ -277,7 +277,7 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
 NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度でも返す。
 結果と打ったキーを返す。BACKGROUND が non-nil なら、裏の取得（黙った操作）が
 走っている状態から始める。"
-  (let ((queue screens) typed keys result)
+  (let ((queue screens) typed keys result timers)
     (with-temp-buffer
       (setq-local zellij-send--session "fixture00"
                   zellij-send--pane-id "terminal_1"
@@ -296,12 +296,20 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
                 ((symbol-function 'zellij-send--send-keys)
                  (lambda (_session bytes &optional cb) (push bytes keys)
                    (when cb (funcall cb 0))))
+                ;; タイマーはその場で呼ばず、溜めて順に呼ぶ。短い間隔で読み直す
+                ;; 待ち（`zellij-send-slash-poll-interval'）をその場で呼ぶと、
+                ;; 実機では起きない深い再帰になる
                 ((symbol-function 'run-at-time)
-                 (lambda (_time _repeat fn &rest args) (apply fn args))))
+                 (lambda (_time _repeat fn &rest args)
+                   (setq timers (append timers (list (cons fn args))))
+                   nil)))
         (when background
           (zellij-send--op-begin (current-buffer) 'slash-collect :silent t))
         (zellij-send--slash-probe-arg (current-buffer) (or name "/effort") "" nil
                                       (lambda (r) (setq result r)))
+        (while timers
+          (let ((timer (pop timers)))
+            (apply (car timer) (cdr timer))))
         (list result (nreverse typed) (nreverse keys)
               (zellij-send--op-current))))))
 
@@ -362,6 +370,15 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
                      '(:ok (:hint "low|medium|high|xhigh|max|auto|ultracode [on|off]"))))
       (should (equal typed '("/effort ")))
       (should-not op))))
+
+(ert-deftest zellij-send-parse-test-slash-menu-cursor ()
+  "メニューでカーソルのある行の値を見つける。メニューの無い画面では nil。"
+  (should (equal (zellij-send--slash-menu-cursor
+                  (zellij-send-parse-test--screen "slash-arg-plugin"))
+                 "list"))
+  (dolist (name '("idle" "slash-hint-effort" "askq-single"))
+    (should-not (zellij-send--slash-menu-cursor
+                 (zellij-send-parse-test--screen name)))))
 
 (ert-deftest zellij-send-parse-test-probe-refuses-busy-input ()
   "入力欄が空でない（質問が出ている）ペインには打たずに断る。"

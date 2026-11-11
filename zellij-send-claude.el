@@ -544,9 +544,33 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
 ;;   （`/' の直後に ↑ 1 回で最後の `/workflow-authoring' に移った）
 
 (defcustom zellij-send-slash-settle-delay 0.25
-  "スラッシュコマンドの操作で、キーを送ってから画面を読み直すまでの待ち時間（秒）。"
+  "スラッシュコマンドの操作で、キーを送った後に描画を待つ時間の上限（秒）。
+画面が変わらないときにだけ、ここまで待つ（変わったかは
+`zellij-send-slash-poll-interval' ごとに確かめ直す）。引数の確認では、
+入力欄と候補がこの時間ぶん同じに読めたら描画が落ち着いたとみなす
+（`zellij-send--slash-wait-settled'）。"
   :type 'number
   :group 'zellij-send)
+
+(defcustom zellij-send-slash-poll-interval 0.03
+  "スラッシュコマンドの操作で、画面が変わったかを確かめ直す間隔（秒）。
+キーを送った後は `zellij-send-slash-settle-delay' を待ち切らず、この間隔で
+画面を読み直して、変わったのを確かめたらすぐ次へ進む
+（`zellij-send--slash-await-scroll'）。
+
+2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1、142 件の一覧）:
+↓ のたびに 0.25 秒待つ形で 17.1 秒、0.05 で 8.6 秒、0.02 で 5.1 秒。取れる一覧は
+どれも同じだった。短くするほど `dump-screen' を起こす回数が増える。"
+  :type 'number
+  :group 'zellij-send)
+
+(defun zellij-send--slash-polls (seconds)
+  "SECONDS 秒ぶんを `zellij-send-slash-poll-interval' で確かめ直す回数を返す。
+1 回の読み直しには間隔のほかに `dump-screen' の時間がかかる。0.02 秒と見込む
+（2026-11-11 実測、zellij 0.45.1。`zellij action' 1 回が 14〜15 ミリ秒）。
+時刻ではなく回数で数えるのは、タイマーを差し替えるテストでも同じに動かすため。"
+  (max 1 (ceiling (/ (float seconds)
+                     (+ (max zellij-send-slash-poll-interval 0.0) 0.02)))))
 
 (defcustom zellij-send-slash-max-rounds 200
   "コマンド一覧を集めるときにメニューを送る回数の上限。
@@ -1013,6 +1037,7 @@ STALE が non-nil なら、使える一覧が無いときに古くなった一�
   "OP のペインの画面が PRED を満たすまで待ち、その画面を CALLBACK に渡す。
 待てなかったら nil を渡す。画面は毎回 `dump-screen' で取る——黒板バッファは
 ユーザーが編集中だと更新が止まる（`buffer-modified-p'）ので当てにできない。
+待つのは 3 秒まで（`zellij-send-slash-poll-interval' ごとに読み直す）。
 DROP-FAINT は `zellij-send--op-dump' に渡す。"
   (let ((tries (or tries 0)))
     (zellij-send--op-dump
@@ -1020,8 +1045,8 @@ DROP-FAINT は `zellij-send--op-dump' に渡す。"
      (lambda (screen)
        (cond
         ((and screen (funcall pred screen)) (funcall callback screen))
-        ((>= tries 12) (funcall callback nil))
-        (t (zellij-send--op-later op zellij-send-slash-settle-delay
+        ((>= tries (zellij-send--slash-polls 3.0)) (funcall callback nil))
+        (t (zellij-send--op-later op zellij-send-slash-poll-interval
                                   #'zellij-send--slash-wait
                                   op pred callback (1+ tries) drop-faint))))
      drop-faint)))
@@ -1116,11 +1141,13 @@ SILENT が non-nil なら進捗を知らせない（先読み）。
                    (zellij-send--slash-scroll
                     op spec nil 0 0 nil nil finish))))))))))))
 
-(defun zellij-send--slash-scroll (op spec found rounds dry pinned last callback)
+(defun zellij-send--slash-scroll (op spec found rounds dry pinned last callback
+                                    &optional screen)
   "SPEC のメニューを ↓ で送りながら集め、集め終わったら CALLBACK に渡す。
 FOUND は見つかった順の alist、ROUNDS は送った回数、DRY は画面が
-進まなかった連続回数、PINNED はカーソルが最下段に着いているか、
-LAST は前回見えていた値のリスト。
+進まなかった連続回数、PINNED は直前に送った ↓ の数（最初の画面では nil）、
+LAST は前回見えていた値のリスト。SCREEN は読み終えてある画面（↓ の後で
+`zellij-send--slash-await-scroll' が読んだもの）で、nil ならここで取る。
 
 守るべき点が 2 つある:
 
@@ -1138,8 +1165,10 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
    ((> rounds (plist-get spec :max-rounds))
     (zellij-send--slash-gather-finish op spec found t callback))
    (t
-    (zellij-send--op-dump
-     op
+    (funcall
+     (if screen
+         (lambda (step) (funcall step screen))
+       (lambda (step) (zellij-send--op-dump op step)))
      (lambda (screen)
        (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
               (names (mapcar #'car entries))
@@ -1149,7 +1178,9 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
               ;; 新顔が出ない＝一周した。画面が動かない＝描画待ちかキーが
               ;; 効いていない。どちらも「これ以上は取れない」側に数える
               (dry (if (or stalled (null new)) (1+ dry) 0))
-              (visible (length entries)))
+              (visible (length entries))
+              ;; 最初は「見えている件数」、2 回目からは「見えている件数 - 1」
+              (jump (max 1 (if pinned (1- visible) visible))))
          (cond
           ;; 入力欄が変わった＝ユーザーがターミナル側で打ち始めた。
           ;; ここで Ctrl+U を送ると相手の入力を消すので、片付けずに手を引く
@@ -1175,16 +1206,56 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
             op
             ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
             ;; 「見えている件数 - 1」。後者なら 1 件重なりを残して窓が進む
-            (apply #'append
-                   (make-list (max 1 (if pinned (1- visible) visible))
-                              '(27 91 66)))
+            (apply #'append (make-list jump '(27 91 66)))
             (lambda (exit)
               (if (not (zerop exit))
                   (zellij-send--slash-tail op spec found names callback)
-                (zellij-send--op-later op zellij-send-slash-settle-delay
-                                       #'zellij-send--slash-scroll
-                                       op spec found (1+ rounds) dry t names
-                                       callback))))))))))))
+                (zellij-send--slash-await-scroll
+                 op spec (zellij-send--slash-reading spec screen)
+                 (lambda (screen)
+                   (zellij-send--slash-scroll
+                    op spec found (1+ rounds) dry jump names callback
+                    screen))))))))))))))
+
+(defun zellij-send--slash-reading (spec screen)
+  "SCREEN の SPEC のメニューの読みを返す。(カーソルのある値 . 見えている値のリスト)。
+画面が動いたかを比べるのに使う。値の並びが同じでもカーソルが動けば変わる
+（全件が 1 画面に収まるメニューでは、↓ を送っても並びは変わらない）。"
+  (and screen
+       (cons (zellij-send--slash-menu-cursor screen)
+             (mapcar #'car (funcall (plist-get spec :parse) screen)))))
+
+(defun zellij-send--slash-await-scroll (op spec before callback &optional tries prev)
+  "↓ を送った後、SPEC のメニューが動いて落ち着いた画面を CALLBACK に渡す。
+BEFORE は送る前の読み（`zellij-send--slash-reading'）。TRIES は読み直した回数、
+PREV は前回の読み。
+
+`zellij-send-slash-settle-delay' を待ち切らず、`zellij-send-slash-poll-interval'
+ごとに読み直す。BEFORE から変わり、しかも **2 回続けて同じ**に読めたら渡す
+——変わった直後の 1 回で進むと、まとめて送った ↓ の途中の画面を基準に次を
+送りかねない（`zellij-send--slash-scroll' の 2 つ目の注意と同じ）。
+`zellij-send-slash-settle-delay' ぶん読み直しても動かなければ、最後に読んだ
+画面をそのまま渡す（動かなかったことの扱いは `zellij-send--slash-scroll' が
+決める）。取れなかった画面は nil で渡り、そちらで取り直す。
+
+2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1）: ↓ のたびに 0.25 秒
+待っていた頃は一覧の取得に 17.1 秒かかった（142 件）。"
+  (let ((tries (or tries 0)))
+    (zellij-send--op-later
+     op zellij-send-slash-poll-interval
+     (lambda ()
+       (zellij-send--op-dump
+        op
+        (lambda (screen)
+          (let ((names (zellij-send--slash-reading spec screen)))
+            (if (or (and screen
+                         (not (equal names before))
+                         (equal names prev))
+                    (>= (1+ tries)
+                        (zellij-send--slash-polls zellij-send-slash-settle-delay)))
+                (funcall callback screen)
+              (zellij-send--slash-await-scroll
+               op spec before callback (1+ tries) names)))))))))
 
 (defun zellij-send--slash-tail (op spec found last callback)
   "一覧の末尾を拾ってから `zellij-send--slash-gather-finish' へ渡す。
@@ -1334,20 +1405,21 @@ CALLBACK に渡す結果は次のどれか:
        (if (not ok)
            ;; 打てなかったのは「引数なし」ではない
            (funcall callback (list :aborted "入力欄に打てませんでした"))
-         ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
          (zellij-send--op-later
-          op zellij-send-slash-settle-delay
+          op zellij-send-slash-poll-interval
           #'zellij-send--slash-wait-settled
           op name
           (lambda (screen)
             (zellij-send--slash-probe-read
              op name args open screen callback))))))))
 
-(defun zellij-send--slash-wait-settled (op name callback &optional tries last)
+(defun zellij-send--slash-wait-settled (op name callback &optional tries last same)
   "OP のペインの入力欄が NAME で始まり、描画が落ち着いた画面を CALLBACK に渡す。
-待てなかったら nil を渡す。TRIES は試した回数、LAST は前回の読み。
+待てなかったら nil を渡す（3 秒まで）。TRIES は試した回数、LAST は前回の読み、
+SAME はその読みが続いた回数。
 
-「落ち着いた」= 入力欄の中身と候補メニューが 2 回続けて同じに読めたこと。
+「落ち着いた」= 入力欄の中身と候補メニューが、`zellij-send-slash-settle-delay'
+ぶん（`zellij-send-slash-poll-interval' ごとに読み直して）続けて同じに読めたこと。
 打った文字が入力欄に出た直後の画面は、まだ途中のことがある（2026-11-11 実測、
 Claude Code v2.1.322 / zellij 0.45.1。手元では 15 ミリ秒ほどで次の画面に替わった）:
 
@@ -1365,13 +1437,16 @@ Claude Code v2.1.322 / zellij 0.45.1。手元では 15 ミリ秒ほどで次の�
      (lambda (screen)
        (let* ((text (and screen (zellij-send--slash-input-text screen)))
               (reading (and text (string-prefix-p name text)
-                            (list text (zellij-send--slash-arg-entries screen)))))
+                            (list text (zellij-send--slash-arg-entries screen))))
+              (same (if (and reading (equal reading last)) (1+ (or same 0)) 0)))
          (cond
-          ((and reading (equal reading last)) (funcall callback screen))
-          ((>= tries 12) (funcall callback nil))
-          (t (zellij-send--op-later op zellij-send-slash-settle-delay
+          ((>= same (zellij-send--slash-polls zellij-send-slash-settle-delay))
+           (funcall callback screen))
+          ((>= tries (zellij-send--slash-polls 3.0)) (funcall callback nil))
+          (t (zellij-send--op-later op zellij-send-slash-poll-interval
                                     #'zellij-send--slash-wait-settled
-                                    op name callback (1+ tries) reading))))))))
+                                    op name callback (1+ tries) reading
+                                    same))))))))
 
 (defun zellij-send--slash-probe-read (op name args open screen callback)
   "SCREEN からヒントか候補メニューを読み、CALLBACK に渡す。

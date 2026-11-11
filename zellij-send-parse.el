@@ -683,6 +683,24 @@ LIMIT が non-nil ならその件数を読んだところでやめる。
           (setq j (1- j)))))
     entries))
 
+(defun zellij-send--slash-menu-cursor (screen)
+  "SCREEN の入力枠のすぐ上のメニューで、カーソルのある行の値を返す。無ければ nil。
+選択中の項目は行頭の空白の後に `❯' が付く（コマンド一覧も引数の候補も同じ。
+`zellij-send--slash-entry-regexp'）。入力欄より上の 12 行だけを見る
+（メニューは実測で 5 行まで）。会話の中の `❯' は行頭にあるので当たらない。"
+  (let* ((lines (split-string screen "\n"))
+         (i (zellij-send--askq-last-index lines zellij-send--slash-input-regexp))
+         (found nil))
+    (when i
+      (let ((j (1- i))
+            (floor-idx (max 0 (- i 12))))
+        (while (and (>= j floor-idx) (not found))
+          (let ((line (nth j lines)))
+            (when (string-match "\\`[[:space:]]+❯[[:space:]]+\\([^[:space:]]+\\)" line)
+              (setq found (match-string 1 line))))
+          (setq j (1- j)))))
+    found))
+
 (defun zellij-send--slash-menu-entries (screen)
   "SCREEN の補完メニューから ((\"/name\" . \"説明\") ...) を上から順に返す。"
   (zellij-send--slash-menu-block screen zellij-send--slash-entry-regexp))
