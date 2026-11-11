@@ -2068,6 +2068,77 @@ C-u で捨てたものは戻らない。"
         (make-directory (expand-file-name ".claude/skills/p" d) t)
         (should-not (zellij-send--slash-simple-project-p child))))))
 
+(ert-deftest zellij-send-test-slash-fingerprint-content ()
+  "指紋は名前と説明・プラグインの中身で決まり、時刻や本文の編集では変わらない。"
+  (zellij-send-test--with-slash-cache
+    (let* ((home (file-name-as-directory (expand-file-name "../home" default-directory)))
+           (process-environment (cons (concat "HOME=" (directory-file-name home))
+                                      process-environment))
+           (skill (expand-file-name ".claude/skills/s1/SKILL.md" home))
+           (plugins (expand-file-name ".claude/plugins/installed_plugins.json" home)))
+      (zellij-send-test--write skill "---\nname: s1\ndescription: 説明\n---\n本文\n")
+      (zellij-send-test--write plugins "{\"version\": 2}")
+      (let ((fp (zellij-send--slash-global-fingerprint)))
+        (should (plist-get fp :home))
+        (should (plist-get fp :plugins))
+        ;; 本文の編集・スキルの中のファイルの追加・同じ中身の書き直し（時刻だけ変わる）
+        (zellij-send-test--write skill "---\nname: s1\ndescription: 説明\n---\n本文を直した\n")
+        (zellij-send-test--write (expand-file-name ".claude/skills/s1/scripts/x.sh" home) "#")
+        (zellij-send-test--write plugins "{\"version\": 2}")
+        (set-file-times plugins (time-add nil 100))
+        (set-file-times (file-name-directory skill) (time-add nil 100))
+        (should (equal (zellij-send--slash-global-fingerprint) fp))
+        ;; 説明が変わった・スキルが増えた・プラグインの中身が変わった
+        (zellij-send-test--write skill "---\nname: s1\ndescription: 別の説明\n---\n本文\n")
+        (let ((fp2 (zellij-send--slash-global-fingerprint)))
+          (should-not (equal fp2 fp))
+          (zellij-send-test--write (expand-file-name ".claude/skills/s2/SKILL.md" home)
+                                   "---\nname: s2\n---\n")
+          (let ((fp3 (zellij-send--slash-global-fingerprint)))
+            (should-not (equal fp3 fp2))
+            (zellij-send-test--write plugins "{\"version\": 3}")
+            (should-not (equal (zellij-send--slash-global-fingerprint) fp3)))))
+      ;; プロジェクトの分は全体用の指紋に入らない
+      (let ((global (zellij-send--slash-global-fingerprint))
+            (dir (zellij-send--slash-cache-fingerprint)))
+        (zellij-send-test--write (expand-file-name ".claude/commands/c.md" default-directory)
+                                 "---\ndescription: C\n---\n")
+        (should (equal (zellij-send--slash-global-fingerprint) global))
+        (should-not (equal (zellij-send--slash-cache-fingerprint) dir))))))
+
+(ert-deftest zellij-send-test-slash-collect-single-flight ()
+  "同じ一覧をほかの黒板が取っている間は、取得中と分かる。止めた取得は数えない。"
+  (zellij-send-test--with-slash-cache
+    (let ((zellij-send--slash-collectors (make-hash-table :test 'equal))
+          (dir default-directory)
+          (a (generate-new-buffer " *zjs-a*"))
+          (b (generate-new-buffer " *zjs-b*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'zellij-send--slash-collect-1) #'ignore))
+            (dolist (buf (list a b))
+              (with-current-buffer buf
+                (setq default-directory dir)
+                (setq-local zellij-send--session "s" zellij-send--pane-id "terminal_1"
+                            zellij-send--command "claude")))
+            (with-current-buffer b
+              (should-not (zellij-send--slash-collecting-elsewhere-p)))
+            (zellij-send--slash-collect a #'ignore t)
+            ;; 取っている本人には「ほかの黒板」ではない
+            (with-current-buffer a
+              (should-not (zellij-send--slash-collecting-elsewhere-p)))
+            (with-current-buffer b
+              (should (zellij-send--slash-collecting-elsewhere-p))
+              ;; 全体用で済まないディレクトリは別の一覧なので待たない
+              (let ((default-directory (file-name-as-directory
+                                        (expand-file-name "../mcp" dir))))
+                (zellij-send-test--write (expand-file-name ".mcp.json" default-directory) "{}")
+                (should-not (zellij-send--slash-collecting-elsewhere-p))))
+            (zellij-send--op-abort a)
+            (with-current-buffer b
+              (should-not (zellij-send--slash-collecting-elsewhere-p))))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
 (ert-deftest zellij-send-test-slash-cache-other-dir ()
   "別のディレクトリの保存ファイルを読まない。保存しない設定ならファイルを作らない。"
   (zellij-send-test--with-slash-cache

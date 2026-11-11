@@ -601,9 +601,9 @@ nil にする。"
 
 (defcustom zellij-send-slash-cache-max-age (* 7 24 60 60)
   "保存したスラッシュコマンド一覧を信用する期間（秒）。nil なら期限なし。
-claude 本体の更新やスキルの追加は `zellij-send--slash-cache-fingerprint' でも
-見ているが、拾えない変化（プラグイン内のコマンドの更新など）もあるので
-期限でも取り直す。"
+スキルやコマンドの増減・説明の変更とプラグインの増減は
+`zellij-send--slash-cache-fingerprint' が見ているが、claude 本体の更新で
+増えた組み込みコマンドは拾わないので、期限でも取り直す。"
   :type '(choice (const :tag "期限なし" nil) natnum)
   :group 'zellij-send)
 
@@ -649,55 +649,70 @@ claude 本体の更新やスキルの追加は `zellij-send--slash-cache-fingerp
   "カレントバッファのスラッシュコマンド一覧のキー（作業ディレクトリ）を返す。"
   (directory-file-name (file-truename default-directory)))
 
-(defun zellij-send--slash-mtime (file)
-  "FILE の最終更新時刻を `float-time' で返す。無ければ nil。"
-  (let ((attrs (file-attributes file)))
-    (and attrs (float-time (file-attribute-modification-time attrs)))))
+;; 指紋は「一覧が実際に変わる材料」だけで作る（2026-11-11）。
+;;
+;; それまでは claude の実行ファイルの時刻、`~/.claude/skills' 直下の項目の時刻、
+;; `installed_plugins.json' の時刻を見ていた。手元の保存ファイルと突き合わせると
+;; （2026-11-10〜11、Claude Code v2.1.322）、一覧は変わっていないのに 1 日で 4 回
+;; 無効になっていた: claude の自動更新（10/19 の 2.1.303 から 22 日で 19 版）、
+;; プラグインの JSON の書き直し、スキルの中のファイルの編集が 2 回。そのたびに、
+;; 繋がっている黒板がそれぞれ 100 件余りをペインに打って取り直していた。
+;;
+;; - スキルとコマンドは**名前と説明**だけを見る（一覧に出るのはその 2 つ）。
+;;   本文やスクリプトを直しても取り直さない
+;; - プラグインは JSON の**中身**を見る。同じ中身の書き直しでは取り直さない
+;; - claude の実行ファイルは見ない。更新で増えた組み込みコマンドは
+;;   `zellij-send-slash-cache-max-age' の期限か `C-u' まで候補に出ないが、
+;;   一覧に無い名前もそのまま打てる
 
-(defun zellij-send--slash-dir-stamp (dir)
-  "DIR とその直下の項目のうち、最も新しい最終更新時刻を返す。無ければ nil。
-スキルはディレクトリごと足すので、直下の項目の更新で増減と書き換えを拾う。"
-  (when (file-directory-p dir)
-    (apply #'max
-           (delq nil (cons (zellij-send--slash-mtime dir)
-                           (mapcar #'zellij-send--slash-mtime
-                                   (directory-files dir t "\\`[^.]")))))))
+(defun zellij-send--slash-digest (string)
+  "STRING の中身を表す短い文字列（MD5）を返す。指紋に入れて `equal' で比べる。"
+  (secure-hash 'md5 (encode-coding-string string 'utf-8)))
+
+(defun zellij-send--slash-file-digest (file)
+  "FILE の中身を表す文字列を返す。読めなければ nil。"
+  (when (file-readable-p file)
+    (ignore-errors
+      (with-temp-buffer
+        (insert-file-contents-literally file)
+        (secure-hash 'md5 (current-buffer))))))
+
+(defun zellij-send--slash-source-digest (dir)
+  "DIR の `.claude' のコマンドとスキルの、名前と説明を表す文字列を返す。無ければ nil。
+`zellij-send--slash-project-entries' が読むもの（`commands/NAME.md' と
+`skills/NAME/SKILL.md' の frontmatter）に、`commands' のサブディレクトリにある
+ファイルの名前を足す。ファイルの時刻は見ない。"
+  (let* ((entries (zellij-send--slash-project-entries dir))
+         (cmds (expand-file-name ".claude/commands" dir))
+         (nested (and (file-directory-p cmds)
+                      (mapcar (lambda (f) (file-relative-name f cmds))
+                              (directory-files-recursively cmds "\\.md\\'")))))
+    (when (or entries nested)
+      (zellij-send--slash-digest (prin1-to-string (list entries nested))))))
 
 (defun zellij-send--slash-global-fingerprint ()
   "全体用の一覧が変わったかを見分けるための値を返す。
-一覧を決める材料のうち、ディレクトリによらないものをファイルの時刻で表す
-（zellij も claude も呼ばない）:
+一覧を決める材料のうち、ディレクトリによらないものをファイルの中身で表す
+（zellij も claude も呼ばない。この関数の前のコメント）:
 
 - 保存の形式の版（`zellij-send--slash-cache-version'）
-- claude の実行ファイル（実体のパスと更新時刻。版が上がると変わる）
-- `~/.claude' の `commands' / `skills'
-- `~/.claude/plugins/installed_plugins.json'（プラグインの増減）
+- `~/.claude' の `commands' / `skills' の名前と説明
+- `~/.claude/plugins/installed_plugins.json' の中身（プラグインの増減と更新）
 
 値は `equal' で比べるので、数値と文字列だけで作る。"
-  (let* ((exe (executable-find
-               (or (car (split-string (or zellij-send--command
-                                          zellij-send-default-command)
-                                      nil t))
-                   zellij-send-default-command)))
-         (true (and exe (file-truename exe)))
-         (home (expand-file-name "~/.claude/")))
+  (let ((home (expand-file-name "~/")))
     (list :version zellij-send--slash-cache-version
-          :claude (and true (list true (zellij-send--slash-mtime true)))
-          :dirs (mapcar (lambda (dir) (cons dir (zellij-send--slash-dir-stamp dir)))
-                        (list (expand-file-name "commands" home)
-                              (expand-file-name "skills" home)))
-          :plugins (zellij-send--slash-mtime
-                    (expand-file-name "plugins/installed_plugins.json" home)))))
+          :home (zellij-send--slash-source-digest home)
+          :plugins (zellij-send--slash-file-digest
+                    (expand-file-name ".claude/plugins/installed_plugins.json"
+                                      home)))))
 
 (defun zellij-send--slash-cache-fingerprint ()
   "カレントバッファのディレクトリの一覧が変わったかを見分けるための値を返す。
 全体用の材料（`zellij-send--slash-global-fingerprint'）に、プロジェクトの
-`.claude/commands' / `.claude/skills' の時刻を足したもの。"
+`.claude/commands' / `.claude/skills' の名前と説明を足したもの。"
   (append (zellij-send--slash-global-fingerprint)
-          (list :project
-                (mapcar (lambda (dir) (cons dir (zellij-send--slash-dir-stamp dir)))
-                        (list (expand-file-name ".claude/commands" default-directory)
-                              (expand-file-name ".claude/skills" default-directory))))))
+          (list :project (zellij-send--slash-source-digest default-directory))))
 
 (defun zellij-send--slash-frontmatter (file)
   "FILE の先頭の YAML frontmatter から (NAME . DESCRIPTION) を返す。
@@ -868,6 +883,32 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
     (puthash key entry zellij-send--slash-cache-table)
     (zellij-send--slash-cache-write key entry)))
 
+;; 同じ一覧を取りに行くのは一度に 1 つの黒板だけにする（2026-11-11）。
+;; 全体用の一覧はどの黒板のペインから取っても同じなのに、キャッシュが無効に
+;; なった直後に黒板が複数繋がると、それぞれが自分のペインで取り直していた
+;; （Emacs の起動時に、繋がった黒板の数だけ走る）。
+
+(defvar zellij-send--slash-collectors (make-hash-table :test 'equal)
+  "一覧を取得中の操作。キーは取った一覧を覚える先（`zellij-send--slash-store-key'）、
+値はその `zellij-send-op'。生きている操作だけが「取得中」
+（`zellij-send--slash-collecting-elsewhere-p'）。止めた取得はコールバックが
+呼ばれず値が残るが、操作が死んでいるので数えない。")
+
+(defun zellij-send--slash-store-key ()
+  "カレントバッファのディレクトリで取った一覧を覚える先のキーを返す。
+`zellij-send--slash-simple-project-p' なら全体用、そうでなければディレクトリ。"
+  (if (zellij-send--slash-simple-project-p default-directory)
+      zellij-send--slash-global-key
+    (zellij-send--slash-cache-key)))
+
+(defun zellij-send--slash-collecting-elsewhere-p ()
+  "カレントバッファが使う一覧を、ほかの黒板がいま取得していれば non-nil。"
+  (let ((op (gethash (zellij-send--slash-store-key)
+                     zellij-send--slash-collectors)))
+    (and op
+         (zellij-send--op-live-p op)
+         (not (eq (zellij-send-op-buffer op) (current-buffer))))))
+
 (defun zellij-send--slash-cache-put (alist)
   "カレントバッファのディレクトリで取った ALIST を覚え、ディスクにも書く。
 `zellij-send--slash-simple-project-p' なら、プロジェクトのコマンドとスキルを
@@ -1007,10 +1048,15 @@ SILENT が non-nil なら進捗を知らせない（先読み）。
   (let ((op (zellij-send--op-begin buf 'slash-collect :silent silent)))
     (if (null op)
         (funcall callback (list :aborted (zellij-send--op-busy-message buf)))
-      (zellij-send--slash-collect-1
-       op (lambda (result)
-            (zellij-send--op-end op)
-            (funcall callback result))))))
+      ;; ほかの黒板が同じ一覧を取りに行かないよう、取得中の印を付ける
+      (let ((key (with-current-buffer buf (zellij-send--slash-store-key))))
+        (puthash key op zellij-send--slash-collectors)
+        (zellij-send--slash-collect-1
+         op (lambda (result)
+              (when (eq (gethash key zellij-send--slash-collectors) op)
+                (remhash key zellij-send--slash-collectors))
+              (zellij-send--op-end op)
+              (funcall callback result)))))))
 
 (defun zellij-send--slash-collect-1 (op done)
   "`zellij-send--slash-collect' の本体。結果を DONE に渡す。"
@@ -1487,6 +1533,9 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
   (let ((buf (current-buffer)))
     (if (and (zellij-send--slash-cached) (not refresh))
         (zellij-send--slash-choose buf)
+      ;; 同じ一覧をほかの黒板が取っている最中なら、こちらのペインでは打たない
+      (when (and (not refresh) (zellij-send--slash-collecting-elsewhere-p))
+        (user-error "別の黒板でスラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
       (message "スラッシュコマンド一覧を取得中…（初回のみ数秒かかります）")
       (zellij-send--slash-collect
        buf
@@ -1514,8 +1563,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
   (when (and zellij-send-slash-prefetch
              zellij-send--session
              (zellij-send--confirmed-capable-p 'slash-completion)
-             (null (zellij-send--slash-cached))
-             (not (zellij-send--op-current)))
+             (null (zellij-send--slash-cached)))
     ;; ここはまだ何も打たない（始める前に条件を確かめ直す）ので op の外でよい
     (run-at-time zellij-send-slash-prefetch-delay nil
                  #'zellij-send--slash-prefetch-run (current-buffer) 1)))
@@ -1526,7 +1574,9 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
 (defun zellij-send--slash-prefetch-run (buf try)
   "BUF の一覧を黙って取りに行く。TRY は何回目か。
 取れなければ少し置いてやり直す——起動直後の claude は信頼確認などで
-入力欄が空でないことがあり、その間は取得を諦めるため。"
+入力欄が空でないことがあり、その間は取得を諦めるため。
+BUF で別の操作が走っているとき、同じ一覧をほかの黒板が取っているときも、
+打たずに少し置いてやり直す（その間に一覧が届いていれば、そこでやめる）。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when (and zellij-send-slash-prefetch
@@ -1534,26 +1584,30 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
                  zellij-send--pane-id
                  (zellij-send--confirmed-capable-p 'slash-completion)
                  (null (zellij-send--slash-cached))
-                 (not (zellij-send--op-current))
                  (<= try zellij-send-slash-prefetch-retries))
-        (zellij-send--slash-collect
-         buf
-         (lambda (result)
-           (when (buffer-live-p buf)
-             (with-current-buffer buf
-               (let* ((value (and (eq (car result) :ok) (cadr result)))
-                      (alist (plist-get value :entries)))
-                 ;; 打ち切った一覧は覚えない。取り直しても同じなので再試行もしない
-                 (cond
-                  ((plist-get value :truncated) nil)
-                  (alist (zellij-send--slash-cache-put alist))
-                  (t
-                   ;; 再試行までの間は何も打たないので op の外で待つ。
-                   ;; `zellij-send-abort' で止めた取得はここに来ない（再試行しない）
-                   (run-at-time zellij-send-slash-prefetch-delay nil
-                                #'zellij-send--slash-prefetch-run
-                                buf (1+ try))))))))
-         t)))))
+        (let ((retry
+               (lambda ()
+                 ;; 再試行までの間は何も打たないので op の外で待つ。
+                 ;; `zellij-send-abort' で止めた取得はここに来ない（再試行しない）
+                 (run-at-time zellij-send-slash-prefetch-delay nil
+                              #'zellij-send--slash-prefetch-run
+                              buf (1+ try)))))
+          (if (or (zellij-send--op-current)
+                  (zellij-send--slash-collecting-elsewhere-p))
+              (funcall retry)
+            (zellij-send--slash-collect
+             buf
+             (lambda (result)
+               (when (buffer-live-p buf)
+                 (with-current-buffer buf
+                   (let* ((value (and (eq (car result) :ok) (cadr result)))
+                          (alist (plist-get value :entries)))
+                     ;; 打ち切った一覧は覚えない。取り直しても同じなので再試行もしない
+                     (cond
+                      ((plist-get value :truncated) nil)
+                      (alist (zellij-send--slash-cache-put alist))
+                      (t (funcall retry)))))))
+             t)))))))
 
 ;;; AskUserQuestion（選択肢プロンプト）への回答
 
