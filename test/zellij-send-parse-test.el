@@ -272,10 +272,11 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
 
 ;;; 引数の確認を通しで（実画面を順に返す）
 
-(defun zellij-send-parse-test--probe (screens &optional name)
+(defun zellij-send-parse-test--probe (screens &optional name background)
   "SCREENS（fixture 名か画面の文字列のリスト）を dump-screen の結果として順に返しながら、
 NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度でも返す。
-結果と打ったキーを返す。"
+結果と打ったキーを返す。BACKGROUND が non-nil なら、裏の取得（黙った操作）が
+走っている状態から始める。"
   (let ((queue screens) typed keys result)
     (with-temp-buffer
       (setq-local zellij-send--session "fixture00"
@@ -297,6 +298,8 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
                    (when cb (funcall cb 0))))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args) (apply fn args))))
+        (when background
+          (zellij-send--op-begin (current-buffer) 'slash-collect :silent t))
         (zellij-send--slash-probe-arg (current-buffer) (or name "/effort") "" nil
                                       (lambda (r) (setq result r)))
         (list result (nreverse typed) (nreverse keys)
@@ -348,6 +351,17 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
       (should (eq (car result) :ok))
       (should-not (plist-get (cadr result) :hint))
       (should (equal (caar (plist-get (cadr result) :values)) "list")))))
+
+(ert-deftest zellij-send-parse-test-probe-preempts-background ()
+  "裏で一覧を取り直している最中でも、選んだコマンドの引数はすぐ確かめる。"
+  (let ((zellij-send-slash-prefetch nil))
+    (pcase-let ((`(,result ,typed ,_keys ,op)
+                 (zellij-send-parse-test--probe '("idle" "slash-hint-effort")
+                                                nil t)))
+      (should (equal result
+                     '(:ok (:hint "low|medium|high|xhigh|max|auto|ultracode [on|off]"))))
+      (should (equal typed '("/effort ")))
+      (should-not op))))
 
 (ert-deftest zellij-send-parse-test-probe-refuses-busy-input ()
   "入力欄が空でない（質問が出ている）ペインには打たずに断る。"

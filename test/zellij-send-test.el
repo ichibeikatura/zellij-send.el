@@ -2068,6 +2068,68 @@ C-u で捨てたものは戻らない。"
         (make-directory (expand-file-name ".claude/skills/p" d) t)
         (should-not (zellij-send--slash-simple-project-p child))))))
 
+(ert-deftest zellij-send-test-slash-cache-stale ()
+  "古くなった一覧は、頼まれたときだけ出す。形式の版が違う一覧は出さない。"
+  (zellij-send-test--with-slash-cache
+    (zellij-send--slash-cache-put '(("/clear" . "Clear")))
+    (should (zellij-send--slash-cached))
+    ;; 期限切れ（＝材料が変わったのと同じ扱い）
+    (let ((zellij-send-slash-cache-max-age 0))
+      (should-not (zellij-send--slash-cached))
+      (should (equal (zellij-send--slash-cached t) '(("/clear" . "Clear"))))
+      ;; 再起動した後（メモリが空）でもディスクから出せる
+      (clrhash zellij-send--slash-cache-table)
+      (should (equal (zellij-send--slash-cached t) '(("/clear" . "Clear"))))
+      ;; プロジェクトの分はいまのファイルから足す
+      (zellij-send-test--write (expand-file-name ".claude/commands/c.md" default-directory)
+                               "---\ndescription: C\n---\n")
+      (should (equal (mapcar #'car (zellij-send--slash-cached t)) '("/c" "/clear")))
+      ;; 全体用で済まないディレクトリでは、全体用の古い一覧で代用しない
+      (zellij-send-test--write (expand-file-name ".mcp.json" default-directory) "{}")
+      (should-not (zellij-send--slash-cached t))
+      (delete-file (expand-file-name ".mcp.json" default-directory)))
+    ;; 形式の版が違う一覧（読み方が違った頃のもの）は古い一覧としても出さない
+    (let* ((key zellij-send--slash-global-key)
+           (entry (copy-sequence (gethash key zellij-send--slash-cache-table))))
+      (puthash key (plist-put entry :fingerprint '(:version 1))
+               zellij-send--slash-cache-table)
+      (should-not (zellij-send--slash-cached t)))))
+
+(ert-deftest zellij-send-test-slash-command-stale-first ()
+  "古くなった一覧があれば、取り直さずにそれで選ばせ、取り直しは裏に回す。
+先読みが無効なら（黙って打たない約束なので）その場で取り直す。"
+  (zellij-send-test--with-slash-cache
+    (setq-local zellij-send--session "s" zellij-send--pane-id "terminal_1")
+    (zellij-send--slash-cache-put '(("/clear" . "Clear")))
+    (let ((zellij-send-slash-cache-max-age 0)
+          chosen collected timers)
+      (cl-letf (((symbol-function 'zellij-send--slash-choose)
+                 (lambda (_buf &optional alist) (setq chosen alist)))
+                ((symbol-function 'zellij-send--slash-collect)
+                 (lambda (&rest _) (setq collected t)))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest _) (push fn timers) nil)))
+        (let ((zellij-send-slash-prefetch t))
+          (zellij-send-slash-command)
+          (should (equal chosen '(("/clear" . "Clear"))))
+          (should-not collected)
+          (should (equal timers '(zellij-send--slash-prefetch-run)))
+          ;; 裏の取得が走っていても、出せる一覧があれば断らない
+          (zellij-send--op-begin (current-buffer) 'slash-collect :silent t)
+          (setq chosen nil)
+          (zellij-send-slash-command)
+          (should chosen)
+          ;; 黙っていない操作（引数の確認など）の途中なら断る
+          (zellij-send--op-end (zellij-send--op-current))
+          (zellij-send--op-begin (current-buffer) 'slash-arg)
+          (should-error (zellij-send-slash-command) :type 'user-error)
+          (zellij-send--op-end (zellij-send--op-current)))
+        (let ((zellij-send-slash-prefetch nil))
+          (setq chosen nil collected nil)
+          (zellij-send-slash-command)
+          (should collected)
+          (should-not chosen))))))
+
 (ert-deftest zellij-send-test-slash-fingerprint-content ()
   "指紋は名前と説明・プラグインの中身で決まり、時刻や本文の編集では変わらない。"
   (zellij-send-test--with-slash-cache

@@ -567,6 +567,9 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
 (defcustom zellij-send-slash-prefetch t
   "non-nil なら、黒板バッファを開いた少し後に一覧を黙って取りに行く。
 初回の `zellij-send-slash-command' を待ち時間ゼロにするための先読み。
+一覧が古くなったときも同じで、`zellij-send-slash-command' は古い一覧を
+すぐ出し、取り直しは裏で黙って行う。nil なら、古くなった一覧はその場で
+取り直してから出す（数秒待つ）。
 取得はペインに実際にキーを送るので、ペインを一切触られたくない環境では
 nil にする。"
   :type 'boolean
@@ -849,33 +852,60 @@ FINGERPRINT はいまの `zellij-send--slash-cache-fingerprint'、NOW は現在�
           (with-temp-file file
             (prin1 (plist-put (copy-sequence entry) :dir key) (current-buffer))))))))
 
-(defun zellij-send--slash-cache-lookup (key fingerprint)
+;; 古くなった一覧も捨てずに持ち、`/' を押したらまずそれを出す（2026-11-11）。
+;; 取り直しは 100 件余りで十数秒かかり、それまでは古くなるたびにその間
+;; 待たせていた。一覧に無い名前もそのまま打てるので、少し古い一覧で選ばせても
+;; 困らない。取り直しは裏で黙って行う（`zellij-send--slash-refresh-later'）。
+
+(defun zellij-send--slash-cache-stale-p (entry)
+  "保存した ENTRY が、古くなっていても候補として出せるなら non-nil。
+中身があり、保存の形式の版がいまと同じもの。版が違う一覧は読み方が違った頃の
+もので、欠けていることがある（`zellij-send--slash-cache-version'）。"
+  (and (plist-get entry :entries)
+       (equal (plist-get (plist-get entry :fingerprint) :version)
+              zellij-send--slash-cache-version)))
+
+(defun zellij-send--slash-cache-lookup (key fingerprint &optional stale)
   "KEY の一覧を、FINGERPRINT で確かめてから返す。無いか古ければ nil。
+STALE が non-nil なら、古くなった一覧でも返す（`zellij-send--slash-cache-stale-p'）。
 メモリに無ければディスクから読む（Emacs を再起動した直後でも打ち込まずに
-済むように）。古くなっていたら捨てる。"
+済むように）。古くなった一覧もメモリに残す（取り直すまで STALE で出すため）。"
   (let ((entry (or (gethash key zellij-send--slash-cache-table)
                    (zellij-send--slash-cache-read key))))
     (when entry
-      (if (zellij-send--slash-cache-valid-p entry fingerprint)
-          (progn (puthash key entry zellij-send--slash-cache-table)
-                 (plist-get entry :entries))
-        (remhash key zellij-send--slash-cache-table)
-        nil))))
+      (puthash key entry zellij-send--slash-cache-table)
+      (and (if stale
+               (zellij-send--slash-cache-stale-p entry)
+             (zellij-send--slash-cache-valid-p entry fingerprint))
+           (plist-get entry :entries)))))
 
-(defun zellij-send--slash-cached ()
+(defun zellij-send--slash-cached (&optional stale)
   "カレントバッファのディレクトリの一覧を返す。無いか古ければ nil。
 ディレクトリごとの一覧があればそれを、無ければ全体用の一覧にプロジェクトの
 コマンドとスキルを足して作る（`zellij-send--slash-simple-project-p' のときだけ）。
-呼び出し側は nil を見て取り直す。"
-  (or (zellij-send--slash-cache-lookup (zellij-send--slash-cache-key)
-                                       (zellij-send--slash-cache-fingerprint))
-      (and (zellij-send--slash-simple-project-p default-directory)
-           (let ((global (zellij-send--slash-cache-lookup
-                          zellij-send--slash-global-key
-                          (zellij-send--slash-global-fingerprint))))
-             (and global
-                  (zellij-send--slash-merge
-                   global (zellij-send--slash-project-entries default-directory)))))))
+呼び出し側は nil を見て取り直す。
+
+STALE が non-nil なら、使える一覧が無いときに古くなった一覧で代用する。
+代用するのは、いま取り直したら覚える先（`zellij-send--slash-store-key'）の
+一覧だけ——全体用で済むようになったディレクトリで、昔そこで取った一覧を出さない。"
+  (let ((simple (zellij-send--slash-simple-project-p default-directory))
+        (merge (lambda (global)
+                 (and global
+                      (zellij-send--slash-merge
+                       global
+                       (zellij-send--slash-project-entries default-directory))))))
+    (or (zellij-send--slash-cache-lookup (zellij-send--slash-cache-key)
+                                         (zellij-send--slash-cache-fingerprint))
+        (and simple
+             (funcall merge (zellij-send--slash-cache-lookup
+                             zellij-send--slash-global-key
+                             (zellij-send--slash-global-fingerprint))))
+        (and stale
+             (if simple
+                 (funcall merge (zellij-send--slash-cache-lookup
+                                 zellij-send--slash-global-key nil t))
+               (zellij-send--slash-cache-lookup (zellij-send--slash-cache-key)
+                                                nil t))))))
 
 (defun zellij-send--slash-cache-store (key alist fingerprint)
   "ALIST を KEY の一覧として FINGERPRINT と一緒に覚え、ディスクにも書く。"
@@ -1270,6 +1300,12 @@ CALLBACK に渡す結果は次のどれか:
       (funcall callback (list :aborted "黒板がありません")))
      (cached (funcall callback (list :ok (list :values cached))))
      (t
+      ;; 裏で一覧を取り直している最中なら、そちらを止めて先に進む。ユーザーが
+      ;; いま選んだコマンドを待たせない（止めた取り直しは後でやり直す）
+      (let ((running (zellij-send--op-current buf)))
+        (when (and running (zellij-send-op-silent running))
+          (zellij-send--op-abort buf)
+          (zellij-send--slash-refresh-later buf)))
       (let ((op (zellij-send--op-begin buf 'slash-arg)))
         (if (null op)
             (funcall callback (list :aborted (zellij-send--op-busy-message buf)))
@@ -1487,7 +1523,7 @@ INFO は `zellij-send--slash-probe-arg' の結果。
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (let ((name (string-trim (zellij-send--slash-read
-                                (or alist (zellij-send--slash-cached))))))
+                                (or alist (zellij-send--slash-cached t))))))
         (unless (string-empty-p name)
           (unless (string-prefix-p "/" name)
             (setq name (concat "/" name)))
@@ -1503,7 +1539,9 @@ INFO は `zellij-send--slash-probe-arg' の結果。
   "Claude Code のスラッシュコマンドを選んで送る。
 コマンド一覧はペインの補完メニューから読み取り、作業ディレクトリごとに覚える
 （`zellij-send-slash-prefetch' が non-nil なら黒板バッファを開いた時点で
-先読みしてあるので、たいてい待ち時間は無い）。
+先読みしてあるので、たいてい待ち時間は無い）。覚えた一覧が古くなっていても
+まずそれを出し、取り直しは裏で行う（増えたばかりのコマンドは取り直しが
+済むまで候補に出ないが、一覧に無い名前もそのまま打てる）。
 REFRESH（`\\[universal-argument]'）を付けるとコマンド一覧と引数の候補を
 取り直す。一覧はディスクにも保存してあり（`zellij-send-slash-cache-directory'）、
 Emacs を再起動してもそのまま使う。REFRESH はその保存も捨てる。
@@ -1524,15 +1562,28 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
   (interactive "P")
   (zellij-send--assert-session)
   (zellij-send--assert-capability 'slash-completion)
-  (zellij-send--op-assert-free)
-  (when refresh
-    ;; ディスクに保存した一覧も捨てる。取り直しに失敗しても古い一覧が
-    ;; 次回の起動で復活しないように
-    (zellij-send--slash-cache-drop)
-    (zellij-send--slash-arg-cache-clear))
-  (let ((buf (current-buffer)))
-    (if (and (zellij-send--slash-cached) (not refresh))
-        (zellij-send--slash-choose buf)
+  (let* ((buf (current-buffer))
+         (fresh (and (not refresh) (zellij-send--slash-cached)))
+         ;; 古くなった一覧。裏で取り直せる（先読みが有効な）ときだけ先に出す。
+         ;; 無効なら、ペインに黙って打たない約束なので従来どおりここで取り直す
+         (stale (and (not refresh) (null fresh) zellij-send-slash-prefetch
+                     (zellij-send--slash-cached t)))
+         (running (zellij-send--op-current)))
+    ;; 出せる一覧があるなら、裏の取得（先読み・取り直し）が走っていても断らない。
+    ;; 引数を確かめる段で止める（`zellij-send--slash-probe-arg'）
+    (unless (and (or fresh stale) running (zellij-send-op-silent running))
+      (zellij-send--op-assert-free))
+    (when refresh
+      ;; ディスクに保存した一覧も捨てる。取り直しに失敗しても古い一覧が
+      ;; 次回の起動で復活しないように
+      (zellij-send--slash-cache-drop)
+      (zellij-send--slash-arg-cache-clear))
+    (cond
+     (fresh (zellij-send--slash-choose buf fresh))
+     (stale
+      (zellij-send--slash-refresh-later buf)
+      (zellij-send--slash-choose buf stale))
+     (t
       ;; 同じ一覧をほかの黒板が取っている最中なら、こちらのペインでは打たない
       (when (and (not refresh) (zellij-send--slash-collecting-elsewhere-p))
         (user-error "別の黒板でスラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ"))
@@ -1552,7 +1603,7 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
                    (zellij-send--slash-cache-put alist))
                  (message "スラッシュコマンド %d 件%s" (length alist)
                           (if truncated "（一部）" ""))
-                 (run-at-time 0 nil #'zellij-send--slash-choose buf alist))))))))))
+                 (run-at-time 0 nil #'zellij-send--slash-choose buf alist)))))))))))
 
 ;;;; 先読み
 
@@ -1564,9 +1615,30 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
              zellij-send--session
              (zellij-send--confirmed-capable-p 'slash-completion)
              (null (zellij-send--slash-cached)))
-    ;; ここはまだ何も打たない（始める前に条件を確かめ直す）ので op の外でよい
-    (run-at-time zellij-send-slash-prefetch-delay nil
-                 #'zellij-send--slash-prefetch-run (current-buffer) 1)))
+    (zellij-send--slash-prefetch-schedule (current-buffer) 1)))
+
+(defvar-local zellij-send--slash-prefetch-timer nil
+  "この黒板の先読み（取り直し）を待っているタイマー。無ければ nil。
+予約は黒板ごとに 1 本だけ持つ（`zellij-send--slash-prefetch-schedule'）。")
+
+(defun zellij-send--slash-prefetch-schedule (buf try)
+  "BUF の先読みを `zellij-send-slash-prefetch-delay' 秒後に予約する。TRY は何回目か。
+前の予約が残っていれば取り消す（`/' を押すたびに鎖を増やさない）。
+待っている間は何も打たないので op の外でよい（始めるときに条件を確かめ直す）。"
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (timerp zellij-send--slash-prefetch-timer)
+        (cancel-timer zellij-send--slash-prefetch-timer))
+      (setq zellij-send--slash-prefetch-timer
+            (run-at-time zellij-send-slash-prefetch-delay nil
+                         #'zellij-send--slash-prefetch-run buf try)))))
+
+(defun zellij-send--slash-refresh-later (buf)
+  "BUF の古くなった一覧を、少し後に裏で取り直すよう予約する。
+先読みと同じ仕組み（`zellij-send--slash-prefetch-run'）で、同じ設定に従う
+（`zellij-send-slash-prefetch' が nil なら何もしない）。"
+  (when zellij-send-slash-prefetch
+    (zellij-send--slash-prefetch-schedule buf 1)))
 
 
 (add-hook 'zellij-send--pane-connected-hook #'zellij-send--slash-prefetch-maybe)
@@ -1575,10 +1647,12 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
   "BUF の一覧を黙って取りに行く。TRY は何回目か。
 取れなければ少し置いてやり直す——起動直後の claude は信頼確認などで
 入力欄が空でないことがあり、その間は取得を諦めるため。
-BUF で別の操作が走っているとき、同じ一覧をほかの黒板が取っているときも、
+BUF で別の操作が走っているとき、同じ一覧をほかの黒板が取っているとき、
+ミニバッファが開いているとき（コマンドや引数を選んでいる最中かもしれない）も、
 打たずに少し置いてやり直す（その間に一覧が届いていれば、そこでやめる）。"
   (when (buffer-live-p buf)
     (with-current-buffer buf
+      (setq zellij-send--slash-prefetch-timer nil)
       (when (and zellij-send-slash-prefetch
                  zellij-send--session
                  zellij-send--pane-id
@@ -1589,11 +1663,10 @@ BUF で別の操作が走っているとき、同じ一覧をほかの黒板が�
                (lambda ()
                  ;; 再試行までの間は何も打たないので op の外で待つ。
                  ;; `zellij-send-abort' で止めた取得はここに来ない（再試行しない）
-                 (run-at-time zellij-send-slash-prefetch-delay nil
-                              #'zellij-send--slash-prefetch-run
-                              buf (1+ try)))))
+                 (zellij-send--slash-prefetch-schedule buf (1+ try)))))
           (if (or (zellij-send--op-current)
-                  (zellij-send--slash-collecting-elsewhere-p))
+                  (zellij-send--slash-collecting-elsewhere-p)
+                  (active-minibuffer-window))
               (funcall retry)
             (zellij-send--slash-collect
              buf
