@@ -811,6 +811,59 @@ OPEN（末尾のトークンが書きかけ）なら空白を足さずに聞く�
      ((or open (zellij-send--slash-arg-open-p args)) (concat name " " args))
      (t (concat name " " args " ")))))
 
+(defconst zellij-send--slash-picker-hint-regexp
+  "\\`[[:space:]]*Enter to set as default · .*Esc to cancel[[:space:]]*\\'"
+  "`/model' の選択画面の最下行（操作のヒント）に一致する正規表現。
+AskUserQuestion のヒント行（`Enter to select · …'）には当たらない。")
+
+(defconst zellij-send--slash-picker-option-regexp
+  "\\`[[:space:]]*\\(❯[[:space:]]+\\)?\\([1-9]\\)\\.[[:space:]]+\\(.*?\\)\\(?:[[:space:]]\\{2,\\}\\(.*?\\)\\)?[[:space:]]*\\'"
+  "`/model' の選択画面の 1 件に一致する正規表現。
+1=カーソル 2=番号 3=ラベル 4=説明。ラベルと説明は空白 2 つ以上で離れている
+（`  1.  Default (recommended)  Fable 5.2'）。番号の無い行（`▸   More models'）
+には当たらない。")
+
+(defun zellij-send--slash-picker-parse (screen)
+  "SCREEN に `/model' の選択画面が出ていれば選択肢のリストを返す。無ければ nil。
+各要素は (:num N :label \"...\" :desc \"...\" :current BOOL :focused BOOL)。
+`:current' はいま使っているモデル（ラベルの後ろの `✔'。ラベルからは外す）。
+
+画面の形（2026-11-11 実測、Claude Code v2.1.322 / zellij 0.45.1。
+test/fixtures/slash-picker-model.txt）:
+
+     Select model
+     Switch between Claude models. Your pick becomes the default for …
+       1.  Default (recommended)  Fable 5.2
+     ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+       5.  Haiku 5.5              Fastest for quick answers
+       ▸   More models
+     ● High effort ←/→ to adjust
+     Enter to set as default · s to use this session only · Esc to cancel
+
+選択画面は入力枠の代わりに画面の一番下に出る。**ヒント行が最後の非空行で
+あるときだけ**選択画面と読む——閉じた後の画面や本文に同じ文が残っていても、
+数字キーを入力欄に打たないため。"
+  (when screen
+    (let* ((lines (split-string screen "\n"))
+           (last (zellij-send--askq-last-index lines "[^[:space:]]")))
+      (when (and last
+                 (string-match-p zellij-send--slash-picker-hint-regexp
+                                 (nth last lines)))
+        (let (options)
+          (dolist (line (seq-subseq lines (max 0 (- last 15)) last))
+            (when (string-match zellij-send--slash-picker-option-regexp line)
+              (let* ((label (match-string 3 line))
+                     (current (string-suffix-p "✔" label)))
+                (push (list :num (string-to-number (match-string 2 line))
+                            :label (if current
+                                       (string-trim-right (substring label 0 -1))
+                                     label)
+                            :desc (match-string 4 line)
+                            :current current
+                            :focused (and (match-string 1 line) t))
+                      options))))
+          (nreverse options))))))
+
 ;;; インタラクティブコマンド
 
 (defun zellij-send--parse-pane-exited (raw pane-id)

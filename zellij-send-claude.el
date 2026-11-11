@@ -1568,6 +1568,163 @@ Claude Code v2.1.322 / zellij 0.45.1。手元では 15 ミリ秒ほどで次の�
      (t (zellij-send--slash-clear-input
          op (lambda (_ok) (funcall callback (list :ok nil))))))))
 
+;;;; 選択画面から選ぶ（`/model'）
+
+;; `/model ' のヒントは `[model]' で、選択肢の形でも候補メニューでもない
+;; （`/model s' まで打ってもメニューは出ない）。候補が見えるのは、引数なしの
+;; `/model' を送って開く選択画面だけ（2026-11-11 実測、Claude Code v2.1.322 /
+;; zellij 0.45.1。画面の形は `zellij-send--slash-picker-parse' の docstring）。
+;; **同じ調査を繰り返さないこと。**
+;;
+;; - **数字キーは移動ではなく即確定**で、Enter と同じく「新規セッションの既定」
+;;   として保存される（`2' で `Set model to Opus 5.5 and saved as your default
+;;   for new sessions' になり、`~/.claude/settings.json' の `model' が書き換わった）。
+;;   **実機で試すときは既定モデルが変わる**
+;; - Esc は何も変えずに閉じる（`Kept model as Opus 5.5'）
+;; - `/model' は `paste' + CR で送れば開く（`write-chars' + Enter でも開く）
+;; - 未確認: `▸ More models' の先、`s'（このセッションだけ）、←/→ の effort。
+;;   どれも使わない。要るときはキー透過モードで操作する
+;;
+;; だから、選択画面を開いたままミニバッファで選ばせ、選ばれた行の数字キーを
+;; 送る。表示名（`Opus 5.5'）を引数の名前（`opus'）に直す規則は持たない。
+;; 数字を送る直前に画面を取り直し、同じ番号に同じラベルがあるときだけ送る。
+
+(defcustom zellij-send-slash-picker-commands '("/model")
+  "引数なしで送ると番号付きの選択画面が開くスラッシュコマンド。
+`zellij-send-slash-command' でこれを選ぶと、選択画面を開いて候補を読み、
+ミニバッファで選ばせてから、その行の数字キーで確定する。
+読めるのは `zellij-send--slash-picker-parse' の形の画面だけで、実機で
+確かめたのは `/model' だけ。**確かめずに足さないこと**——引数なしで送った
+時点でそのコマンドは実行される。"
+  :type '(repeat string)
+  :group 'zellij-send)
+
+(defun zellij-send--slash-picker-p (name hint)
+  "NAME が選択画面から選ぶコマンドで、HINT が自由入力の形なら non-nil。"
+  (and (member name zellij-send-slash-picker-commands)
+       (null (zellij-send--slash-hint-kind hint))
+       (null (zellij-send--slash-hint-values hint))
+       t))
+
+(defun zellij-send--slash-pick (buf name hint)
+  "BUF のペインに NAME を送って選択画面を開き、ミニバッファで選ばせる。
+HINT は NAME の引数ヒント（プロンプトに出す）。"
+  (let ((op (and (buffer-live-p buf)
+                 (zellij-send--op-begin buf 'slash-picker))))
+    (if (null op)
+        (when (buffer-live-p buf)
+          (message "%s" (zellij-send--op-busy-message buf)))
+      (zellij-send--slash-wait-idle
+       op
+       (lambda (idle)
+         (if (null idle)
+             (zellij-send--op-abort
+              buf "ペインの入力欄が空ではありません。先にペインを片付けてください")
+           (zellij-send--send
+            zellij-send--session name
+            (zellij-send--op-callback
+             op
+             (lambda (ok)
+               (if (not ok)
+                   (zellij-send--op-abort buf (format "%s を送れませんでした" name))
+                 (zellij-send--slash-wait
+                  op #'zellij-send--slash-picker-parse
+                  (lambda (screen)
+                    (if (null screen)
+                        (zellij-send--op-abort
+                         buf (format "%s の選択画面を読めませんでした。ペインを確認してください"
+                                     name))
+                      ;; sentinel の中でミニバッファを開かない
+                      (zellij-send--op-later
+                       op 0 #'zellij-send--slash-pick-ask
+                       op name hint
+                       (zellij-send--slash-picker-parse screen)))))))))))))))
+
+(defun zellij-send--slash-pick-ask (op name hint options)
+  "選択画面の OPTIONS からミニバッファで選ばせ、OP のペインで確定する。
+空で確定するか C-g で抜けたら、選択画面を Esc で閉じる（自分で開いたので
+開いたままにしない）。一覧に無い値は、選択画面を閉じてから NAME の引数として
+送る（`/model claude-…' のように名前を直接打つ場合）。"
+  (let ((alist (mapcar (lambda (o)
+                         (cons (plist-get o :label)
+                               (concat (if (plist-get o :current) "✔ " "")
+                                       (or (plist-get o :desc) ""))))
+                       options)))
+    (condition-case err
+        (let* ((value (string-trim
+                       (completing-read
+                        (format "%s [%s]（選ぶと新規セッションの既定にもなる・空で中止）: "
+                                name hint)
+                        (zellij-send--slash-table alist) nil nil)))
+               (option (seq-find (lambda (o) (equal (plist-get o :label) value))
+                                 options)))
+          (cond
+           ((string-empty-p value)
+            (zellij-send--slash-pick-close op (format "%s を中止しました" name)))
+           (option (zellij-send--slash-pick-confirm op name option))
+           (t
+            (zellij-send--slash-pick-close
+             op nil
+             (lambda (buf) (zellij-send--slash-submit buf name value))))))
+      (quit (zellij-send--slash-pick-close op (format "%s を中止しました" name)))
+      (error (zellij-send--slash-pick-close
+              op (format "%s を中止しました（%s）" name
+                         (error-message-string err)))))))
+
+(defun zellij-send--slash-pick-confirm (op name option)
+  "OP のペインの選択画面で OPTION を数字キーで確定する。
+送る直前に画面を取り直し、同じ番号に同じラベルがあるときだけ送る——
+ミニバッファで選んでいる間にターミナル側で選択画面を閉じられていたら、
+数字が入力欄に打たれるため。"
+  (let ((buf (zellij-send-op-buffer op))
+        (num (plist-get option :num))
+        (label (plist-get option :label)))
+    (zellij-send--op-dump
+     op
+     (lambda (screen)
+       (let* ((now (zellij-send--slash-picker-parse screen))
+              (same (seq-find (lambda (o) (= (plist-get o :num) num)) now)))
+         (cond
+          ((null now)
+           (zellij-send--op-abort
+            buf (format "%s の選択画面が閉じられていたので中止しました" name)))
+          ((not (equal (and same (plist-get same :label)) label))
+           (zellij-send--slash-pick-close
+            op (format "%s の選択画面が変わったので中止しました" name)))
+          (t
+           (zellij-send--op-keys
+            op (list (+ ?0 num))
+            (lambda (exit)
+              (zellij-send--op-end op)
+              (if (zerop exit)
+                  (message "送信しました: %s → %s" name label)
+                (message "キー送信に失敗しました (exit: %d)" exit)))))))))))
+
+(defun zellij-send--slash-pick-close (op reason &optional then)
+  "OP のペインの選択画面を Esc で閉じて OP を終える。REASON があれば知らせる。
+選択画面がもう出ていなければ Esc は送らない。THEN があれば、入力欄が空に
+戻ったのを確かめてから黒板を引数に呼ぶ。"
+  (let ((buf (zellij-send-op-buffer op))
+        (finish (lambda (idle)
+                  (let ((buf (zellij-send-op-buffer op)))
+                    (zellij-send--op-end op)
+                    (when reason (message "%s" reason))
+                    (when then
+                      (if idle
+                          (funcall then buf)
+                        (message "ペインの入力欄が空に戻らないので送りませんでした")))))))
+    (zellij-send--op-dump
+     op
+     (lambda (screen)
+       (cond
+        ((null screen)
+         (zellij-send--op-abort buf "画面を取得できませんでした。ペインを直接確認してください"))
+        ((zellij-send--slash-picker-parse screen)
+         (zellij-send--op-keys
+          op '(27)
+          (lambda (_exit) (zellij-send--slash-wait-idle op finish))))
+        (t (funcall finish (zellij-send--slash-idle-p screen))))))))
+
 ;;;; 入口
 
 (defconst zellij-send--slash-arg-max-depth 5
@@ -1655,6 +1812,9 @@ INFO は `zellij-send--slash-probe-arg' の結果。
           ;; 添えないと、直前に出た理由をこの文が上書きして、何が起きたか分からない
           (message "引数の候補を取得できませんでした（%s）。ペインの状態を確認してください"
                    (or info "理由不明")))
+         ((and (plist-get info :hint)
+               (zellij-send--slash-picker-p name (plist-get info :hint)))
+          (zellij-send--slash-pick buf name (plist-get info :hint)))
          ((plist-get info :hint)
           (let ((arg (zellij-send--slash-read-hint name (plist-get info :hint))))
             (zellij-send--slash-submit
@@ -1717,8 +1877,11 @@ Emacs を再起動してもそのまま使う。REFRESH はその保存も捨て
 入れ子になる場合は、選ぶたびに次の段を聞く）。
 
 一覧の取得も引数の確認もペインの入力欄を実際に打って行うので、入力欄が
-空でないときは何もしない。`/model' のように送信後に対話画面が出る
-コマンドは、そのままキー透過モード（\\[zellij-send-keys-mode]）で操作する。
+空でないときは何もしない。`/model' は引数なしで送って開く選択画面から
+候補を読み、ミニバッファで選んだ行を数字キーで確定する
+（`zellij-send-slash-picker-commands'。選んだモデルは新規セッションの既定にも
+なる）。そのほかの、送信後に対話画面が出るコマンドは、そのままキー透過モード
+（\\[zellij-send-keys-mode]）で操作する。
 
 一覧の読み取りは Claude Code の補完メニュー専用。他のコマンドでは入力欄に
 `/' を打ち込んで壊す危険があるので何もしない——そちらのスラッシュコマンドは

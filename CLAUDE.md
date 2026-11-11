@@ -145,7 +145,7 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
 | 話題 | 場所 |
 |---|---|
 | AskUserQuestion の画面と操作 | `zellij-send-claude.el`「AskUserQuestion（選択肢プロンプト）への回答」節の冒頭 |
-| スラッシュコマンドの補完メニュー・引数 | `zellij-send-claude.el`「スラッシュコマンド」節の冒頭と「引数を読む」 |
+| スラッシュコマンドの補完メニュー・引数・`/model` の選択画面 | `zellij-send-claude.el`「スラッシュコマンド」節の冒頭と「引数を読む」「選択画面から選ぶ」 |
 | 黒板の桁揃え・記号の字形 | `zellij-send-grid-align` ほか `--grid-*` の docstring |
 | ペイン幅で入る改行（本文・差分）とつなぎ直し | `zellij-send-ui.el`「スクリーンダンプ」節の冒頭 |
 | 末尾を追う・選択中の保留 | `zellij-send--update-buffer` の前のコメント |

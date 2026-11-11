@@ -779,6 +779,114 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
     ;; 黒板には触らない
     (should (equal (buffer-string) "下書き"))))
 
+;;; `/model' の選択画面（2026-11-11、Claude Code v2.1.322）
+
+(ert-deftest zellij-send-parse-test-slash-picker-parse ()
+  "`/model' の選択画面から、番号・ラベル・説明・いまのモデル・カーソルを読む。"
+  (let ((opts (zellij-send--slash-picker-parse
+               (zellij-send-parse-test--screen "slash-picker-model"))))
+    (should (equal (mapcar (lambda (o) (plist-get o :num)) opts) '(1 2 3 4 5)))
+    (should (equal (mapcar (lambda (o) (plist-get o :label)) opts)
+                   '("Default (recommended)" "Opus 5.5" "Sonnet 5.5"
+                     "Fable 5.2" "Haiku 5.5")))
+    (should (equal (plist-get (nth 0 opts) :desc) "Fable 5.2"))
+    (should (equal (plist-get (nth 2 opts) :desc)
+                   "Most efficient for simpler tasks"))
+    ;; `✔' はラベルから外し、いまのモデルの印にする
+    (should (equal (mapcar (lambda (o) (plist-get o :current)) opts)
+                   '(nil t nil nil nil)))
+    (should (equal (mapcar (lambda (o) (plist-get o :focused)) opts)
+                   '(nil t nil nil nil))))
+  ;; 選択画面でない画面は読まない
+  (dolist (name '("idle" "slash-hint-effort" "askq-single" "slash-arg-config"))
+    (should-not (zellij-send--slash-picker-parse
+                 (zellij-send-parse-test--screen name))))
+  ;; 閉じた後に同じ文が本文に残っていても読まない（ヒント行が最後の非空行でない）
+  (should-not (zellij-send--slash-picker-parse
+               (concat (zellij-send-parse-test--screen "slash-picker-model")
+                       "\n────\n❯ \n────\n"))))
+
+(defun zellij-send-parse-test--pick (answer &optional closed)
+  "待機中のペインで `/model' の選択画面を開き、ミニバッファに ANSWER を返して通す。
+ANSWER が `quit' なら C-g で抜ける。CLOSED が non-nil なら、選んでいる間に
+選択画面が閉じられていたことにする。
+送った本文・打ったキー・残っている操作・最後のメッセージを返す。"
+  (let ((queue '("idle" "slash-picker-model")) sent keys timers said)
+    (with-temp-buffer
+      (setq-local zellij-send--session "fixture00"
+                  zellij-send--pane-id "terminal_1"
+                  zellij-send--command "claude")
+      (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                 (lambda (_session cb &rest _)
+                   (funcall cb (zellij-send-parse-test--screen (car queue)))))
+                ((symbol-function 'zellij-send--send)
+                 (lambda (_session text cb)
+                   (push text sent)
+                   (when (cdr queue) (pop queue))
+                   (funcall cb t)))
+                ((symbol-function 'zellij-send--send-keys)
+                 (lambda (_session bytes &optional cb)
+                   (push bytes keys)
+                   ;; Esc で選択画面が閉じる
+                   (when (equal bytes '(27)) (setq queue '("idle")))
+                   (when cb (funcall cb 0))))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _)
+                   (when closed (setq queue '("idle")))
+                   (if (eq answer 'quit) (signal 'quit nil) answer)))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (setq said (apply #'format fmt args))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_time _repeat fn &rest args)
+                   (setq timers (append timers (list (cons fn args))))
+                   nil)))
+        (zellij-send--slash-run (current-buffer) "/model" "" nil 1
+                                '(:ok (:hint "model")))
+        (while timers
+          (let ((timer (pop timers)))
+            (apply (car timer) (cdr timer))))
+        (list (nreverse sent) (nreverse keys) (zellij-send--op-current) said)))))
+
+(ert-deftest zellij-send-parse-test-slash-pick-digit ()
+  "`/model' を引数なしで送って選択画面を開き、選んだ行の数字キーで確定する。"
+  (pcase-let ((`(,sent ,keys ,op ,said)
+               (zellij-send-parse-test--pick "Sonnet 5.5")))
+    (should (equal sent '("/model")))
+    (should (equal keys '((?3))))
+    (should-not op)
+    (should (equal said "送信しました: /model → Sonnet 5.5"))))
+
+(ert-deftest zellij-send-parse-test-slash-pick-cancel ()
+  "空で確定しても C-g で抜けても、開いた選択画面を Esc で閉じて操作を残さない。"
+  (dolist (answer '("" quit))
+    (pcase-let ((`(,sent ,keys ,op ,_said)
+                 (zellij-send-parse-test--pick answer)))
+      (should (equal sent '("/model")))
+      (should (equal keys '((27))))
+      (should-not op))))
+
+(ert-deftest zellij-send-parse-test-slash-pick-closed-meanwhile ()
+  "選んでいる間に選択画面が閉じられていたら、数字キーを送らない。"
+  (pcase-let ((`(,_sent ,keys ,op ,_said)
+               (zellij-send-parse-test--pick "Sonnet 5.5" t)))
+    (should-not keys)
+    (should-not op)))
+
+(ert-deftest zellij-send-parse-test-slash-pick-free-text ()
+  "一覧に無い名前は、選択画面を Esc で閉じてから引数として送る。"
+  (pcase-let ((`(,sent ,keys ,op ,_said)
+               (zellij-send-parse-test--pick "claude-opus-4-1")))
+    (should (equal sent '("/model" "/model claude-opus-4-1")))
+    (should (equal keys '((27))))
+    (should-not op)))
+
+(ert-deftest zellij-send-parse-test-slash-picker-p ()
+  "選択画面から選ぶのは、一覧にあるコマンドで、ヒントが自由入力の形のときだけ。"
+  (should (zellij-send--slash-picker-p "/model" "model"))
+  (should-not (zellij-send--slash-picker-p "/rename" "name"))
+  (should-not (zellij-send--slash-picker-p "/model" "a|b"))
+  (should-not (zellij-send--slash-picker-p "/model" "path")))
+
 (provide 'zellij-send-parse-test)
 
 ;;; zellij-send-parse-test.el ends here

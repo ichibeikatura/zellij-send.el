@@ -1048,7 +1048,7 @@ subscribe が記録した `zellij-send--last-content' を優先する（更新�
 (cl-defstruct (zellij-send-op (:constructor zellij-send--op-make)
                               (:copier nil))
   "黒板のペインに対して非同期に進む 1 つの操作。"
-  kind          ; `slash-collect' / `slash-arg' / `askq'
+  kind          ; `slash-collect' / `slash-arg' / `slash-picker' / `askq'
   buffer        ; 黒板バッファ
   started-at    ; 始めた時刻
   deadline      ; これを過ぎたら無効とみなす
@@ -1060,15 +1060,17 @@ subscribe が記録した `zellij-send--last-content' を優先する（更新�
   "この黒板のペインで走っている操作（`zellij-send-op'）。無ければ nil。")
 
 (defconst zellij-send--op-lifetimes
-  '((slash-collect . 120) (slash-arg . 120) (askq . 3600))
+  '((slash-collect . 120) (slash-arg . 120) (slash-picker . 3600) (askq . 3600))
   "操作の種類 → 始めてから無効とみなすまでの秒数。
 コールバックが返らないまま残っても、永久に塞がないための歯止め。
 一覧の取得は普通 8 秒前後、`zellij-send-slash-max-rounds' を使い切っても
-1 分程度。回答はミニバッファで考える時間を含むので長く取る。")
+1 分程度。回答と選択画面（`slash-picker'）はミニバッファで考える時間を含むので
+長く取る。")
 
 (defconst zellij-send--op-busy-messages
   '((slash-collect . "スラッシュコマンド一覧を取得中です。数秒後にもう一度どうぞ")
     (slash-arg     . "スラッシュコマンドの引数を確認中です。数秒後にもう一度どうぞ")
+    (slash-picker  . "スラッシュコマンドの選択画面を開いています。先にミニバッファで選ぶか中止してください")
     (askq          . "回答の途中です"))
   "別の操作が走っているときに断る文面。走っている方の種類で選ぶ。")
 
