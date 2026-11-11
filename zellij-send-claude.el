@@ -1255,14 +1255,41 @@ CALLBACK に渡す結果は次のどれか:
          ;; ヒントは本文と同じ描画で出る。取りこぼさないよう一拍置く
          (zellij-send--op-later
           op zellij-send-slash-settle-delay
-          (lambda ()
-            (zellij-send--slash-wait
-             op
-             (lambda (s) (let ((it (zellij-send--slash-input-text s)))
-                           (and it (string-prefix-p name it))))
-             (lambda (screen)
-               (zellij-send--slash-probe-read
-                op name args open screen callback))))))))))
+          #'zellij-send--slash-wait-settled
+          op name
+          (lambda (screen)
+            (zellij-send--slash-probe-read
+             op name args open screen callback))))))))
+
+(defun zellij-send--slash-wait-settled (op name callback &optional tries last)
+  "OP のペインの入力欄が NAME で始まり、描画が落ち着いた画面を CALLBACK に渡す。
+待てなかったら nil を渡す。TRIES は試した回数、LAST は前回の読み。
+
+「落ち着いた」= 入力欄の中身と候補メニューが 2 回続けて同じに読めたこと。
+打った文字が入力欄に出た直後の画面は、まだ途中のことがある（2026-11-11 実測、
+Claude Code v2.1.322 / zellij 0.45.1。手元では 15 ミリ秒ほどで次の画面に替わった）:
+
+- `/config ' は、まず入力欄だけが出て、候補メニューは次の描画で出る。
+  ここで読むと「引数なし」になり、引数を付けずに送ってしまう
+- `/plugin ' は、直前に聞いた別のコマンドのヒントが一瞬ゴーストで残る
+  （`/effort ' の後で `❯ /plugin  [low|medium|…]'）。ここで読むと他人のヒントを
+  候補に出してしまう
+
+画面全体は比べない——エージェントが作業中だとスピナーや経過時間が動き続け、
+いつまでも同じにならない。"
+  (let ((tries (or tries 0)))
+    (zellij-send--op-dump
+     op
+     (lambda (screen)
+       (let* ((text (and screen (zellij-send--slash-input-text screen)))
+              (reading (and text (string-prefix-p name text)
+                            (list text (zellij-send--slash-arg-entries screen)))))
+         (cond
+          ((and reading (equal reading last)) (funcall callback screen))
+          ((>= tries 12) (funcall callback nil))
+          (t (zellij-send--op-later op zellij-send-slash-settle-delay
+                                    #'zellij-send--slash-wait-settled
+                                    op name callback (1+ tries) reading))))))))
 
 (defun zellij-send--slash-probe-read (op name args open screen callback)
   "SCREEN からヒントか候補メニューを読み、CALLBACK に渡す。

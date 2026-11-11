@@ -537,12 +537,17 @@ plugin ペインは数えない。`zellij:link' のプラグインは見えな�
 v2.1.303。`  ❯ /ndl   国立国会図書館…'）。それが無かった頃の形もそのまま読む。")
 
 (defconst zellij-send--slash-arg-entry-regexp
-  "\\`[[:space:]]\\{1,6\\}\\([A-Za-z0-9._~][^[:space:]]\\{0,120\\}\\)\\(?:[[:space:]]\\{2,\\}\\(.*\\)\\)?\\'"
+  "\\`[[:space:]]\\{1,6\\}\\(?:❯[[:space:]]+\\)?\\([A-Za-z0-9._~][^[:space:]]\\{0,120\\}\\)\\(?:[[:space:]]\\{2,\\}\\(.*\\)\\)?\\'"
   "引数の候補メニューの 1 件に一致する正規表現。1=候補 2=説明。
 コマンド一覧と同じ場所に出るが**先頭に `/' が付かない**
 （`autoScroll=' / `enable' / `Documents/'。2026-09-06 実測）。
 本文の行を拾わないよう、候補は空白を含まない 1 語に限り、
-`/' 始まり（＝コマンド一覧）と記号始まり（`⏺' などの本文の飾り）を除く。")
+`/' 始まり（＝コマンド一覧）と記号始まり（`⏺' などの本文の飾り）を除く。
+選択中の候補は行頭の空白の後に `❯' が付く（`  ❯ list   List installed plugins'。
+コマンド一覧と同じ）。2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1）:
+これを読めなかった間は、カーソルのある候補が落ち（最初の画面では先頭の
+`list' や `autoScroll=true'）、カーソルが最下段に着くとそこで読むのをやめて
+一覧が途中で切れていた。2026-10-19 の fixture（v2.1.303）も同じ形。")
 
 (defconst zellij-send--slash-arg-max-visible 8
   "1 画面から拾う引数候補の上限。
@@ -719,14 +724,18 @@ argumentHint を調べると `[codex|gemini] [--dry-run]' や
 
 2026-10-19 実測（Claude Code v2.1.303）: `/effort' のヒントが
 `[low|medium|high|xhigh|max|auto|ultracode [on|off]]' になった。`|' で単純に
-切っていた頃は `ultracode' が落ち、その引数の `off' が候補に混ざっていた。"
+切っていた頃は `ultracode' が落ち、その引数の `off' が候補に混ざっていた。
+
+2026-11-11 実測（Claude Code v2.1.322）: `/mcp' のヒントは
+`[reconnect (<server>|all)|enable|disable [<server>|all]]' で、丸括弧も
+入れ子に使う。角括弧と山括弧しか数えなかった間は `reconnect' が落ちていた。"
   (when (and hint (string-match-p "|" hint))
     (let ((depth 0) (start 0) (i 0) (n (length hint)) (pieces nil) (stop nil))
       (while (and (< i n) (not stop))
         (let ((c (aref hint i)))
           (cond
-           ((memq c '(?\[ ?<)) (setq depth (1+ depth)))
-           ((memq c '(?\] ?>))
+           ((memq c '(?\[ ?< ?\()) (setq depth (1+ depth)))
+           ((memq c '(?\] ?> ?\)))
             (if (> depth 0) (setq depth (1- depth)) (setq stop t)))
            ((and (eq c ?|) (= depth 0))
             (push (substring hint start i) pieces)
@@ -741,7 +750,7 @@ argumentHint を調べると `[codex|gemini] [--dry-run]' や
                 (let ((s (string-trim
                           (replace-regexp-in-string
                            "<[^>]*>" " "
-                           (car (split-string piece "\\["))))))
+                           (car (split-string piece "[[(]"))))))
                   (and (string-match-p
                         "\\`[A-Za-z0-9][A-Za-z0-9._:@/=+-]*\\'" s)
                        s)))

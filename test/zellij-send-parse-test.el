@@ -230,13 +230,18 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
   "候補メニューを読む。本文の行（`⏺' 始まりや箇条書き）は候補にしない。"
   (should (equal (zellij-send--slash-arg-entries
                   (zellij-send-parse-test--screen "slash-arg-config"))
-                 '(("artifacts=" . "true | false")
+                 '(("agentPushNotifEnabled=" . "true | false")
+                   ("artifacts=" . "true | false")
                    ("autoCompact=" . "true | false")
                    ("autoConnectIde=" . "true | false")
                    ("autoScroll=" . "true | false"))))
   (should (equal (mapcar #'car (zellij-send--slash-arg-entries
                                 (zellij-send-parse-test--screen "slash-arg-plugin")))
-                 '("enable" "disable" "install" "uninstall")))
+                 '("list" "enable" "disable" "install" "uninstall")))
+  ;; 選択中の候補（`❯' の付く行）が最下段でも、その上を読み落とさない
+  (should (equal (mapcar #'car (zellij-send--slash-arg-entries
+                                "    autoScroll=true\n  ❯ autoScroll=false\n────\n❯ /config autoScroll=\n────\n"))
+                 '("autoScroll=true" "autoScroll=false")))
   ;; メニューの無い画面・コマンド一覧の画面からは拾わない
   (dolist (name '("idle-after-turn" "working-streaming" "slash-menu-top"
                   "slash-hint-effort"))
@@ -254,6 +259,10 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
     (should (eq (zellij-send--slash-hint-kind add-dir) 'directory))
     (should (equal (zellij-send--slash-hint-values effort)
                    '("low" "medium" "high" "xhigh" "max" "auto" "ultracode")))
+    ;; 丸括弧の入れ子（v2.1.322 の `/mcp'）
+    (should (equal (zellij-send--slash-hint-values
+                    "reconnect (<server>|all)|enable|disable [<server>|all]")
+                   '("reconnect" "enable" "disable")))
     ;; ヒントは名前が合うときだけ
     (should-not (zellij-send--slash-arg-hint
                  (zellij-send-parse-test--screen "slash-hint-effort") "/model"))
@@ -263,9 +272,10 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
 
 ;;; 引数の確認を通しで（実画面を順に返す）
 
-(defun zellij-send-parse-test--probe (screens)
-  "SCREENS（fixture 名のリスト）を dump-screen の結果として順に返しながら、
-`/effort' の引数を確かめる。最後の画面は何度でも返す。結果と打ったキーを返す。"
+(defun zellij-send-parse-test--probe (screens &optional name)
+  "SCREENS（fixture 名か画面の文字列のリスト）を dump-screen の結果として順に返しながら、
+NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度でも返す。
+結果と打ったキーを返す。"
   (let ((queue screens) typed keys result)
     (with-temp-buffer
       (setq-local zellij-send--session "fixture00"
@@ -273,8 +283,9 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
                   zellij-send--command "claude")
       (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
                  (lambda (_session cb &rest _)
-                   (funcall cb (zellij-send-parse-test--screen
-                                (if (cdr queue) (pop queue) (car queue))))))
+                   (let ((s (if (cdr queue) (pop queue) (car queue))))
+                     (funcall cb (if (string-search "\n" s) s
+                                   (zellij-send-parse-test--screen s))))))
                 ((symbol-function 'zellij-send--slash-write-chars)
                  (lambda (_session text cb)
                    (push text typed)
@@ -286,7 +297,7 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
                    (when cb (funcall cb 0))))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args) (apply fn args))))
-        (zellij-send--slash-probe-arg (current-buffer) "/effort" "" nil
+        (zellij-send--slash-probe-arg (current-buffer) (or name "/effort") "" nil
                                       (lambda (r) (setq result r)))
         (list result (nreverse typed) (nreverse keys)
               (zellij-send--op-current))))))
@@ -301,6 +312,42 @@ dump-screen の生の出力を、本体が受信後に通す処理（正規形�
     ;; 読み終えたら Ctrl+U で入力欄を空に戻し、操作も終えている
     (should (equal keys '((21))))
     (should-not op)))
+
+(ert-deftest zellij-send-parse-test-probe-waits-for-menu ()
+  "入力欄だけが先に出た画面（候補メニューは次の描画）を「引数なし」と読まない。
+2026-11-11 実測（v2.1.322）: `/config ' を打った直後の 1 画面はメニューが無い。"
+  (let* ((menu (zellij-send-parse-test--screen "slash-arg-config"))
+         ;; メニューの行だけを抜いた画面（実機の途中の画面と同じ形）
+         (bare (string-join
+                (seq-remove (lambda (l) (string-match-p "\\`  +\\(?:❯ \\)?[a-zA-Z]+=" l))
+                            (split-string menu "\n"))
+                "\n")))
+    (should-not (zellij-send--slash-arg-entries bare))
+    (should (equal (zellij-send--slash-input-text bare) "/config"))
+;; 打つと画面が 1 つ進むので、待機中の画面は 2 枚要る
+    (pcase-let ((`(,result ,typed ,_keys ,op)
+                 (zellij-send-parse-test--probe (list "idle" "idle" bare menu) "/config")))
+      ;; 末尾を拾うときにメニューを開き直すので、2 回打つ
+      (should (equal (car typed) "/config "))
+      (should (eq (car result) :ok))
+      (should (equal (caar (plist-get (cadr result) :values))
+                     "agentPushNotifEnabled="))
+      (should-not op))))
+
+(ert-deftest zellij-send-parse-test-probe-ignores-stale-hint ()
+  "直前のコマンドのヒントが一瞬残った画面を、そのコマンドのヒントと読まない。
+2026-11-11 実測（v2.1.322）: `/effort ' の後で `/plugin ' を打つと、最初の 1 画面は
+`❯ /plugin  [low|medium|…]' で、次の描画で候補メニューに替わる。"
+  (let* ((menu (zellij-send-parse-test--screen "slash-arg-plugin"))
+         (stale (replace-regexp-in-string
+                 "/effort " "/plugin "
+                 (zellij-send-parse-test--screen "slash-hint-effort"))))
+    (should (zellij-send--slash-arg-hint stale "/plugin"))
+    (pcase-let ((`(,result . ,_)
+                 (zellij-send-parse-test--probe (list "idle" "idle" stale menu) "/plugin")))
+      (should (eq (car result) :ok))
+      (should-not (plist-get (cadr result) :hint))
+      (should (equal (caar (plist-get (cadr result) :values)) "list")))))
 
 (ert-deftest zellij-send-parse-test-probe-refuses-busy-input ()
   "入力欄が空でない（質問が出ている）ペインには打たずに断る。"
