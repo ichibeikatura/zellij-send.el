@@ -1600,14 +1600,16 @@ nil でも `zellij-send-answer-question'（C-c C-q）で手動で開ける。
 
 (defun zellij-send--askq-read (prompt opts &optional multi)
   "OPTS から選ばせて、選ばれた選択肢のリストを返す。
-MULTI が non-nil なら複数選べる。"
+MULTI が non-nil なら複数選べる。単一選択で何も選ばずに確定したら
+`user-error'（`completing-read' は必須一致でも空の入力を \"\" で返す）。"
   (let* ((cands (mapcar #'zellij-send--askq-candidate opts))
          (table (cl-mapcar #'cons cands opts)))
     (if multi
         (delq nil (mapcar (lambda (c) (cdr (assoc c table)))
                           (completing-read-multiple prompt cands nil t)))
       (let ((c (completing-read prompt cands nil t)))
-        (list (cdr (assoc c table)))))))
+        (list (or (cdr (assoc c table))
+                  (user-error "選択肢が選ばれませんでした")))))))
 
 ;;;; 送信の下請け
 
@@ -1730,8 +1732,11 @@ sentinel を `zellij-send--op-later' で抜けてから行う。"
     (zellij-send--askq-dispatch op q)))
 
 (defun zellij-send--askq-dispatch (op q)
-  "Q の種類に応じた回答フローを呼ぶ。C-g で抜けたら OP を止める。"
-  (condition-case _err
+  "Q の種類に応じた回答フローを呼ぶ。C-g で抜けたら OP を止める。
+エラーで抜けたときも止める。ここはタイマーから呼ばれるので、止めないと
+OP が期限（`zellij-send--op-lifetimes' の 1 時間）まで残り、その間
+スラッシュコマンドも先読みも「回答の途中です」で断られる。"
+  (condition-case err
       (pcase (plist-get q :kind)
         ('review (zellij-send--askq-answer-review op q))
         (_ (if (plist-get q :multi)
@@ -1739,7 +1744,11 @@ sentinel を `zellij-send--op-later' で抜けてから行う。"
              (zellij-send--askq-answer-single op q))))
     (quit (zellij-send--op-abort
            (zellij-send-op-buffer op)
-           "回答を中止しました（ペインは質問のままです。Esc は C-c C-k）"))))
+           "回答を中止しました（ペインは質問のままです。Esc は C-c C-k）"))
+    (error (zellij-send--op-abort
+            (zellij-send-op-buffer op)
+            (format "回答を中止しました（%s）。ペインは質問のままです"
+                    (error-message-string err))))))
 
 (defun zellij-send--askq-answer-single (op q)
   "単一選択の質問 Q に答える。数字キー 1 つで確定し、次の質問へ自動で進む。"

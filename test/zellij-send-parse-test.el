@@ -358,6 +358,27 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
     (should-not keys)
     (should-not op)))
 
+(ert-deftest zellij-send-parse-test-askq-empty-choice-ends-op ()
+  "何も選ばずに確定しても、回答の操作を残さない。
+`completing-read' は必須一致でも空の入力を \"\" で返す。そこでエラーになると
+操作が 1 時間（`zellij-send--op-lifetimes'）残り、スラッシュコマンドが
+「回答の途中です」で断られ続けた。"
+  (with-temp-buffer
+    (setq-local zellij-send--session "fixture00"
+                zellij-send--pane-id "terminal_1"
+                zellij-send--command "claude")
+    (let ((op (zellij-send--op-begin (current-buffer) 'askq))
+          (q (zellij-send--askq-parse
+              (zellij-send-parse-test--screen "askq-single")))
+          (sent nil))
+      (should q)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) ""))
+                ((symbol-function 'zellij-send--send-keys)
+                 (lambda (&rest _) (setq sent t))))
+        (zellij-send--askq-dispatch op q))
+      (should-not sent)
+      (should-not (zellij-send--op-current)))))
+
 ;;; 5. 選択肢プロンプトの検出（エージェントごとの記号）
 
 (ert-deftest zellij-send-parse-test-detect-prompt ()
