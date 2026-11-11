@@ -1,0 +1,55 @@
+#fixture: name=slash-menu-tagged
+#fixture: captured=2026-11-11T12:23:21+0900
+#fixture: zellij=zellij 0.45.1
+#fixture: agent=claude 2.1.322 (Claude Code)
+#fixture: panes-header=TAB_ID  TAB_POS  TAB_NAME  PANE_ID  TYPE  TITLE  COMMAND  CWD  FOCUSED  FLOATING  EXITED  X  Y  ROWS  COLS
+#fixture: pane=0  0  Tab #1  terminal_1  terminal  claude  claude  /Users/mck/zjs-fixture  true  false  false  0  1  48  160
+#fixture: note=v2.1.322: 名前の後ろの (MCP) とカーソルが窓の途中にいる形。/ の後 ↓ で /plugin-authoring まで
+
+ ▐▛███▛█   Claude Code v2.1.322
+▝▜██████▀  Fable 5.2 · Claude Pro
+ ▝▝   ▝▝   ~/zjs-fixture
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /insights                                                       Generate a report analyzing your Claude Code sessions
+    /loop                                                           Repeat a prompt or command on an interval (e.g. /loop 5m /foo)
+  ❯ /plugin-authoring                                               Write a mod: a live pane, view or behaviour change in Claude Code
+    /plugin:cloudflare:cloudflare-docs:workers-prompt-full (MCP)    Detailed prompt for generating Cloudflare Workers code (and other developer platform
+                                                                    products) from https://developers.cloudflare.com/workers/prompt.txt
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future transcripts
+
+  ⏵⏵ auto mode on (shift+tab to cycle)

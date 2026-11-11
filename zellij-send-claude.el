@@ -542,6 +542,14 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
 ;; - 入力枠の上罫線は `─' だけの行になった（`↯' は無い）
 ;; - 末尾で ↓ を押すと先頭へ、先頭で ↑ を押すと末尾へ回り込む
 ;;   （`/' の直後に ↑ 1 回で最後の `/workflow-authoring' に移った）
+;;
+;; 2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1、160 桁の背景セッション。
+;; test/fixtures/slash-menu-tagged.txt）:
+;; - 窓の動き方が上の 2026-07-29 の実測と違う。カーソルは窓の途中にいて、
+;;   その先の項目も見えている。説明が 2 行に折り返す項目が混ざると、まとめて
+;;   送った ↓ で窓が項目を飛び越える（144 件中 2 件が落ちていた）
+;;   → 詳しくは `zellij-send--slash-fill-gap' の前のコメント
+;; - 名前の直後に出どころの印が付く項目がある（`/plugin:…:workers-prompt-full (MCP)'）
 
 (defcustom zellij-send-slash-settle-delay 0.25
   "スラッシュコマンドの操作で、キーを送った後に描画を待つ時間の上限（秒）。
@@ -558,9 +566,9 @@ LOG（`\\[universal-argument]'）を付けると、その場の作業ログを
 画面を読み直して、変わったのを確かめたらすぐ次へ進む
 （`zellij-send--slash-await-scroll'）。
 
-2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1、142 件の一覧）:
-↓ のたびに 0.25 秒待つ形で 17.1 秒、0.05 で 8.6 秒、0.02 で 5.1 秒。取れる一覧は
-どれも同じだった。短くするほど `dump-screen' を起こす回数が増える。"
+2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1、144 件の一覧）:
+0.05 で 12.0 秒、0.03 で 8.7 秒、0.02 で 7.2 秒。どれも 1 件ずつ送って作った
+一覧と一致した。短くするほど `dump-screen' を起こす回数が増える。"
   :type 'number
   :group 'zellij-send)
 
@@ -1172,9 +1180,14 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
      (lambda (screen)
        (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
               (names (mapcar #'car entries))
+              (seen found)
               (new (seq-remove (lambda (e) (assoc (car e) found)) entries))
               (found (append found new))
               (stalled (equal names last))
+              ;; ↓ で進んだ先の先頭が初めて見る項目なら、前の画面との間を
+              ;; 飛び越えたかもしれない（`zellij-send--slash-fill-gap'）
+              (gap (and pinned last entries (not stalled)
+                        (not (assoc (car names) seen))))
               ;; 新顔が出ない＝一周した。画面が動かない＝描画待ちかキーが
               ;; 効いていない。どちらも「これ以上は取れない」側に数える
               (dry (if (or stalled (null new)) (1+ dry) 0))
@@ -1198,6 +1211,14 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                                   #'zellij-send--slash-scroll
                                   op spec found (1+ rounds) dry pinned names
                                   callback))
+          (gap
+           (zellij-send--slash-fill-gap
+            op spec seen entries pinned
+            (lambda (found screen)
+              ;; LAST には画面と一致しない値を渡す（同じ画面に戻ってきたのを
+              ;; 「描画待ち」と読ませない）
+              (zellij-send--slash-scroll op spec found (1+ rounds) 0 pinned
+                                         '(:gap) callback screen))))
           (t
            (when (zerop (mod rounds 8))
              (zellij-send--slash-msg op "%sを取得中… %d 件"
@@ -1206,6 +1227,8 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
             op
             ;; カーソルが最下段に着くまでは「見えている件数」、着いてからは
             ;; 「見えている件数 - 1」。後者なら 1 件重なりを残して窓が進む
+            ;; （高さの違う項目が混ざると重ならないことがある。そのときは
+            ;; 次の回が `zellij-send--slash-fill-gap' で拾い直す）
             (apply #'append (make-list jump '(27 91 66)))
             (lambda (exit)
               (if (not (zerop exit))
@@ -1217,6 +1240,28 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
                     op spec found (1+ rounds) dry jump names callback
                     screen))))))))))))))
 
+;; 「見えている件数 - 1」回の ↓ で 1 件重なる、という前提は、項目の高さが
+;; そろっているときしか成り立たない（2026-11-11 実測、Claude Code v2.1.322 /
+;; zellij 0.45.1、160 桁のペイン）。メニューは 5 行ぶんしか無く、説明が 2 行に
+;; 折り返す項目は 2 行使う。1 行の項目が並ぶ画面から ↓ をまとめて送ると、
+;; 次に 2 行の項目があれば窓に入る件数が減り、間の 1 件を飛び越える:
+;;
+;;   /voice /web-setup /workflows /anthropic-skills:deep-research
+;;   → ↓ 3 回 →  /computer-use /docs        （間の /built-in-browser が出ない）
+;;
+;; 1 件ずつ ↓ を送って作った一覧は 144 件、この取り方では 142 件だった。
+;;
+;; 窓の動き方も 2026-07-29 の実測（カーソルが最下段に着いてから 1 件ずつ動く）
+;; とは違っていた。カーソルは窓の途中にいて、その先の項目も見えている
+;; （`/plugin-authoring' を選ぶと下に次の項目が出ていた）。上へ戻るときは
+;; また違う窓になるので、窓の位置から数えて拾い直すことはできない。
+;; 確かなのは**カーソルのある行は必ず見えている**ことだけ。
+;;
+;; そこで、飛び越えたかもしれないとき（進んだ先の先頭が初めて見る項目のとき）
+;; だけ、送った ↓ と同じ数の ↑ で戻り、↓ を 1 回ずつ送り直して読む。1 回ずつなら
+;; どの項目も一度はカーソルが載るので、必ず画面に出る。毎回 1 件ずつ送ると
+;; 往復が 3〜4 倍になるので、疑わしいときだけにする。
+
 (defun zellij-send--slash-reading (spec screen)
   "SCREEN の SPEC のメニューの読みを返す。(カーソルのある値 . 見えている値のリスト)。
 画面が動いたかを比べるのに使う。値の並びが同じでもカーソルが動けば変わる
@@ -1224,6 +1269,49 @@ DRY が伸びて止まる。**折り返しをまたぐ回だけは窓が飛ぶ�
   (and screen
        (cons (zellij-send--slash-menu-cursor screen)
              (mapcar #'car (funcall (plist-get spec :parse) screen)))))
+
+(defun zellij-send--slash-fill-gap (op spec found entries jump callback)
+  "↓ を JUMP 回まとめて送って飛び越えたかもしれない項目を、戻って拾う。
+FOUND はここまでに見つかった alist、ENTRIES はいま見えている項目。
+↑ を JUMP 回送って元の位置へ戻り、↓ を 1 回ずつ JUMP 回送り直して、そのたびに
+画面を読む（この関数の前のコメント）。CALLBACK に (FOUND SCREEN) を渡す。
+FOUND は拾った項目と ENTRIES を足したもの（見えた順）、SCREEN は進み直した
+後の画面（読めなければ nil）。"
+  (let ((finish (lambda (found screen)
+                  (funcall callback
+                           (append found
+                                   (seq-remove (lambda (e) (assoc (car e) found))
+                                               entries))
+                           screen))))
+    (zellij-send--op-keys
+     op (apply #'append (make-list jump '(27 91 65)))
+     (lambda (exit)
+       (if (not (zerop exit))
+           (funcall finish found nil)
+         (zellij-send--slash-await-scroll
+          op spec (cons nil (mapcar #'car entries))
+          (lambda (screen)
+            (zellij-send--slash-gap-step op spec found jump screen finish))))))))
+
+(defun zellij-send--slash-gap-step (op spec found left screen callback)
+  "↓ を 1 回送って画面を読むのを、あと LEFT 回繰り返す。
+SCREEN は直前に読んだ画面。見えた項目を FOUND に足していき、済んだら
+CALLBACK に (FOUND SCREEN) を渡す。"
+  (let* ((entries (and screen (funcall (plist-get spec :parse) screen)))
+         (found (append found
+                        (seq-remove (lambda (e) (assoc (car e) found)) entries))))
+    (if (<= left 0)
+        (funcall callback found screen)
+      (zellij-send--op-keys
+       op '(27 91 66)
+       (lambda (exit)
+         (if (not (zerop exit))
+             (funcall callback found nil)
+           (zellij-send--slash-await-scroll
+            op spec (zellij-send--slash-reading spec screen)
+            (lambda (next)
+              (zellij-send--slash-gap-step op spec found (1- left) next
+                                           callback)))))))))
 
 (defun zellij-send--slash-await-scroll (op spec before callback &optional tries prev)
   "↓ を送った後、SPEC のメニューが動いて落ち着いた画面を CALLBACK に渡す。
@@ -1239,7 +1327,8 @@ PREV は前回の読み。
 決める）。取れなかった画面は nil で渡り、そちらで取り直す。
 
 2026-11-11 実測（Claude Code v2.1.322 / zellij 0.45.1）: ↓ のたびに 0.25 秒
-待っていた頃は一覧の取得に 17.1 秒かかった（142 件）。"
+待っていた頃は一覧の取得に 17.1 秒かかった（しかも 144 件中 2 件を取りこぼして
+いた。`zellij-send--slash-fill-gap'）。"
   (let ((tries (or tries 0)))
     (zellij-send--op-later
      op zellij-send-slash-poll-interval

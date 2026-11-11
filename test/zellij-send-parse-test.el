@@ -371,8 +371,124 @@ NAME（既定は `/effort'）の引数を確かめる。最後の画面は何度
       (should (equal typed '("/effort ")))
       (should-not op))))
 
-(ert-deftest zellij-send-parse-test-slash-menu-cursor ()
-  "メニューでカーソルのある行の値を見つける。メニューの無い画面では nil。"
+;;; 一覧の取得を通しで（補完メニューを模したペイン）
+
+(defun zellij-send-parse-test--menu-pane (items)
+  "ITEMS（(名前 . 行数) のリスト）の補完メニューを模したペインを作り、
+(画面を返す関数 キーを受ける関数 文字を打つ関数) を返す。
+2026-11-11 に v2.1.322 で見た動き: メニューは 5 行ぶん。カーソルのある項目と
+その次の項目が入るように窓が下へ動き、上へは カーソルが窓を出たときだけ動く。
+末尾で ↓ は先頭へ、先頭で ↑ は末尾へ回り込む。"
+  (let* ((n (length items)) (input "") (cursor 0) (start 0)
+         (rows (lambda (from to)
+                 (apply #'+ (mapcar #'cdr (seq-subseq items from (1+ to))))))
+         (fit (lambda ()
+                (let ((look (min (1+ cursor) (1- n))))
+                  (when (< cursor start) (setq start cursor))
+                  (while (> (funcall rows start look) 5)
+                    (setq start (1+ start))))))
+         (render
+          (lambda ()
+            (if (string-empty-p input)
+                "本文\n────\n❯ \n────\n"
+              (let ((i start) (used 0) lines)
+                (while (and (< i n) (<= (+ used (cdr (nth i items))) 5))
+                  (push (format "  %s %s   説明" (if (= i cursor) "❯" " ")
+                                (car (nth i items)))
+                        lines)
+                  (when (> (cdr (nth i items)) 1)
+                    (push (concat (make-string 30 ?\s) "説明の続き") lines))
+                  (setq used (+ used (cdr (nth i items))) i (1+ i)))
+                (concat "本文\n" (string-join (nreverse lines) "\n")
+                        "\n────\n❯ " input "\n────\n")))))
+         (keys
+          (lambda (bytes)
+            (while bytes
+              (cond
+               ((equal (seq-take bytes 3) '(27 91 66))
+                (setq bytes (nthcdr 3 bytes))
+                (if (= cursor (1- n)) (setq cursor 0 start 0)
+                  (setq cursor (1+ cursor)))
+                (funcall fit))
+               ((equal (seq-take bytes 3) '(27 91 65))
+                (setq bytes (nthcdr 3 bytes))
+                (if (= cursor 0)
+                    (progn (setq cursor (1- n) start (1- n))
+                           (while (and (> start 0)
+                                       (<= (funcall rows (1- start) (1- n)) 5))
+                             (setq start (1- start))))
+                  (setq cursor (1- cursor)))
+                (funcall fit))
+               (t (when (eq (car bytes) 21) (setq input ""))
+                  (setq bytes (cdr bytes)))))))
+         (type (lambda (text) (setq input (concat input text) cursor 0 start 0))))
+    (list render keys type)))
+
+(defun zellij-send-parse-test--collect (items)
+  "ITEMS の補完メニューを模したペインから一覧を集め、(結果 拾い直した回数 最後の画面) を返す。"
+  (pcase-let ((`(,render ,keys ,type) (zellij-send-parse-test--menu-pane items))
+              (result nil) (timers nil) (gaps 0))
+    (with-temp-buffer
+      (setq-local zellij-send--session "fixture00"
+                  zellij-send--pane-id "terminal_1"
+                  zellij-send--command "claude")
+      (let ((zellij-send--slash-collectors (make-hash-table :test 'equal))
+            (count (lambda (&rest _) (setq gaps (1+ gaps)))))
+        (advice-add 'zellij-send--slash-fill-gap :before count)
+        (unwind-protect
+            (cl-letf (((symbol-function 'zellij-send--dump-screen-async)
+                       (lambda (_session cb &rest _) (funcall cb (funcall render))))
+                      ((symbol-function 'zellij-send--slash-write-chars)
+                       (lambda (_session text cb) (funcall type text) (funcall cb t)))
+                      ((symbol-function 'zellij-send--send-keys)
+                       (lambda (_session bytes &optional cb)
+                         (funcall keys bytes) (when cb (funcall cb 0))))
+                      ((symbol-function 'run-at-time)
+                       (lambda (_time _repeat fn &rest args)
+                         (setq timers (append timers (list (cons fn args))))
+                         nil)))
+              (zellij-send--slash-collect (current-buffer)
+                                          (lambda (r) (setq result r)) t)
+              (while timers
+                (let ((timer (pop timers)))
+                  (apply (car timer) (cdr timer)))))
+          (advice-remove 'zellij-send--slash-fill-gap count))))
+    (list result gaps (funcall render))))
+
+(ert-deftest zellij-send-parse-test-collect-mixed-heights ()
+  "説明が 2 行に折り返す項目が混ざっても、一覧を 1 件も取りこぼさない。
+2026-11-11 実測（v2.1.322）: ↓ をまとめて送ると、2 行の項目の手前で窓が 1 件ぶん
+飛び越え、144 件中 2 件が落ちていた。"
+  (let* ((heights '(1 1 1 1 2 2 1 1 1 1 1 2 2 2 1 1 2 1 1 1 1 1 2 1))
+         (items (cl-loop for h in heights for i from 0
+                         collect (cons (format "/c%02d" i) h))))
+    (pcase-let ((`(,result ,gaps ,screen) (zellij-send-parse-test--collect items)))
+      (should (eq (car result) :ok))
+      (should-not (plist-get (cadr result) :truncated))
+      (should (equal (mapcar #'car (plist-get (cadr result) :entries))
+                     (mapcar #'car items)))
+      ;; この並びは実際に飛び越える（拾い直しが働いている）
+      (should (> gaps 0))
+      ;; 入力欄は空に戻っている
+      (should (equal (zellij-send--slash-input-text screen) "")))
+    ;; 高さがそろっていれば拾い直しは要らない
+    (let ((flat (cl-loop for i below 17 collect (cons (format "/d%02d" i) 1))))
+      (pcase-let ((`(,result ,gaps ,_) (zellij-send-parse-test--collect flat)))
+        (should (equal (mapcar #'car (plist-get (cadr result) :entries))
+                       (mapcar #'car flat)))
+        (should (= gaps 0))))))
+
+(ert-deftest zellij-send-parse-test-slash-menu-tagged ()
+  "名前の後ろに出どころの印（`(MCP)'）が付く項目を読む。カーソルの行を見つける。"
+  (let ((screen (zellij-send-parse-test--screen "slash-menu-tagged")))
+    (should (equal (assoc "/plugin:cloudflare:cloudflare-docs:workers-prompt-full"
+                          (zellij-send--slash-menu-entries screen))
+                   '("/plugin:cloudflare:cloudflare-docs:workers-prompt-full"
+                     . "Detailed prompt for generating Cloudflare Workers code (and other developer platform")))
+    ;; v2.1.322 ではカーソルが窓の途中にいて、次の項目がその下に見えている
+    (should (equal (zellij-send--slash-menu-cursor screen) "/plugin-authoring"))
+    (should (equal (car (last (mapcar #'car (zellij-send--slash-menu-entries screen))))
+                   "/plugin:cloudflare:cloudflare-docs:workers-prompt-full")))
   (should (equal (zellij-send--slash-menu-cursor
                   (zellij-send-parse-test--screen "slash-arg-plugin"))
                  "list"))
