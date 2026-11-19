@@ -1108,6 +1108,15 @@ codex のペインに `/' を打ち込む。"
                   "p" (mapcar (lambda (n) (format "p%02d" n)) (number-sequence 0 9)))
                  "p10")))
 
+(ert-deftest zellij-send-test-dir-session-base ()
+  "先頭の `.' を取り除いた基底名を作る（zellij 0.46.0 は `.' で始まる名前を扱えない）。"
+  (should (equal (zellij-send--dir-session-base "/Users/me/.emacs.d") "emacs.d"))
+  (should (equal (zellij-send--dir-session-base "/Users/me/.emacs.d/") "emacs.d"))
+  (should (equal (zellij-send--dir-session-base "/Users/me/..x") "x"))
+  (should (equal (zellij-send--dir-session-base "/Users/me/myproj") "myproj"))
+  (should (equal (zellij-send--dir-session-base "/Users/me/my.proj") "my.proj"))
+  (should (equal (zellij-send--dir-session-base "/Users/me/...") "session")))
+
 (ert-deftest zellij-send-test-session-base ()
   "連番サフィックスだけを剥がす。剥がしすぎない。"
   (should (equal (zellij-send--session-base "myproj00") "myproj"))

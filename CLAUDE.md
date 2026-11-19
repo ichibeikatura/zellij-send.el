@@ -118,7 +118,8 @@ alt-screen の TUI にはスクロールバックが無く（`dump-screen --full
   公開 API は `-ui` にあるので、ダッシュボードは `zellij-send` を require する
 
 - **エージェント 1 体 = zellij セッション 1 つ。** 名前はディレクトリ名 + 2 桁連番
-  （`myproj00`）。バッファ・履歴・subscribe・終了がセッション単位のまま効く
+  （`myproj00`）。先頭の `.` は落とす（0.46.0 は `.` で始まる名前を扱えない。
+  `zellij-send--dir-session-base`）。バッファ・履歴・subscribe・終了がセッション単位のまま効く
 - **機能の分岐はバッファローカルの `zellij-send--command` で行う。**
   `zellij-send-default-command` は新規作成時の既定値でしかない。pane-id を替えるときは
   コマンドを nil でも代入し、subscribe を張る前に確定させる（先読みが `/` を打つため）

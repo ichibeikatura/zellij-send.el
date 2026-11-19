@@ -58,6 +58,17 @@
       (match-string 1 session)
     session))
 
+;; 2026-11-19 実測（zellij 0.46.0）: `.' で始まるセッション名は内部用のソケットと
+;; みなされ、`list-sessions' に出ず、`--session' でも見つからない（"There is no
+;; active session!"）。サーバだけは立つので、作った直後から操作できない孤児になる
+;; （`~/.emacs.d' から作った `.emacs.d00'）。
+(defun zellij-send--dir-session-base (dir)
+  "ディレクトリ DIR の名前から、セッション名の基底名を作る。
+先頭の `.' は取り除く（`~/.emacs.d' → `emacs.d'）。取り除いて空なら \"session\"。"
+  (let ((name (replace-regexp-in-string
+               "\\`\\.+" "" (file-name-nondirectory (directory-file-name dir)))))
+    (if (string-empty-p name) "session" name)))
+
 (defun zellij-send--numbered-session-name (base taken)
   "BASE に 2 桁の連番を付け、TAKEN に無い最小の名前を返す。
 同じプロジェクトで複数のエージェントを立てるための命名
@@ -93,7 +104,7 @@ KNOWN-SESSIONS は連番を決めるための既存セッション名リスト�
   (let* ((dir (zellij-send--prompt-session-dir))
          (command (zellij-send--prompt-command))
          (session (zellij-send--numbered-session-name
-                   (file-name-nondirectory dir)
+                   (zellij-send--dir-session-base dir)
                    (zellij-send--taken-session-names known-sessions))))
     (zellij-send--spawn-and-show session dir command)))
 
