@@ -2605,12 +2605,44 @@ C-u で捨てたものは戻らない。"
   "セッションを作れなかったら、空の黒板を残さない。"
   (let ((name (zellij-send--buffer-name "zjs-fail00")))
     (unwind-protect
-        (cl-letf (((symbol-function 'zellij-send--zellij-async)
-                   (lambda (_args cb) (funcall cb 1)))
+        (cl-letf (((symbol-function 'zellij-send--create-session)
+                   (lambda (_session cb) (funcall cb nil)))
                   ((symbol-function 'message) #'ignore))
           (zellij-send-spawn-session "zjs-fail00" temporary-file-directory "claude")
           (should-not (get-buffer name)))
       (when (get-buffer name) (kill-buffer name)))))
+
+(ert-deftest zellij-send-test-create-session-args ()
+  "新規セッションは pty の `attach --create' で作り、COLUMNS / LINES を渡さない。
+このクライアントがサーバを起動するので、渡した環境はペインに残る。"
+  (let (got)
+    (cl-letf (((symbol-function 'zellij-send--attach-briefly)
+               (lambda (session args size env cb)
+                 (setq got (list session args size env cb)))))
+      (let ((zellij-send-session-size '(320 . 80)))
+        (zellij-send--create-session "zjs-new00" #'ignore)))
+    (should (equal (nth 0 got) "zjs-new00"))
+    (should (equal (nth 1 got) '("attach" "--create" "zjs-new00")))
+    (should (equal (nth 2 got) '(320 . 80)))
+    (should-not (seq-find (lambda (e) (string-match-p "\\`\\(COLUMNS\\|LINES\\)=" e))
+                          (nth 3 got)))
+    (should (member (concat "TERM=" zellij-send-term) (nth 3 got)))))
+
+(ert-deftest zellij-send-test-attach-briefly-ok ()
+  "一瞬の attach は、終了コード 0 なら t、0 以外なら nil を返し、印を外す。"
+  (dolist (case '(("exit 0" . t) ("exit 3" . nil)))
+    (let ((zellij-send-executable "sh")
+          (zellij-send--resizing-sessions nil)
+          (result 'unset))
+      (zellij-send--attach-briefly "zjs-brief00" (list "-c" (car case)) nil
+                                   process-environment
+                                   (lambda (ok) (setq result ok)))
+      (should (member "zjs-brief00" zellij-send--resizing-sessions))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (eq result 'unset) (< (float-time) deadline))
+          (accept-process-output nil 0.05)))
+      (should (eq result (cdr case)))
+      (should-not (member "zjs-brief00" zellij-send--resizing-sessions)))))
 
 (ert-deftest zellij-send-test-spawn-missing-dir ()
   "無いディレクトリでは黒板もセッションも作らない。"
@@ -2618,7 +2650,9 @@ C-u で捨てたものは戻らない。"
         (dir (expand-file-name "zjs-no-such-dir" (make-temp-file "zjs" t)))
         called)
     (unwind-protect
-        (cl-letf (((symbol-function 'zellij-send--zellij-async)
+        (cl-letf (((symbol-function 'zellij-send--create-session)
+                   (lambda (&rest _) (setq called t)))
+                  ((symbol-function 'zellij-send--zellij-async)
                    (lambda (&rest _) (setq called t))))
           (should-error (zellij-send-spawn-session "zjs-nodir00" dir "claude")
                         :type 'user-error)

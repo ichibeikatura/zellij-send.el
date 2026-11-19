@@ -17,8 +17,8 @@
 Emacs から detached な zellij セッションで動く AI エージェント（claude / codex / agy）を
 操作する Emacs パッケージ。成り立ちの中心は 2 点で、どちらも改善の名目で壊さない。
 
-1. **エージェントは Emacs より長生きする。** `zellij attach --create-background` で作り、
-   pane-id 指定で送受信する。Emacs の再起動・フレームを閉じる・ターミナルからの
+1. **エージェントは Emacs より長生きする。** pty を持つ `zellij attach --create` で作って
+   すぐ detach し、pane-id 指定で送受信する。Emacs の再起動・フレームを閉じる・ターミナルからの
    `zellij attach` のどれでも同じセッションが続く。
    → ACP / agent-shell（stdio でエージェントを子プロセスにする）方式には移らない。
 2. **文章を作るのは普通の Emacs バッファ。** vterm / eat を使わないので、Emacs 内で動く
@@ -69,11 +69,15 @@ Emacs から detached な zellij セッションで動く AI エージェント�
 
 ## 動かせない制約（詳細はコメントの場所へ）
 
-### 背景セッションの大きさ
-`attach --create-background` のセッションは 50 桁 × 48 行に固定。**`COLUMNS` / `LINES` は
-新規サーバでも効かない**（2026-07-28、zellij 0.44.3）。唯一効くのは目的の大きさの pty で
-一瞬 attach → detach すること（`zellij-send--resize-session`。ペインを作る前に行う）。
-この attach は全面非同期・出力を捨てる `:filter` 必須・watchdog で必ず殺す
+### 新規セッションの作り方と大きさ
+**`attach --create-background` に戻さない。** zellij 0.46.0 では、そうして作ったセッションの
+約半数が「クライアントが居ない間、subscribe に初回のイベントしか流さない」ものになり、
+黒板が止まる（作った時点で決まり、attach し直しても subscribe を張り直しても直らない）。
+新規は目的の大きさの pty で `attach --create` → 即 detach する（`zellij-send--create-session`。
+実測はその前のコメント、2026-11-19）。このクライアントがサーバを起動するので、渡した環境は
+ペインに残る——`COLUMNS` / `LINES` を渡さない（背景セッションには元々効かない。
+50 桁 × 48 行固定、2026-07-28、zellij 0.44.3）。
+一瞬の attach（作成・`zellij-send--resize-session`）は全面非同期・出力を捨てる `:filter` 必須・watchdog で必ず殺す
 （Emacs が pty を読まないと zellij サーバが書き込みでブロックし、セッション全体が固まる）。
 ターミナルの attach で縮むと detach 後も縮んだまま残る。監視が `list-clients` 0 件を
 確かめてから広げ直す（`zellij-send--restore-session-size`。実測はその前のコメント）。

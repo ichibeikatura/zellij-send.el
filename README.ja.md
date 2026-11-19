@@ -417,10 +417,10 @@ exit 0
 
 | 変数 | 意味 |
 |---|---|
-| `zellij-send-session-size` | 新しく作るセッションの (桁 . 行)（既定 `(320 . 80)`。`nil` で広げない） |
+| `zellij-send-session-size` | 新しく作るセッションの (桁 . 行)（既定 `(320 . 80)`。`nil` で Emacs の pty の既定の大きさ） |
 | `zellij-send-restore-session-size` | ターミナルで縮んだセッションを、クライアントが居なくなったら広げ直す（既定 `t`） |
-| `zellij-send-resize-detach-delay` | 拡幅用クライアントを detach するまでの秒数（既定 2.0） |
-| `zellij-send-resize-timeout` | 拡幅用クライアントを必ず殺すまでの秒数（既定 8.0） |
+| `zellij-send-resize-detach-delay` | 作成・拡幅用クライアントを detach するまでの秒数（既定 2.0） |
+| `zellij-send-resize-timeout` | 作成・拡幅用クライアントを必ず殺すまでの秒数（既定 8.0） |
 | `zellij-send-max-blank-lines` | 画面の空行の連なりを何行まで詰めるか（既定 2。`nil` で詰めない） |
 
 ### 黒板の桁揃えと折り返し
@@ -624,7 +624,7 @@ Esc で中断したときは Stop フックが来ないので、画面が `zelli
 
 ## 仕組み
 
-- 新規セッション: `zellij attach --create-background` で detached セッションを作り、一瞬 attach して広げてから `zellij run` でエージェントを起動し、返るペイン ID を以後のすべての操作に使う
+- 新規セッション: 目的の大きさの pty を持つ `zellij attach --create` でセッションを作ってすぐ detach し、`zellij run` でエージェントを起動して、返るペイン ID を以後のすべての操作に使う（`--create-background` で作ると、zellij 0.46.0 ではクライアントの居ない間に画面の更新が届かないセッションが混じるため）
 - 送信: `zellij action paste --pane-id ID` で本文を、`zellij action write --pane-id ID 13` で Enter を送る
 - 画面: セッションごとに `zellij subscribe --pane-id ID --format json` を常駐させ、届いた画面で黒板を書き換える。手動の取得は `zellij action dump-screen`
 - 履歴: 画面からは取れないので、Claude Code の transcript（JSONL）を直接読む

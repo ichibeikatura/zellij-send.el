@@ -231,18 +231,19 @@ markdown 引用（`> 1. …'）と衝突する**ので、ここではなく
   "zellij をサブプロセス起動する際に設定する TERM 環境変数。
 Emacs はサブプロセスに既定で TERM=dumb を渡すため、これがそのまま
 zellij サーバ・ペインに継承され、ペイン内のシェルでも TERM=dumb と
-なり starship 等が無効化される。サーバを起動する `attach
---create-background' とペインを生む `run' をこの値で起動して回避する。"
+なり starship 等が無効化される。サーバを起動する `attach --create'
+（`zellij-send--create-session'）とペインを生む `run' をこの値で起動して回避する。"
   :type 'string
   :group 'zellij-send)
 
 (defcustom zellij-send-session-size '(320 . 80)
-  "新規セッションを広げる大きさ (COLUMNS . LINES)。nil なら広げない。
+  "新規セッションの大きさ (COLUMNS . LINES)。nil なら Emacs の pty の既定の大きさ。
 
+新規セッションはこの大きさの pty を持つクライアントで作ってすぐ detach する
+（`zellij-send--create-session'）。縮んだセッションを広げ直すとき
+（`zellij-send--resize-session'）もこの大きさの pty で一瞬 attach する。
 `attach --create-background' で作った背景セッションは 50 桁 × 48 行に固定され、
 **環境変数 COLUMNS / LINES では変えられない**（実測。CLAUDE.md 参照）。
-唯一効くのが「この大きさの pty を持つクライアントで一瞬 attach して detach する」
-方法で、`zellij-send--resize-session' がそれを行う。
 
 Claude Code は自分でペイン幅に合わせて改行を入れて出力するので、50 桁のままだと
 日本語が 24 文字程度で折り返されて読みにくい。広げておくと長い行のまま届き、
@@ -587,8 +588,7 @@ zellij の呼び出しは作業ディレクトリに依らない（ペインの 
 終了したら CALLBACK に exit code を渡して呼ぶ（CALLBACK は省略可）。
 同期 `call-process' は使わない: Emacs の UI をブロックし、
 zellij サーバ側の都合で応答が遅れた場合にフリーズするため。
-TERM を上書きして起動する（サーバを起動する `attach
---create-background' が TERM=dumb をペインに伝播させないため）。"
+TERM を上書きして起動する（Emacs 既定の TERM=dumb をペインに伝播させないため）。"
   (let ((process-environment (zellij-send--process-environment))
         (default-directory (zellij-send--process-directory)))
     (make-process
@@ -1419,6 +1419,62 @@ attach しているクライアントが居ないことを確かめてから広�
                     (setq zellij-send--resize-tried extent))
                   (zellij-send--resize-session session)))))))))))
 
+(defun zellij-send--attach-briefly (session args size environment callback)
+  "SESSION に pty を持つクライアントを一瞬だけ繋ぎ、detach して返る。
+ARGS は zellij に渡す引数（`(\"attach\" SESSION)' など）。SIZE が
+\(COLS . ROWS) なら pty をその大きさにする。nil なら Emacs の既定のまま。
+ENVIRONMENT はクライアントの `process-environment'。
+終わったら CALLBACK に OK を渡して呼ぶ。OK は、detach して終了コード 0 で
+終わったか、watchdog が殺したとき t。クライアントが自分で 0 以外の
+終了コードで終わったとき（繋げなかった・作れなかった）nil。
+走っている間は SESSION を `zellij-send--resizing-sessions' に入れておく。"
+  (let* ((process-environment environment)
+         (default-directory (zellij-send--process-directory))
+         (finished nil)
+         detach-timer watchdog proc)
+    (setq proc
+          (make-process
+           :name (format "zellij-attach-%s" session)
+           :buffer nil
+           :noquery t
+           :connection-type 'pty
+           :command (cons zellij-send-executable args)
+           ;; 出力は捨てるが、フィルタは必ず置く（上記 2）
+           :filter #'ignore
+           :sentinel
+           (lambda (p _event)
+             (when (and (not finished)
+                        (memq (process-status p) '(exit signal)))
+               (setq finished t)
+               (setq zellij-send--resizing-sessions
+                     (delete session zellij-send--resizing-sessions))
+               (when (timerp detach-timer) (cancel-timer detach-timer))
+               (when (timerp watchdog) (cancel-timer watchdog))
+               (when callback
+                 (funcall callback
+                          (or (eq (process-status p) 'signal)
+                              (zerop (process-exit-status p)))))))))
+    ;; 起動できてから印を付ける（sentinel は終了時に外す）
+    (push session zellij-send--resizing-sessions)
+    ;; pty の大きさを与える。zellij は接続時にこれを読み、
+    ;; 後から変わっても SIGWINCH で拾う
+    (when size
+      (ignore-errors (set-process-window-size proc (cdr size) (car size))))
+    ;; 繋がってサイズが伝わるのを待ってから detach（Ctrl+o d）
+    (setq detach-timer
+          (run-at-time zellij-send-resize-detach-delay nil
+                       (lambda ()
+                         (when (process-live-p proc)
+                           (ignore-errors
+                             (process-send-string proc "\C-od"))))))
+    ;; detach が効かなくても必ず落とす（上記 3）
+    (setq watchdog
+          (run-at-time zellij-send-resize-timeout nil
+                       (lambda ()
+                         (when (process-live-p proc)
+                           (delete-process proc)))))
+    proc))
+
 (defun zellij-send--resize-session (session &optional callback)
   "SESSION を `zellij-send-session-size' の大きさに広げる。
 その大きさの pty を持つクライアントで一瞬 attach し、detach して返る。
@@ -1428,52 +1484,47 @@ attach しているクライアントが居ないことを確かめてから広�
   (let ((size zellij-send-session-size))
     (if (not size)
         (when callback (funcall callback nil))
-      (let* ((cols (car size))
-             (rows (cdr size))
-             (process-environment
-              (append (list (format "COLUMNS=%d" cols)
-                            (format "LINES=%d" rows))
-                      (zellij-send--process-environment)))
-             (default-directory (zellij-send--process-directory))
-             (finished nil)
-             detach-timer watchdog proc)
-        (setq proc
-              (make-process
-               :name (format "zellij-resize-%s" session)
-               :buffer nil
-               :noquery t
-               :connection-type 'pty
-               :command (list zellij-send-executable "attach" session)
-               ;; 出力は捨てるが、フィルタは必ず置く（上記 2）
-               :filter #'ignore
-               :sentinel
-               (lambda (p _event)
-                 (when (and (not finished)
-                            (memq (process-status p) '(exit signal)))
-                   (setq finished t)
-                   (setq zellij-send--resizing-sessions
-                         (delete session zellij-send--resizing-sessions))
-                   (when (timerp detach-timer) (cancel-timer detach-timer))
-                   (when (timerp watchdog) (cancel-timer watchdog))
-                   (when callback (funcall callback t))))))
-        ;; 起動できてから印を付ける（sentinel は終了時に外す）
-        (push session zellij-send--resizing-sessions)
-        ;; pty の大きさを与える。zellij は接続時にこれを読み、
-        ;; 後から変わっても SIGWINCH で拾う
-        (ignore-errors (set-process-window-size proc rows cols))
-        ;; 繋がってサイズが伝わるのを待ってから detach（Ctrl+o d）
-        (setq detach-timer
-              (run-at-time zellij-send-resize-detach-delay nil
-                           (lambda ()
-                             (when (process-live-p proc)
-                               (ignore-errors
-                                 (process-send-string proc "\C-od"))))))
-        ;; detach が効かなくても必ず落とす（上記 3）
-        (setq watchdog
-              (run-at-time zellij-send-resize-timeout nil
-                           (lambda ()
-                             (when (process-live-p proc)
-                               (delete-process proc)))))))))
+      (zellij-send--attach-briefly
+       session (list "attach" session) size
+       ;; サーバは既に動いているので、ここで渡す環境はペインに漏れない
+       (append (list (format "COLUMNS=%d" (car size))
+                     (format "LINES=%d" (cdr size)))
+               (zellij-send--process-environment))
+       (lambda (_ok) (when callback (funcall callback t)))))))
+
+;; 新規セッションは `attach --create-background' ではなく、pty を持つ
+;; `attach --create' で作ってすぐ detach する（`zellij-send--create-session'）。
+;;
+;; 2026-11-19 実測（zellij 0.46.0、`ZELLIJ_SOCKET_DIR' で分けた使い捨てサーバ）:
+;; - `attach --create-background' の直後に拡幅の attach（2026-11 までの手順）で
+;;   作ると、14 回中 8 回は「クライアントが繋がっていない間、subscribe に初回の
+;;   イベントしか届かない」セッションになった。ペインの中身は変わっているのに
+;;   イベントが来ず、subscribe のプロセスは生きたまま黙る。作った時点で決まり、
+;;   後から attach / detach を 6 回繰り返しても、subscribe を張り直しても
+;;   直らない。クライアントが繋がっている間だけは届く。拡幅の attach を
+;;   しない（作成後 1 秒待つ）と 8 回とも届かない。黒板の自動更新が
+;;   「ときどき止まる」の原因はこれだった（実機の shosei00・neko00 で確認）
+;; - pty を持つ `attach --create' で作って Ctrl+o d で detach すると 10 回とも
+;;   届き、大きさも同時に決まる（80 行 × 320 桁の pty でペインは 78 × 320）。
+;;   detach せずクライアントを殺しても（5 回）、サーバは別のプロセスグループに
+;;   いるのでセッションは残り、配信も生きる。detach の終了コードは 0
+;; - このクライアントがサーバを起動するので、渡した環境はサーバとペインに
+;;   引き継がれる。COLUMNS / LINES を渡すとペインの環境に残るので渡さない
+;;   （pty の大きさだけで同じ 78 × 320 になる）
+;; - 既定のシェルペインが terminal_0、`zellij run' のペインが terminal_1 に
+;;   なるのは `--create-background' と同じ
+
+(defun zellij-send--create-session (session &optional callback)
+  "SESSION という名前の zellij セッションを作り、すぐ detach して返る。
+pty を持つ `attach --create' で作る（`--create-background' を使わない理由は
+この前のコメント）。pty は `zellij-send-session-size' の大きさにする
+（nil なら Emacs が pty に与える既定の大きさ）。
+終わったら CALLBACK に、作れたなら t、クライアントが失敗して終わったなら
+nil を渡す（`zellij-send--attach-briefly' の OK）。"
+  (zellij-send--attach-briefly
+   session (list "attach" "--create" session) zellij-send-session-size
+   (zellij-send--process-environment)
+   (or callback #'ignore)))
 
 (defun zellij-send-resize-session ()
   "このバッファのセッションを `zellij-send-session-size' の大きさに広げる。

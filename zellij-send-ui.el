@@ -1395,8 +1395,9 @@ CALLBACK は `zellij-send-attach-session' と同じ。"
 (defun zellij-send-spawn-session (session dir &optional command)
   "SESSION という名前の detached zellij セッションを DIR に作り、ペインを起動する。
 COMMAND（既定は `zellij-send-default-command'）がそのペインで動く。
-attach クライアント（eat）は使わない: `zellij attach --create-background' で
-セッションを作り、`zellij run' で COMMAND を起動して返る pane-id を保持し、
+attach クライアント（eat）は使わない: pty を持つ `zellij attach --create' で
+セッションを作ってすぐ detach し（`zellij-send--create-session'）、
+`zellij run' で COMMAND を起動して返る pane-id を保持し、
 以後 --pane-id 指定で送受信する。
 黒板バッファは同期で用意して返し、cwd・pane-id は後から埋まる。表示は
 呼び出し側が行う。
@@ -1406,9 +1407,9 @@ attach クライアント（eat）は使わない: `zellij attach --create-backg
 打たないためにはペイン起動より前に確定していなければならない。
 
 DIR が無いディレクトリなら、黒板もセッションも作らずに `user-error' にする。
-`attach --create-background' は呼び出し側のバッファから起動するので DIR が
-無くても成功し、その後の拡幅とペインの起動だけが黒板の `default-directory'
-で失敗して、空の黒板とセッションが残った（2026-10-20 手元確認）。"
+セッションの作成は呼び出し側のバッファから起動するので DIR が無くても
+成功し、その後のペインの起動だけが黒板の `default-directory' で失敗して、
+空の黒板とセッションが残った（2026-10-20 手元確認）。"
   (unless (file-directory-p dir)
     (user-error "ディレクトリがありません: %s" dir))
   (let* ((command (or command zellij-send-default-command))
@@ -1416,44 +1417,41 @@ DIR が無いディレクトリなら、黒板もセッションも作らずに 
     (with-current-buffer buf
       (setq-local default-directory (file-name-as-directory dir))
       (setq-local zellij-send--command command))
-    (zellij-send--zellij-async
-     (list "attach" "--create-background" session)
-     (lambda (exit)
-       (if (not (zerop exit))
+    ;; ペインを作る前に大きさを決める。あとから作るペインはセッションの
+    ;; 大きさを継承する
+    (zellij-send--create-session
+     session
+     (lambda (ok)
+       (if (not ok)
            (progn
              ;; 空の黒板を残さない。残すと `zellij-send-sessions' に乗り、
              ;; 次の監視で消える（「空のバッファが出て、しばらくして勝手に
              ;; 消える」と見える）。打ち始めていたら入力を失わないよう残す
              (when (and (buffer-live-p buf) (not (buffer-modified-p buf)))
                (kill-buffer buf))
-             (message "zellij セッション作成に失敗しました (exit: %d)" exit))
-         ;; ペインを作る前に広げる。背景セッションは 50 桁しかなく、
-         ;; あとから作るペインは拡幅後のサイズを継承する
-         (zellij-send--resize-session
-          session
-          (lambda (_resized)
-            ;; セッション初期化を待ってから claude ペインを起動
-            (run-with-timer
-             0.5 nil
-             (lambda ()
-               (zellij-send--run-in-session-async
-                session dir (zellij-send--launch-command command session)
-                (lambda (pane-id)
-                  (if (not pane-id)
-                      (message "%s の起動に失敗しました" command)
-                    (when (buffer-live-p buf)
-                      (with-current-buffer buf
-                        (setq-local zellij-send--pane-id pane-id)
-                        (zellij-send--subscribe-ensure)))
-                    ;; `attach --create-background' が生むデフォルト shell ペイン
-                    ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
-                    ;; 致命的ではないので結果は無視する。
-                    (zellij-send--zellij-async
-                     (list "--session" session "action" "close-pane"
-                           "--pane-id" "terminal_0")
-                     #'ignore)
-                    (message "セッション [%s] を作成しました (%s / %s)"
-                             session command pane-id)))))))))))
+             (message "zellij セッション [%s] の作成に失敗しました" session))
+         ;; セッション初期化を待ってから claude ペインを起動
+         (run-with-timer
+          0.5 nil
+          (lambda ()
+            (zellij-send--run-in-session-async
+             session dir (zellij-send--launch-command command session)
+             (lambda (pane-id)
+               (if (not pane-id)
+                   (message "%s の起動に失敗しました" command)
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (setq-local zellij-send--pane-id pane-id)
+                     (zellij-send--subscribe-ensure)))
+                 ;; セッションの作成が生むデフォルト shell ペイン
+                 ;; （terminal_0）を閉じ、claude ペインだけを残す。失敗しても
+                 ;; 致命的ではないので結果は無視する。
+                 (zellij-send--zellij-async
+                  (list "--session" session "action" "close-pane"
+                        "--pane-id" "terminal_0")
+                  #'ignore)
+                 (message "セッション [%s] を作成しました (%s / %s)"
+                          session command pane-id)))))))))
     buf))
 
 (define-obsolete-variable-alias 'zellij-send-dashboard-auto-connect
@@ -1520,7 +1518,7 @@ zellij 側で終了したセッションの黒板を片付けるために使う
 (defconst zellij-send--prune-grace 30.0
   "作ってからこの秒数のうちは、`list-sessions' に無くても黒板を片付けない。
 新規作成（`zellij-send-spawn-session'）は黒板を先に作り、セッションは
-`attach --create-background' が返ってからできる。その間に始まった検出の
+作成のクライアント（`zellij-send--create-session'）が繋がってからできる。その間に始まった検出の
 一覧には新しいセッションが載っていないので、片付けると作ったばかりの黒板を
 消してしまう。監視をダッシュボードの外でも動かすようにした（2026-10-20）ので、
 踏む機会が増えた。

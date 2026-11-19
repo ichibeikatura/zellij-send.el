@@ -417,10 +417,10 @@ A background session created by `[New]` is only 50 columns by 48 lines by defaul
 
 | Option | Meaning |
 |---|---|
-| `zellij-send-session-size` | (COLUMNS . LINES) for new sessions (default `(320 . 80)`; `nil` disables) |
+| `zellij-send-session-size` | (COLUMNS . LINES) for new sessions (default `(320 . 80)`; `nil` uses Emacs's default pty size) |
 | `zellij-send-restore-session-size` | Widen a session left shrunk by a terminal once no client is attached (default `t`) |
-| `zellij-send-resize-detach-delay` | Seconds before the resize client detaches (default 2.0) |
-| `zellij-send-resize-timeout` | Seconds before the resize client is killed no matter what (default 8.0) |
+| `zellij-send-resize-detach-delay` | Seconds before the create/resize client detaches (default 2.0) |
+| `zellij-send-resize-timeout` | Seconds before the create/resize client is killed no matter what (default 8.0) |
 | `zellij-send-max-blank-lines` | Squeeze runs of blank lines down to this many (default 2; `nil` keeps them) |
 
 ### Column alignment and wrapping
@@ -627,7 +627,7 @@ An interrupt with Esc fires no Stop hook, so once the screen has been still for 
 
 ## How It Works
 
-- **New session**: `zellij attach --create-background` creates a detached session; it is widened by attaching for a moment, then `zellij run` starts the agent and the returned pane id is used for every later command
+- **New session**: `zellij attach --create` on a pty of the target size creates the session and detaches at once; `zellij run` then starts the agent and the returned pane id is used for every later command (with `--create-background`, zellij 0.46.0 makes some sessions that stop sending screen updates while no client is attached)
 - **Sending**: `zellij action paste --pane-id ID` sends the text, `zellij action write --pane-id ID 13` sends Enter
 - **Screen**: one `zellij subscribe --pane-id ID --format json` process per session streams the pane into the blackboard; manual refreshes use `zellij action dump-screen`
 - **History**: the pane cannot provide it, so Claude Code's transcript JSONL is read directly
