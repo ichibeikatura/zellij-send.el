@@ -1492,9 +1492,16 @@ zellij 側で終了したセッションの黒板を片付けるために使う
   :group 'zellij-send)
 
 (defvar zellij-send-sessions-changed-hook nil
-  "セッションの突き合わせで黒板が増えた・消えたときに走るフック（引数なし）。
+  "セッションの突き合わせで黒板が増えた・消えたとき、または zellij の
+セッション一覧が前回と変わったときに走るフック（引数なし）。
 接続は 1 つ用意できるたびに走る。ダッシュボードが一覧の再描画を足す
-（本体はダッシュボードを知らない。依存は dashboard → 本体の一方向）。")
+（本体はダッシュボードを知らない。依存は dashboard → 本体の一方向）。
+一覧の変化でも走るのは、未接続のセッション（`zellij-send-unconnected-sessions'）
+の案内を、開いた直後の突き合わせの結果で描き直すため。")
+
+(defvar zellij-send--listed-sessions nil
+  "最後に `zellij-send-sync-sessions' が取った zellij のセッション名のリスト。
+まだ取れていなければ nil。取得に失敗したときは前の値を残す。")
 
 (defvar zellij-send--session-watch-timer nil
   "セッションの監視（`zellij-send-sync-sessions' を繰り返す）タイマー。")
@@ -1528,6 +1535,13 @@ TODO(要・手元確認): 30 秒は実測ではなく、`list-sessions' のタ�
 (defun zellij-send--connected-sessions ()
   "すでに黒板バッファを持っているセッション名のリストを返す。"
   (mapcar #'zellij-send-session-name (zellij-send-sessions)))
+
+(defun zellij-send-unconnected-sessions ()
+  "起動中の zellij セッションのうち、黒板の無いものの名前のリストを返す。
+zellij は呼ばない。最後の突き合わせ（`zellij-send-sync-sessions'）で
+取った一覧を使うので、まだ一度も取れていなければ nil。"
+  (seq-difference zellij-send--listed-sessions
+                  (zellij-send--connected-sessions)))
 
 (defun zellij-send--prune-gone (sessions)
   "SESSIONS に無いセッションの黒板バッファを kill し、消した数を返す。
@@ -1571,6 +1585,10 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
              (when manual
                (message "%s" (cadr result)))
            (let* ((sessions (cadr result))
+                  (listed-changed
+                   (not (equal (sort (copy-sequence sessions) #'string<)
+                               (sort (copy-sequence zellij-send--listed-sessions)
+                                     #'string<))))
                   (new (and (or manual zellij-send-auto-connect)
                             (seq-difference
                              sessions (zellij-send--connected-sessions))))
@@ -1591,7 +1609,8 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
                   (lambda (_buf)
                     ;; 接続のたびに一覧へ反映する
                     (run-hooks 'zellij-send-sessions-changed-hook)))))
-             (when (> killed 0)
+             (setq zellij-send--listed-sessions sessions)
+             (when (or (> killed 0) listed-changed)
                (run-hooks 'zellij-send-sessions-changed-hook))
              (when (and manual (null new) (= killed 0))
                (message "新しいセッションはありません")))))))))

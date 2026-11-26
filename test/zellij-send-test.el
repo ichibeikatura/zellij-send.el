@@ -1817,6 +1817,43 @@ ASCII と日本語は拾わない（全部測ると初回に 0.64 秒固まっ�
         (zellij-send-sync-sessions)
         (should (equal attached '("zjs-new00")))))))
 
+(ert-deftest zellij-send-test-sync-sessions-unconnected ()
+  "突き合わせで取った一覧から未接続のセッションを返し、一覧が変わったときだけフックを走らせる。"
+  (let ((zellij-send--scanning nil)
+        (zellij-send--listed-sessions nil)
+        (zellij-send-prune-gone nil)
+        (zellij-send-auto-connect nil)
+        (zellij-send-sessions-changed-hook nil)
+        (listed '(:ok ("zjs-b00" "zjs-a00")))
+        (runs 0))
+    (add-hook 'zellij-send-sessions-changed-hook (lambda () (setq runs (1+ runs))))
+    (cl-letf (((symbol-function 'zellij-send-list-sessions)
+               (lambda (cb) (funcall cb listed))))
+      (should-not (zellij-send-unconnected-sessions))
+      (zellij-send-sync-sessions)
+      (should (= runs 1))
+      (should (equal (zellij-send-unconnected-sessions) '("zjs-b00" "zjs-a00")))
+      ;; 並びが違うだけなら変化とみなさない
+      (setq listed '(:ok ("zjs-a00" "zjs-b00")))
+      (zellij-send-sync-sessions)
+      (should (= runs 1))
+      ;; 取得に失敗しても前の一覧を残す
+      (setq listed '(:failed "タイムアウト"))
+      (zellij-send-sync-sessions)
+      (should (= runs 1))
+      (should (= (length (zellij-send-unconnected-sessions)) 2))
+      (setq listed '(:ok ("zjs-a00")))
+      (zellij-send-sync-sessions)
+      (should (= runs 2))
+      (should (equal (zellij-send-unconnected-sessions) '("zjs-a00"))))))
+
+(ert-deftest zellij-send-test-dashboard-empty-message ()
+  "一覧が空のときは、未接続のセッションがあれば数と G を案内する。"
+  (should (string-match-p "未接続の zellij セッションが 2 個.*G で接続.*zjs-a00, zjs-b00"
+                          (zellij-send-dashboard--empty-message '("zjs-a00" "zjs-b00"))))
+  (should (string-match-p "セッションがありません.*G で"
+                          (zellij-send-dashboard--empty-message nil))))
+
 (ert-deftest zellij-send-test-prune-gone ()
   "消えたセッションの黒板を片付けて履歴を捨てる。作ったばかりの黒板と編集中の黒板は残す。"
   (let ((zellij-send--history-table (make-hash-table :test #'equal))

@@ -594,6 +594,15 @@ JSON を解釈できなかったときは、前に読めた値があればそれ
           (zellij-send-dashboard--insert-usage-line
            key (alist-get key limits) width))))))
 
+(defun zellij-send-dashboard--empty-message (unconnected)
+  "一覧が空のときの案内文を返す。UNCONNECTED は未接続のセッション名のリスト。
+自動接続（`zellij-send-auto-connect'）は既定で切ってあるので、起動中の
+セッションがあっても一覧は空になる。そのとき G で繋げることを示す。"
+  (if unconnected
+      (format "未接続の zellij セッションが %d 個あります（G で接続）: %s"
+              (length unconnected) (string-join unconnected ", "))
+    "セッションがありません（M-x zellij-send で開始、G で起動中の zellij セッションに接続）"))
+
 (defun zellij-send-dashboard-refresh ()
   "ダッシュボードを再描画する。"
   (interactive)
@@ -605,7 +614,9 @@ JSON を解釈できなかったときは、前に読めた値があればそれ
     (save-excursion
       (goto-char (point-max))
       (when (null tabulated-list-entries)
-        (insert "\n  セッションがありません（M-x zellij-send で開始）\n"))
+        (insert "\n  " (zellij-send-dashboard--empty-message
+                       (zellij-send-unconnected-sessions))
+                "\n"))
       (when zellij-send-dashboard-show-usage
         (zellij-send-dashboard--insert-usage))))
   (zellij-send-dashboard--fit-window))
