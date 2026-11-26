@@ -1462,7 +1462,9 @@ DIR が無いディレクトリなら、黒板もセッションも作らずに 
 セッションへ自動接続する（`zellij-send-start-session-watch'）。
 `zellij list-sessions' の各セッションについて cwd と pane-id を取得し
 （`zellij-send-attach-session'）、黒板バッファを用意する。
-ユーザーには何も尋ねない。nil ならダッシュボードの G を押したときだけ接続する。
+ユーザーには何も尋ねない。nil でも、接続を頼んだバッファ
+（`zellij-send-start-session-watch' の CONNECT。ダッシュボード）が
+ウィンドウに表示されている間は接続する。それ以外は G を押したときだけ。
 消えたセッションの黒板の片付け（`zellij-send-prune-gone'）は nil でも続ける。
 既定は nil。監視がダッシュボードの外でも動くようになった（2026-10-20）ので、
 t だと `zellij-send' を一度使っただけで、ターミナルで普段使いしている
@@ -1511,6 +1513,19 @@ zellij 側で終了したセッションの黒板を片付けるために使う
 監視は黒板がすべて消えたら止まるが、ダッシュボードは黒板が 0 個でも
 ターミナルで立てたセッションを取り込みたいので、自分をここに登録する。
 死んだバッファは監視のたびに除く。")
+
+(defvar zellij-send--connect-owners nil
+  "表示されている間、未接続のセッションへ自動接続させるバッファのリスト。
+`zellij-send-auto-connect' が nil でも、このどれかがウィンドウに出ていれば
+接続する（ダッシュボードを開いたら全部見えるようにするため。2026-11-26）。
+表示を条件にするのは、`quit-window' で埋もれただけのダッシュボードに
+接続を続けさせないため。死んだバッファは監視のたびに除く。")
+
+(defun zellij-send--connect-wanted-p ()
+  "接続を頼んだバッファのどれかがウィンドウに表示されていれば non-nil。"
+  (seq-some (lambda (buf)
+              (and (buffer-live-p buf) (get-buffer-window buf t)))
+            zellij-send--connect-owners))
 
 (defvar zellij-send--scanning nil
   "検出を始めた時刻（`float-time'）。検出中でなければ nil。
@@ -1567,7 +1582,9 @@ zellij は呼ばない。最後の突き合わせ（`zellij-send-sync-sessions'�
   "zellij のセッション一覧と黒板を 1 回突き合わせる。
 消えたセッションの黒板は kill し（`zellij-send-prune-gone'）、未接続の
 セッションには接続する。接続するのは `zellij-send-auto-connect' が
-non-nil か、MANUAL（ユーザーが明示的に頼んだ）が non-nil のとき。
+non-nil か、接続を頼んだバッファが表示されている
+（`zellij-send--connect-wanted-p'）か、MANUAL（ユーザーが明示的に頼んだ）が
+non-nil のとき。
 MANUAL なら結果を message する。黒板が増えた・消えたら
 `zellij-send-sessions-changed-hook' を走らせる。"
   (unless (and zellij-send--scanning
@@ -1589,7 +1606,8 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
                    (not (equal (sort (copy-sequence sessions) #'string<)
                                (sort (copy-sequence zellij-send--listed-sessions)
                                      #'string<))))
-                  (new (and (or manual zellij-send-auto-connect)
+                  (new (and (or manual zellij-send-auto-connect
+                                (zellij-send--connect-wanted-p))
                             (seq-difference
                              sessions (zellij-send--connected-sessions))))
                   (killed (if zellij-send-prune-gone
@@ -1618,22 +1636,29 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
 (defun zellij-send--session-watch-tick ()
   "監視タイマーのコールバック。黒板も登録したバッファも無くなっていたら止める。"
   (setq zellij-send--session-watch-owners
-        (seq-filter #'buffer-live-p zellij-send--session-watch-owners))
+        (seq-filter #'buffer-live-p zellij-send--session-watch-owners)
+        zellij-send--connect-owners
+        (seq-filter #'buffer-live-p zellij-send--connect-owners))
   (if (and (null zellij-send--session-watch-owners)
            (null (zellij-send-sessions)))
       (zellij-send-stop-session-watch)
     (with-demoted-errors "zellij-send: %S"
       (zellij-send-sync-sessions))))
 
-(defun zellij-send-start-session-watch (&optional owner)
+(defun zellij-send-start-session-watch (&optional owner connect)
   "`zellij-send-scan-interval' ごとにセッションを突き合わせる監視を始める。
 既に動いていれば何もしない（OWNER の登録だけする）。監視は黒板が
 すべて消えたら止まる。OWNER（バッファ）を渡すと、それが生きている間は
-黒板が 0 個でも止まらない（ダッシュボード用）。
+黒板が 0 個でも止まらない（ダッシュボード用）。CONNECT が non-nil なら、
+OWNER がウィンドウに表示されている間は `zellij-send-auto-connect' が nil
+でも未接続のセッションへ接続する（`zellij-send--connect-owners'）。
 `zellij-send' とダッシュボードを開いたときに呼ぶ。"
   (when (and (bufferp owner)
              (not (memq owner zellij-send--session-watch-owners)))
     (push owner zellij-send--session-watch-owners))
+  (when (and connect (bufferp owner)
+             (not (memq owner zellij-send--connect-owners)))
+    (push owner zellij-send--connect-owners))
   (when (and (> zellij-send-scan-interval 0)
              (null zellij-send--session-watch-timer))
     (setq zellij-send--session-watch-timer
@@ -1645,7 +1670,8 @@ MANUAL なら結果を message する。黒板が増えた・消えたら
   (when zellij-send--session-watch-timer
     (cancel-timer zellij-send--session-watch-timer)
     (setq zellij-send--session-watch-timer nil))
-  (setq zellij-send--session-watch-owners nil))
+  (setq zellij-send--session-watch-owners nil
+        zellij-send--connect-owners nil))
 
 (provide 'zellij-send-ui)
 

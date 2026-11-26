@@ -596,8 +596,8 @@ JSON を解釈できなかったときは、前に読めた値があればそれ
 
 (defun zellij-send-dashboard--empty-message (unconnected)
   "一覧が空のときの案内文を返す。UNCONNECTED は未接続のセッション名のリスト。
-自動接続（`zellij-send-auto-connect'）は既定で切ってあるので、起動中の
-セッションがあっても一覧は空になる。そのとき G で繋げることを示す。"
+表示中は自動で接続するが、接続が済むまでの間や、自動接続が届かなかった
+ときは起動中のセッションがあっても一覧は空になる。そのとき G で繋げることを示す。"
   (if unconnected
       (format "未接続の zellij セッションが %d 個あります（G で接続）: %s"
               (length unconnected) (string-join unconnected ", "))
@@ -853,8 +853,9 @@ cwd と pane-id は zellij から取得するのでユーザーには何も尋�
 ;;;###autoload
 (defun zellij-send-dashboard ()
   "zellij-send セッションのダッシュボードを開く。
-`zellij-send-auto-connect' が non-nil なら、起動中の zellij
-セッションのうちまだバッファの無いものに自動接続する。
+起動中の zellij セッションのうちまだバッファの無いものに、開いた時点と、
+表示されている間は本体の監視のたびに自動接続する
+（`zellij-send-auto-connect' が nil でも。`zellij-send-start-session-watch'）。
 開いている間は、黒板が 0 個でも本体のセッションの監視を止めない。"
   (interactive)
   (let ((buf (get-buffer-create zellij-send-dashboard-buffer-name)))
@@ -867,8 +868,8 @@ cwd と pane-id は zellij から取得するのでユーザーには何も尋�
     (with-current-buffer buf
       (zellij-send-dashboard--fit-window))
     (zellij-send-dashboard--start-timer)
-    (zellij-send-start-session-watch buf)
-    ;; 監視の初回を待たずに、開いた時点で 1 回突き合わせる
+    (zellij-send-start-session-watch buf t)
+    ;; 監視の初回を待たずに、開いた時点で 1 回突き合わせる（表示済みなので接続もする）
     (zellij-send-sync-sessions)))
 
 (provide 'zellij-send-dashboard)
